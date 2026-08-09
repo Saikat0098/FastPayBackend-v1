@@ -167,9 +167,10 @@ const processTransactionSync = async ({
     recordCustomerPayment({
       merchantId: resolvedMerchantId,
       brandId: payment.brand || null,
-      phone: payment.sender,
+      phone: payment.sender || payment.phone || payment.senderPhone || payment.accountNumber,
       amount: payment.amount,
-    }).catch(() => {});
+      name: payment.senderName || 'MFS Payer',
+    }).catch((err) => logger.error(`[Customer Sync Error] ${err.message}`));
   }
 
   // 7. Return success response

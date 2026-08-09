@@ -318,6 +318,45 @@ async function runTests() {
     const test17Passed = linksMerchantA.length === 2 && linksMerchantB.length === 0;
     recordResult(17, 'Payment links enforce tenant isolation (Merchant A links hidden from Merchant B)', test17Passed, `A count: ${linksMerchantA.length}, B count: ${linksMerchantB.length}`);
 
+    // CUSTOMER DATABASE TESTS (Problem 2)
+    const customerService = require('../services/customer.service');
+    const Customer = require('../models/Customer');
+
+    const testPhone = `0171${Math.floor(1000000 + Math.random() * 9000000)}`;
+
+    await customerService.recordCustomerPayment({
+      merchantId: merchantA._id,
+      phone: testPhone,
+      amount: 500,
+      name: 'Test Payer A',
+    });
+
+    await customerService.recordCustomerPayment({
+      merchantId: merchantA._id,
+      phone: testPhone,
+      amount: 1000,
+      name: 'Test Payer A',
+    });
+
+    const searchResA = await customerService.getCustomers({
+      merchantId: merchantA._id,
+      search: testPhone,
+    });
+
+    const test18Passed = searchResA.customers.length === 1 &&
+      searchResA.customers[0].phone === testPhone &&
+      searchResA.customers[0].totalPayments === 2 &&
+      searchResA.customers[0].totalSpentBDT === 1500;
+    recordResult(18, 'Customer record created, updated on repeat payment, and searchable by phone', test18Passed, `Phone: ${testPhone}, TotalSpent: ${searchResA.customers[0]?.totalSpentBDT}`);
+
+    const searchResB = await customerService.getCustomers({
+      merchantId: merchantB._id,
+      search: testPhone,
+    });
+
+    const test19Passed = searchResB.customers.length === 0;
+    recordResult(19, 'Customer database enforces tenant isolation (Merchant A customer hidden from Merchant B)', test19Passed, `B count: ${searchResB.customers.length}`);
+
     clientSocketA.close();
     clientSocketB.close();
 
@@ -327,6 +366,7 @@ async function runTests() {
     await ActivationKey.deleteMany({ _id: { $in: [keyA._id, keyB._id] } });
     await Payment.deleteMany({ transactionId: { $regex: testSuffix } });
     await PaymentLink.deleteMany({ _id: { $in: [linkA1._id, linkA2._id] } });
+    await Customer.deleteMany({ phone: testPhone });
 
   } catch (err) {
     console.error('Test Suite Exception:', err);

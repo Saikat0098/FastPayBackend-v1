@@ -48,7 +48,7 @@ const getAdminDashboard = asyncHandler(async (req, res) => {
     Payment.countDocuments({ status: 'PENDING' }),
     Payment.aggregate([{ $group: { _id: null, total: { $sum: '$amount' } } }]),
     Device.countDocuments(),
-    Device.countDocuments({ status: 'ACTIVE' }),
+    Device.countDocuments({ isOnline: true, status: { $ne: 'SUSPENDED' } }),
     ActivationKey.countDocuments(),
     ActivationKey.countDocuments({ isUsed: true }),
     Subscription.countDocuments({ status: 'active' }),

@@ -11,7 +11,7 @@ const customerSchema = new mongoose.Schema(
     brand: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Brand',
-      required: true,
+      required: false,
       index: true,
     },
     phone: {

@@ -37,7 +37,13 @@ const androidLogin = asyncHandler(async (req, res) => {
 
 // POST /api/android/activate
 const androidActivate = asyncHandler(async (req, res) => {
-  const { activationKey, androidId, deviceModel, deviceBrand, androidVersion, appVersion, fcmToken } = req.body;
+  const activationKey = req.body.activationKey || req.body.key || req.body.activation_key;
+  const androidId = req.body.androidId || req.body.deviceId || req.body.android_id;
+  const deviceModel = req.body.deviceModel || req.body.model || req.body.device_model;
+  const deviceBrand = req.body.deviceBrand || req.body.brand || req.body.device_brand;
+  const androidVersion = req.body.androidVersion || req.body.osVersion || req.body.android_version;
+  const appVersion = req.body.appVersion || req.body.version || req.body.app_version;
+  const fcmToken = req.body.fcmToken || req.body.fcm_token;
 
   const { device, keyDoc } = await activationService.activateDeviceWithKey({
     keyString: activationKey,
@@ -65,9 +71,10 @@ const androidActivate = asyncHandler(async (req, res) => {
     emitDeviceEvent(merchantId, 'device:connected', device);
     emitDeviceEvent(merchantId, 'device:online', device);
     emitDeviceEvent(merchantId, 'deviceConnected', device);
+    emitDeviceEvent(merchantId, 'device:updated', device);
   }
 
-  logger.info(`[API Android Activate] Key: ${activationKey}, AndroidId: ${androidId}, Brand: ${deviceBrand}, Model: ${deviceModel}`);
+  logger.info(`[API Android Activate] Key: ${activationKey}, AndroidId: ${androidId}, Brand: ${device.deviceBrand}, Model: ${device.deviceModel}, Merchant: ${merchantId}`);
 
   return res.status(200).json({
     success: true,
@@ -77,6 +84,15 @@ const androidActivate = asyncHandler(async (req, res) => {
     merchantName: merchant?.companyName || merchant?.name || 'Merchant Gateway',
     apiKey: merchant?.apiKey || '',
     expireDate: keyDoc.expireDate,
+    deviceId: device._id,
+    androidId: device.androidId,
+    deviceBrand: device.deviceBrand,
+    deviceModel: device.deviceModel,
+    androidVersion: device.androidVersion,
+    appVersion: device.appVersion,
+    status: device.status,
+    isOnline: device.isOnline,
+    lastOnline: device.lastOnline,
     device: {
       id: device._id,
       _id: device._id,
