@@ -1,0 +1,33 @@
+module.exports = {
+  USER_ROLES: {
+    SUPERADMIN: 'superadmin',
+    ADMIN: 'admin',
+    MERCHANT: 'merchant',
+    DEVICE: 'device'
+  },
+  PAYMENT_PROVIDERS: {
+    BKASH: 'bKash',
+    NAGAD: 'Nagad',
+    ROCKET: 'Rocket',
+    UPAY: 'Upay',
+    BANK: 'Bank Transfer',
+    OTHER: 'Other'
+  },
+  PAYMENT_STATUS: {
+    PENDING: 'PENDING',
+    COMPLETED: 'COMPLETED',
+    FAILED: 'FAILED',
+    CANCELLED: 'CANCELLED'
+  },
+  SYNC_STATUS: {
+    SYNCED: 'SYNCED',
+    PENDING: 'PENDING',
+    FAILED: 'FAILED'
+  },
+  DEVICE_STATUS: {
+    ACTIVE: 'ACTIVE',
+    INACTIVE: 'INACTIVE',
+    SUSPENDED: 'SUSPENDED',
+    DISCONNECTED: 'DISCONNECTED'
+  }
+};
