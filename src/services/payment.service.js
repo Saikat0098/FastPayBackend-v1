@@ -6,7 +6,7 @@ const Device = require('../models/Device');
 const Merchant = require('../models/Merchant');
 const PaymentRetry = require('../models/PaymentRetry');
 const { parseSms } = require('../utils/smsParsers');
-const { emitPaymentReceived } = require('../socket/socketManager');
+const { emitPaymentCreated, emitPaymentUpdated } = require('../socket/socketManager');
 const { sendWebhook } = require('./webhook.service');
 const { recordCustomerPayment } = require('./customer.service');
 const ApiError = require('../utils/apiError');
@@ -153,7 +153,7 @@ const processTransactionSync = async ({
     createdAt: payment.createdAt,
   };
 
-  emitPaymentReceived(resolvedMerchantId ? resolvedMerchantId.toString() : 'global', eventPayload);
+  emitPaymentCreated(resolvedMerchantId ? resolvedMerchantId.toString() : null, eventPayload);
 
   // 6. Trigger Webhook dispatch & Customer record updates asynchronously
   if (resolvedMerchantId) {
@@ -300,9 +300,53 @@ const getPayments = async ({ merchantId, isSuperAdmin = false, provider, status,
   };
 };
 
+const verifyOrUpdatePaymentStatus = async ({ paymentId, trxId, merchantId, status = 'VERIFIED', isSuperAdmin = false }) => {
+  const query = {};
+  if (paymentId && mongoose.Types.ObjectId.isValid(paymentId)) {
+    query._id = paymentId;
+  } else if (trxId) {
+    query.transactionId = trxId.trim();
+  } else {
+    throw new ApiError(400, 'Payment ID or Transaction ID is required');
+  }
+
+  if (!isSuperAdmin) {
+    if (!merchantId) throw new ApiError(403, 'Tenant context missing');
+    query.merchant = merchantId;
+  }
+
+  const payment = await Payment.findOne(query);
+  if (!payment) {
+    throw new ApiError(404, 'Payment not found or access denied');
+  }
+
+  const normStatus = status.toUpperCase();
+  payment.status = normStatus;
+  payment.paymentStatus = normStatus;
+  await payment.save();
+
+  const eventPayload = {
+    _id: payment._id,
+    id: payment._id,
+    gateway: payment.gateway,
+    provider: payment.provider,
+    transactionId: payment.transactionId,
+    amount: payment.amount,
+    sender: payment.sender,
+    status: payment.status,
+    createdAt: payment.createdAt,
+    updatedAt: payment.updatedAt,
+  };
+
+  emitPaymentUpdated(payment.merchant, eventPayload);
+
+  return payment;
+};
+
 module.exports = {
   processTransactionSync,
   processBatchSync,
   processIncomingSms,
   getPayments,
+  verifyOrUpdatePaymentStatus,
 };

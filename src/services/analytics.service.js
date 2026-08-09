@@ -9,7 +9,7 @@ const getOverviewStats = async (opts = {}) => {
   const brandId = typeof opts === 'object' ? opts.brandId : arguments[1];
   const isSuperAdmin = typeof opts === 'object' ? opts.isSuperAdmin : false;
 
-  const query = { status: { $in: ['COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'PARSED', 'SYNCED'] } };
+  const query = { status: { $in: ['COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'PARSED', 'SYNCED', 'VERIFIED'] } };
 
   if (!isSuperAdmin) {
     if (!merchantId) {
@@ -35,10 +35,33 @@ const getOverviewStats = async (opts = {}) => {
   const totalTransactions = revenueAggregation.length > 0 ? revenueAggregation[0].totalCount : 0;
 
   // 2. Breakdown by Gateway / Provider
-  const gatewayBreakdown = await Payment.aggregate([
+  const gatewayBreakdownRaw = await Payment.aggregate([
     { $match: query },
-    { $group: { _id: '$gateway', count: { $sum: 1 }, totalAmount: { $sum: '$amount' } } },
+    { $group: { _id: { $ifNull: ['$gateway', '$provider'] }, count: { $sum: 1 }, totalAmount: { $sum: '$amount' } } },
   ]);
+
+  let bkashAmount = 0;
+  let nagadAmount = 0;
+  let rocketUpayAmount = 0;
+
+  const gatewayBreakdown = gatewayBreakdownRaw.map((item) => {
+    const gw = item._id || 'bKash';
+    const percentage = totalRevenue > 0 ? Math.round((item.totalAmount / totalRevenue) * 100) : 0;
+    if (gw.toLowerCase().includes('bkash')) bkashAmount += item.totalAmount;
+    else if (gw.toLowerCase().includes('nagad')) nagadAmount += item.totalAmount;
+    else rocketUpayAmount += item.totalAmount;
+
+    return {
+      gateway: gw,
+      count: item.count,
+      totalAmount: item.totalAmount,
+      percentage,
+    };
+  });
+
+  const bkashPct = totalRevenue > 0 ? Math.round((bkashAmount / totalRevenue) * 100) : 0;
+  const nagadPct = totalRevenue > 0 ? Math.round((nagadAmount / totalRevenue) * 100) : 0;
+  const rocketPct = totalRevenue > 0 ? Math.round((rocketUpayAmount / totalRevenue) * 100) : 0;
 
   // 3. Count Customers, Devices & Brands
   const customerCount = await Customer.countDocuments(tenantFilter);
@@ -52,6 +75,14 @@ const getOverviewStats = async (opts = {}) => {
     .populate('brand', 'name slug logo');
 
   return {
+    totalVolume: totalRevenue,
+    totalCount: totalTransactions,
+    bkashShare: `${bkashPct}%`,
+    nagadShare: `${nagadPct}%`,
+    rocketShare: `${rocketPct}%`,
+    bkashPct,
+    nagadPct,
+    rocketPct,
     overview: {
       totalRevenue,
       totalTransactions,

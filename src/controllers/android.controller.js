@@ -10,6 +10,7 @@ const SmsLog = require('../models/SmsLog');
 const Merchant = require('../models/Merchant');
 const ApiError = require('../utils/apiError');
 const { generateAccessToken } = require('../config/jwt');
+const { emitDeviceEvent } = require('../socket/socketManager');
 
 // POST /api/android/login or /auth/login
 const androidLogin = asyncHandler(async (req, res) => {
@@ -55,6 +56,15 @@ const androidActivate = asyncHandler(async (req, res) => {
     role: 'device',
   });
 
+  const merchantId = merchant?._id || device.merchant;
+
+  if (merchantId) {
+    emitDeviceEvent(merchantId, 'device:activated', device);
+    emitDeviceEvent(merchantId, 'device:connected', device);
+    emitDeviceEvent(merchantId, 'device:online', device);
+    emitDeviceEvent(merchantId, 'deviceConnected', device);
+  }
+
   return res.status(200).json({
     success: true,
     message: 'Device activated successfully',
@@ -80,9 +90,15 @@ const androidHeartbeat = asyncHandler(async (req, res) => {
 
   const device = await Device.findByIdAndUpdate(
     deviceId,
-    { lastOnline: new Date(), status: 'ACTIVE' },
+    { lastOnline: new Date(), status: 'ACTIVE', isOnline: true },
     { new: true }
   );
+
+  if (device && device.merchant) {
+    emitDeviceEvent(device.merchant, 'device:heartbeat', device);
+    emitDeviceEvent(device.merchant, 'device:online', device);
+    emitDeviceEvent(device.merchant, 'device:updated', device);
+  }
 
   return res.status(200).json({
     success: true,

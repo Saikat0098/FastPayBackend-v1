@@ -1,0 +1,309 @@
+const http = require('http');
+const mongoose = require('mongoose');
+const { io: Client } = require('socket.io-client');
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '../../.env') });
+
+const app = require('../app');
+const connectDB = require('../config/db');
+const { initSocket, emitPaymentCreated, emitPaymentUpdated, emitDeviceEvent } = require('../socket/socketManager');
+const Merchant = require('../models/Merchant');
+const Device = require('../models/Device');
+const Payment = require('../models/Payment');
+const ActivationKey = require('../models/ActivationKey');
+const { generateAccessToken } = require('../config/jwt');
+const paymentService = require('../services/payment.service');
+const analyticsService = require('../services/analytics.service');
+const activationService = require('../services/activation.service');
+
+async function runTests() {
+  console.log('==================================================');
+  console.log(' STARTING FASTPAY REALTIME & TENANT ISOLATION TESTS');
+  console.log('==================================================\n');
+
+  await connectDB();
+
+  const server = http.createServer(app);
+  initSocket(server);
+
+  const PORT = 5099;
+  await new Promise((resolve) => server.listen(PORT, resolve));
+  const serverUrl = `http://localhost:${PORT}`;
+
+  const testSuffix = Date.now();
+  const testResults = [];
+
+  const recordResult = (testNum, description, passed, detail = '') => {
+    testResults.push({ testNum, description, passed, detail });
+    const symbol = passed ? '✅ PASS' : '❌ FAIL';
+    console.log(`TEST ${testNum}: ${description} -> ${symbol} ${detail ? `(${detail})` : ''}`);
+  };
+
+  try {
+    // Setup Merchants
+    const merchantA = await Merchant.create({
+      name: `Test Merchant A ${testSuffix}`,
+      email: `merchantA_${testSuffix}@test.com`,
+      password: 'password123',
+      companyName: `Store A ${testSuffix}`,
+      apiKey: `key_A_${testSuffix}`,
+      apiSecret: `sec_A_${testSuffix}`,
+      status: 'active',
+    });
+
+    const merchantB = await Merchant.create({
+      name: `Test Merchant B ${testSuffix}`,
+      email: `merchantB_${testSuffix}@test.com`,
+      password: 'password123',
+      companyName: `Store B ${testSuffix}`,
+      apiKey: `key_B_${testSuffix}`,
+      apiSecret: `sec_B_${testSuffix}`,
+      status: 'active',
+    });
+
+    const tokenA = generateAccessToken({ id: merchantA._id, merchantId: merchantA._id, role: 'MERCHANT' });
+    const tokenB = generateAccessToken({ id: merchantB._id, merchantId: merchantB._id, role: 'MERCHANT' });
+
+    // Setup Activation Keys & Devices
+    const keyA = await activationService.createActivationKey({ merchantId: merchantA._id, durationDays: 30 });
+    const keyB = await activationService.createActivationKey({ merchantId: merchantB._id, durationDays: 30 });
+
+    const { device: deviceA } = await activationService.activateDeviceWithKey({
+      keyString: keyA.key,
+      androidId: `android_A_${testSuffix}`,
+      deviceModel: 'Pixel 6',
+      deviceBrand: 'Google',
+      androidVersion: '13',
+    });
+
+    const { device: deviceB } = await activationService.activateDeviceWithKey({
+      keyString: keyB.key,
+      androidId: `android_B_${testSuffix}`,
+      deviceModel: 'Galaxy S22',
+      deviceBrand: 'Samsung',
+      androidVersion: '12',
+    });
+
+    // Create Payments
+    const payA1 = await paymentService.processTransactionSync({
+      merchantId: merchantA._id,
+      deviceId: deviceA.androidId,
+      gateway: 'bKash',
+      amount: 500,
+      sender: '01700000001',
+      transactionId: `TXA1_${testSuffix}`,
+      paymentStatus: 'COMPLETED',
+    });
+
+    const payA2 = await paymentService.processTransactionSync({
+      merchantId: merchantA._id,
+      deviceId: deviceA.androidId,
+      gateway: 'Nagad',
+      amount: 500,
+      sender: '01700000002',
+      transactionId: `TXA2_${testSuffix}`,
+      paymentStatus: 'COMPLETED',
+    });
+
+    const payB1 = await paymentService.processTransactionSync({
+      merchantId: merchantB._id,
+      deviceId: deviceB.androidId,
+      gateway: 'bKash',
+      amount: 1000,
+      sender: '01800000001',
+      transactionId: `TXB1_${testSuffix}`,
+      paymentStatus: 'COMPLETED',
+    });
+
+    const payB2 = await paymentService.processTransactionSync({
+      merchantId: merchantB._id,
+      deviceId: deviceB.androidId,
+      gateway: 'Rocket',
+      amount: 1000,
+      sender: '01800000002',
+      transactionId: `TXB2_${testSuffix}`,
+      paymentStatus: 'COMPLETED',
+    });
+
+    const payB3 = await paymentService.processTransactionSync({
+      merchantId: merchantB._id,
+      deviceId: deviceB.androidId,
+      gateway: 'Upay',
+      amount: 1000,
+      sender: '01800000003',
+      transactionId: `TXB3_${testSuffix}`,
+      paymentStatus: 'COMPLETED',
+    });
+
+    // Connect Socket Clients for Merchant A and Merchant B
+    const clientSocketA = Client(serverUrl, { auth: { token: tokenA }, reconnection: false });
+    const clientSocketB = Client(serverUrl, { auth: { token: tokenB }, reconnection: false });
+
+    await Promise.all([
+      new Promise((res) => clientSocketA.on('connect', res)),
+      new Promise((res) => clientSocketB.on('connect', res)),
+    ]);
+
+    const socketEventsA = [];
+    const socketEventsB = [];
+
+    const listenSocket = (client, list) => {
+      ['payment:created', 'payment:updated', 'payment:verified', 'payment:rejected', 'device:online', 'device:offline', 'device:heartbeat', 'paymentReceived'].forEach((ev) => {
+        client.on(ev, (data) => list.push({ event: ev, data }));
+      });
+    };
+
+    listenSocket(clientSocketA, socketEventsA);
+    listenSocket(clientSocketB, socketEventsB);
+
+    // TEST 1: Merchant A receives only Merchant A transactions
+    const txListA = await paymentService.getPayments({ merchantId: merchantA._id, isSuperAdmin: false });
+    const test1Passed = txListA.payments.every((p) => p.merchant.toString() === merchantA._id.toString()) && txListA.payments.length === 2;
+    recordResult(1, 'Merchant A receives only Merchant A transactions', test1Passed, `Fetched ${txListA.payments.length} txs for A`);
+
+    // TEST 2: Merchant B receives only Merchant B transactions
+    const txListB = await paymentService.getPayments({ merchantId: merchantB._id, isSuperAdmin: false });
+    const test2Passed = txListB.payments.every((p) => p.merchant.toString() === merchantB._id.toString()) && txListB.payments.length === 3;
+    recordResult(2, 'Merchant B receives only Merchant B transactions', test2Passed, `Fetched ${txListB.payments.length} txs for B`);
+
+    // TEST 3: Merchant A cannot access Merchant B transaction by ObjectId
+    let test3Passed = false;
+    try {
+      await paymentService.verifyOrUpdatePaymentStatus({ paymentId: payB1.payment._id, merchantId: merchantA._id, isSuperAdmin: false });
+    } catch (err) {
+      test3Passed = err.statusCode === 404 || err.message.includes('not found');
+    }
+    recordResult(3, 'Merchant A cannot access Merchant B transaction by ObjectId', test3Passed);
+
+    // TEST 4: Merchant A analytics contains only Merchant A data
+    const analyticsA = await analyticsService.getOverviewStats({ merchantId: merchantA._id, isSuperAdmin: false });
+    const test4Passed = analyticsA.totalVolume === 1000 && analyticsA.totalCount === 2;
+    recordResult(4, 'Merchant A analytics contains only Merchant A data', test4Passed, `Volume: ${analyticsA.totalVolume}, Count: ${analyticsA.totalCount}`);
+
+    // TEST 5: Merchant B analytics contains only Merchant B data
+    const analyticsB = await analyticsService.getOverviewStats({ merchantId: merchantB._id, isSuperAdmin: false });
+    const test5Passed = analyticsB.totalVolume === 3000 && analyticsB.totalCount === 3;
+    recordResult(5, 'Merchant B analytics contains only Merchant B data', test5Passed, `Volume: ${analyticsB.totalVolume}, Count: ${analyticsB.totalCount}`);
+
+    // TEST 6: Merchant A device list contains only Merchant A devices
+    const devicesA = await Device.find({ merchant: merchantA._id });
+    const test6Passed = devicesA.length === 1 && devicesA[0].androidId === deviceA.androidId;
+    recordResult(6, 'Merchant A device list contains only Merchant A devices', test6Passed, `Count: ${devicesA.length}`);
+
+    // TEST 7: Merchant B device list contains only Merchant B devices
+    const devicesB = await Device.find({ merchant: merchantB._id });
+    const test7Passed = devicesB.length === 1 && devicesB[0].androidId === deviceB.androidId;
+    recordResult(7, 'Merchant B device list contains only Merchant B devices', test7Passed, `Count: ${devicesB.length}`);
+
+    // TEST 8: Device activation associates the device with the correct merchant
+    const test8Passed = deviceA.merchant.toString() === merchantA._id.toString() && deviceB.merchant.toString() === merchantB._id.toString();
+    recordResult(8, 'Device activation associates device with correct merchant', test8Passed);
+
+    // TEST 9: Device online event updates Merchant A dashboard without refresh
+    socketEventsA.length = 0;
+    emitDeviceEvent(merchantA._id, 'device:online', { id: deviceA._id, status: 'ONLINE' });
+    await new Promise((r) => setTimeout(r, 100));
+    const test9Passed = socketEventsA.some((e) => e.event === 'device:online');
+    recordResult(9, 'Device online event updates Merchant A dashboard without refresh', test9Passed);
+
+    // TEST 10: Device offline event updates Merchant A dashboard without refresh
+    socketEventsA.length = 0;
+    emitDeviceEvent(merchantA._id, 'device:offline', { id: deviceA._id, status: 'OFFLINE' });
+    await new Promise((r) => setTimeout(r, 100));
+    const test10Passed = socketEventsA.some((e) => e.event === 'device:offline');
+    recordResult(10, 'Device offline event updates Merchant A dashboard without refresh', test10Passed);
+
+    // TEST 11: New payment event appears in Live Transactions without refresh
+    socketEventsA.length = 0;
+    const payNew = await paymentService.processTransactionSync({
+      merchantId: merchantA._id,
+      deviceId: deviceA.androidId,
+      gateway: 'bKash',
+      amount: 250,
+      sender: '01799999999',
+      transactionId: `TXA_NEW_${testSuffix}`,
+      paymentStatus: 'COMPLETED',
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    const test11Passed = socketEventsA.some((e) => e.event === 'payment:created' || e.event === 'paymentReceived');
+    recordResult(11, 'New payment event appears in Live Transactions without refresh', test11Passed);
+
+    // TEST 12: Payment status update appears without refresh
+    socketEventsA.length = 0;
+    await paymentService.verifyOrUpdatePaymentStatus({ paymentId: payNew.payment._id, merchantId: merchantA._id, status: 'VERIFIED' });
+    await new Promise((r) => setTimeout(r, 100));
+    const test12Passed = socketEventsA.some((e) => e.event === 'payment:updated' || e.event === 'payment:verified');
+    recordResult(12, 'Payment status update appears without refresh', test12Passed);
+
+    // TEST 13: Merchant A does NOT receive Merchant B Socket.IO transaction events
+    socketEventsA.length = 0;
+    socketEventsB.length = 0;
+    await paymentService.processTransactionSync({
+      merchantId: merchantB._id,
+      deviceId: deviceB.androidId,
+      gateway: 'Nagad',
+      amount: 1200,
+      sender: '01888888888',
+      transactionId: `TXB_LEAK_TEST_${testSuffix}`,
+      paymentStatus: 'COMPLETED',
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    const receivedByA = socketEventsA.filter((e) => e.data?.transactionId === `TXB_LEAK_TEST_${testSuffix}`).length;
+    const receivedByB = socketEventsB.filter((e) => e.data?.transactionId === `TXB_LEAK_TEST_${testSuffix}`).length;
+    const test13Passed = receivedByA === 0 && receivedByB > 0;
+    recordResult(13, 'Merchant A does NOT receive Merchant B Socket.IO transaction events', test13Passed, `A received: ${receivedByA}, B received: ${receivedByB}`);
+
+    // TEST 14: Merchant B does NOT receive Merchant A Socket.IO transaction events
+    socketEventsA.length = 0;
+    socketEventsB.length = 0;
+    await paymentService.processTransactionSync({
+      merchantId: merchantA._id,
+      deviceId: deviceA.androidId,
+      gateway: 'Rocket',
+      amount: 750,
+      sender: '01777777777',
+      transactionId: `TXA_LEAK_TEST_${testSuffix}`,
+      paymentStatus: 'COMPLETED',
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    const receivedByBForA = socketEventsB.filter((e) => e.data?.transactionId === `TXA_LEAK_TEST_${testSuffix}`).length;
+    const receivedByAForA = socketEventsA.filter((e) => e.data?.transactionId === `TXA_LEAK_TEST_${testSuffix}`).length;
+    const test14Passed = receivedByBForA === 0 && receivedByAForA > 0;
+    recordResult(14, 'Merchant B does NOT receive Merchant A Socket.IO transaction events', test14Passed, `B received: ${receivedByBForA}, A received: ${receivedByAForA}`);
+
+    // TEST 15: Dashboard revenue is calculated only from the authenticated merchant
+    const dashboardA = await analyticsService.getOverviewStats({ merchantId: merchantA._id, isSuperAdmin: false });
+    const dashboardB = await analyticsService.getOverviewStats({ merchantId: merchantB._id, isSuperAdmin: false });
+    const test15Passed = dashboardA.totalVolume === 2000 && dashboardB.totalVolume === 4200; // A: 500+500+250+750=2000, B: 1000+1000+1000+1200=4200
+    recordResult(15, 'Dashboard revenue calculated only from authenticated merchant', test15Passed, `Dash A: ৳${dashboardA.totalVolume}, Dash B: ৳${dashboardB.totalVolume}`);
+
+    clientSocketA.close();
+    clientSocketB.close();
+
+    // Clean up test data
+    await Merchant.deleteMany({ _id: { $in: [merchantA._id, merchantB._id] } });
+    await Device.deleteMany({ _id: { $in: [deviceA._id, deviceB._id] } });
+    await ActivationKey.deleteMany({ _id: { $in: [keyA._id, keyB._id] } });
+    await Payment.deleteMany({ transactionId: { $regex: testSuffix } });
+
+  } catch (err) {
+    console.error('Test Suite Exception:', err);
+  } finally {
+    server.close();
+    await mongoose.connection.close();
+  }
+
+  console.log('\n==================================================');
+  const allPassed = testResults.every((t) => t.passed);
+  const passCount = testResults.filter((t) => t.passed).length;
+  console.log(` OVERALL TEST SUMMARY: ${passCount} / ${testResults.length} PASSED`);
+  console.log('==================================================');
+
+  if (!allPassed) {
+    process.exit(1);
+  } else {
+    process.exit(0);
+  }
+}
+
+runTests();

@@ -94,9 +94,28 @@ const getPaymentDetail = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, payment, 'Payment detail fetched');
 });
 
+// POST /api/v1/payments/verify
+const verifyPayment = asyncHandler(async (req, res) => {
+  const isSuperAdmin = req.user && (req.user.role === 'superadmin' || req.user.role === 'SUPER_ADMIN' || req.user.role === 'admin');
+  const merchantId = req.merchantId || req.merchant?._id;
+  const { trxId, transactionId, status, paymentId } = req.body;
+  const id = req.params.id || paymentId;
+
+  const payment = await paymentService.verifyOrUpdatePaymentStatus({
+    paymentId: id,
+    trxId: trxId || transactionId,
+    merchantId,
+    status: status || 'VERIFIED',
+    isSuperAdmin,
+  });
+
+  return ApiResponse.success(res, payment, 'Payment verified successfully');
+});
+
 module.exports = {
   syncPayment,
   getPaymentsList,
   getPaymentDetail,
+  verifyPayment,
 };
 

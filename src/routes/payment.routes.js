@@ -8,6 +8,8 @@ const { enforceTenant } = require('../middlewares/tenant.middleware');
 router.post('/sync', paymentController.syncPayment);
 
 // List & Detail Payments Endpoints
+router.post('/verify', verifyToken, enforceTenant, paymentController.verifyPayment);
+router.put('/:id/status', verifyToken, enforceTenant, paymentController.verifyPayment);
 router.get('/list', verifyToken, enforceTenant, paymentController.getPaymentsList);
 router.get('/', verifyToken, enforceTenant, paymentController.getPaymentsList);
 router.get('/:id', verifyToken, enforceTenant, paymentController.getPaymentDetail);

@@ -58,6 +58,11 @@ const paymentSchema = new mongoose.Schema(
       required: false,
       index: true,
     },
+    brand: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Brand',
+      required: false,
+    },
     receiver: {
       type: String,
       default: 'Merchant',
@@ -76,7 +81,7 @@ const paymentSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['PENDING', 'COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'FAILED', 'CANCELLED', 'DUPLICATE', 'PARSED', 'SYNCED'],
+      enum: ['PENDING', 'COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'FAILED', 'CANCELLED', 'DUPLICATE', 'PARSED', 'SYNCED', 'VERIFIED', 'REJECTED'],
       default: 'COMPLETED',
     },
     paymentStatus: {

@@ -5,6 +5,7 @@ const Payment = require('../models/Payment');
 const Device = require('../models/Device');
 const ApiError = require('../utils/apiError');
 
+const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
 
 const getDashboardStats = asyncHandler(async (req, res) => {
@@ -13,20 +14,23 @@ const getDashboardStats = asyncHandler(async (req, res) => {
     throw new ApiError(403, 'Tenant context missing');
   }
 
+  const mObjectId = new mongoose.Types.ObjectId(merchantId.toString());
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
 
+  const successfulStatuses = ['COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'VERIFIED', 'SYNCED', 'PARSED'];
+
   const [totalPayments, todayPayments, activeDevices, recentPayments] = await Promise.all([
     Payment.aggregate([
-      { $match: { merchant: merchantId, isTestData: { $ne: true } } },
+      { $match: { merchant: mObjectId, status: { $in: successfulStatuses }, isTestData: { $ne: true } } },
       { $group: { _id: null, totalAmount: { $sum: '$amount' }, count: { $sum: 1 } } }
     ]),
     Payment.aggregate([
-      { $match: { merchant: merchantId, createdAt: { $gte: todayStart }, isTestData: { $ne: true } } },
+      { $match: { merchant: mObjectId, createdAt: { $gte: todayStart }, status: { $in: successfulStatuses }, isTestData: { $ne: true } } },
       { $group: { _id: null, totalAmount: { $sum: '$amount' }, count: { $sum: 1 } } }
     ]),
-    Device.countDocuments({ merchant: merchantId, status: 'ACTIVE' }),
-    Payment.find({ merchant: merchantId }).sort({ createdAt: -1 }).limit(10)
+    Device.countDocuments({ merchant: mObjectId, isOnline: true, status: 'ACTIVE' }),
+    Payment.find({ merchant: mObjectId }).sort({ createdAt: -1 }).limit(10)
   ]);
 
   return ApiResponse.success(res, {
