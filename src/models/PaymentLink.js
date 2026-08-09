@@ -11,10 +11,16 @@ const paymentLinkSchema = new mongoose.Schema(
     brand: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Brand',
-      required: true,
+      required: false,
       index: true,
     },
     code: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+    },
+    uniqueCode: {
       type: String,
       required: true,
       unique: true,

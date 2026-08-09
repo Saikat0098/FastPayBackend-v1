@@ -29,7 +29,7 @@ const getDashboardStats = asyncHandler(async (req, res) => {
       { $match: { merchant: mObjectId, createdAt: { $gte: todayStart }, status: { $in: successfulStatuses }, isTestData: { $ne: true } } },
       { $group: { _id: null, totalAmount: { $sum: '$amount' }, count: { $sum: 1 } } }
     ]),
-    Device.countDocuments({ merchant: mObjectId, isOnline: true, status: 'ACTIVE' }),
+    Device.countDocuments({ merchant: mObjectId, isOnline: true, status: { $ne: 'SUSPENDED' } }),
     Payment.find({ merchant: mObjectId }).sort({ createdAt: -1 }).limit(10)
   ]);
 

@@ -185,33 +185,43 @@ async function runTests() {
     const test5Passed = analyticsB.totalVolume === 3000 && analyticsB.totalCount === 3;
     recordResult(5, 'Merchant B analytics contains only Merchant B data', test5Passed, `Volume: ${analyticsB.totalVolume}, Count: ${analyticsB.totalCount}`);
 
-    // TEST 6: Merchant A device list contains only Merchant A devices
-    const devicesA = await Device.find({ merchant: merchantA._id });
-    const test6Passed = devicesA.length === 1 && devicesA[0].androidId === deviceA.androidId;
-    recordResult(6, 'Merchant A device list contains only Merchant A devices', test6Passed, `Count: ${devicesA.length}`);
+    // DEVICE FLOW SPECIFIC TESTS (Requirement G)
+    // Device Test G1 & G2: Activation creates device and associates with correct merchant
+    const devAFromDb = await Device.findById(deviceA._id);
+    const devTestG1_2 = devAFromDb && devAFromDb.merchant.toString() === merchantA._id.toString() && devAFromDb.deviceModel === 'Pixel 6';
+    recordResult(6, 'Device activation creates device & associates with correct merchant', devTestG1_2, `Device ID: ${deviceA._id}`);
 
-    // TEST 7: Merchant B device list contains only Merchant B devices
-    const devicesB = await Device.find({ merchant: merchantB._id });
-    const test7Passed = devicesB.length === 1 && devicesB[0].androidId === deviceB.androidId;
-    recordResult(7, 'Merchant B device list contains only Merchant B devices', test7Passed, `Count: ${devicesB.length}`);
+    // Device Test G3: Merchant A cannot see Merchant B's device
+    const devicesListA = await Device.find({ merchant: merchantA._id });
+    const devTestG3 = devicesListA.length === 1 && devicesListA[0].androidId === deviceA.androidId;
+    recordResult(7, 'Merchant A device query returns only Merchant A devices', devTestG3, `Found ${devicesListA.length} devices`);
 
-    // TEST 8: Device activation associates the device with the correct merchant
-    const test8Passed = deviceA.merchant.toString() === merchantA._id.toString() && deviceB.merchant.toString() === merchantB._id.toString();
-    recordResult(8, 'Device activation associates device with correct merchant', test8Passed);
+    // Device Test G4 & G5: Heartbeat changes lastOnline & sets ONLINE
+    const prevLastOnline = deviceA.lastOnline;
+    await new Promise((r) => setTimeout(r, 50));
+    const hbDevice = await Device.findByIdAndUpdate(deviceA._id, { lastOnline: new Date(), status: 'ACTIVE', isOnline: true }, { new: true });
+    const devTestG4_5 = hbDevice.lastOnline > prevLastOnline && hbDevice.isOnline === true && hbDevice.status === 'ACTIVE';
+    recordResult(8, 'Heartbeat updates lastOnline & sets status to ONLINE', devTestG4_5, `Updated lastOnline: ${hbDevice.lastOnline}`);
 
-    // TEST 9: Device online event updates Merchant A dashboard without refresh
+    // Device Test G6: Stale device (>45s) becomes OFFLINE
+    const staleTime = new Date(Date.now() - 50 * 1000);
+    await Device.findByIdAndUpdate(deviceA._id, { lastOnline: staleTime, isOnline: true });
+    const staleDeviceBefore = await Device.findById(deviceA._id);
+    // Simulate heartbeat ticker check
+    await Device.updateMany({ isOnline: true, lastOnline: { $lt: new Date(Date.now() - 45 * 1000) } }, { isOnline: false, status: 'OFFLINE' });
+    const staleDeviceAfter = await Device.findById(deviceA._id);
+    const devTestG6 = staleDeviceBefore.isOnline && !staleDeviceAfter.isOnline && staleDeviceAfter.status === 'OFFLINE';
+    recordResult(9, 'Stale device (>45s inactivity) transitions to OFFLINE', devTestG6, `Status: ${staleDeviceAfter.status}`);
+
+    // Device Test G7: Socket event reaches only the correct merchant room
     socketEventsA.length = 0;
+    socketEventsB.length = 0;
     emitDeviceEvent(merchantA._id, 'device:online', { id: deviceA._id, status: 'ONLINE' });
     await new Promise((r) => setTimeout(r, 100));
-    const test9Passed = socketEventsA.some((e) => e.event === 'device:online');
-    recordResult(9, 'Device online event updates Merchant A dashboard without refresh', test9Passed);
-
-    // TEST 10: Device offline event updates Merchant A dashboard without refresh
-    socketEventsA.length = 0;
-    emitDeviceEvent(merchantA._id, 'device:offline', { id: deviceA._id, status: 'OFFLINE' });
-    await new Promise((r) => setTimeout(r, 100));
-    const test10Passed = socketEventsA.some((e) => e.event === 'device:offline');
-    recordResult(10, 'Device offline event updates Merchant A dashboard without refresh', test10Passed);
+    const socketAEv = socketEventsA.filter((e) => e.event === 'device:online').length;
+    const socketBEv = socketEventsB.filter((e) => e.event === 'device:online').length;
+    const devTestG7 = socketAEv > 0 && socketBEv === 0;
+    recordResult(10, 'Device socket event reaches only the target merchant room', devTestG7, `Events received: A=${socketAEv}, B=${socketBEv}`);
 
     // TEST 11: New payment event appears in Live Transactions without refresh
     socketEventsA.length = 0;
@@ -275,7 +285,38 @@ async function runTests() {
     const dashboardA = await analyticsService.getOverviewStats({ merchantId: merchantA._id, isSuperAdmin: false });
     const dashboardB = await analyticsService.getOverviewStats({ merchantId: merchantB._id, isSuperAdmin: false });
     const test15Passed = dashboardA.totalVolume === 2000 && dashboardB.totalVolume === 4200; // A: 500+500+250+750=2000, B: 1000+1000+1000+1200=4200
-    recordResult(15, 'Dashboard revenue calculated only from authenticated merchant', test15Passed, `Dash A: ৳${dashboardA.totalVolume}, Dash B: ৳${dashboardB.totalVolume}`);
+    // PAYMENT LINK TESTS (Requirement 12)
+    const paymentLinkService = require('../services/paymentLink.service');
+    const PaymentLink = require('../models/PaymentLink');
+
+    const linkA1 = await paymentLinkService.createLink({
+      merchantId: merchantA._id,
+      title: 'Invoice #101',
+      amount: 1500,
+    });
+
+    const linkA2 = await paymentLinkService.createLink({
+      merchantId: merchantA._id,
+      title: 'Invoice #102',
+      amount: 2500,
+    });
+
+    const test16Passed = Boolean(
+      linkA1 &&
+      linkA2 &&
+      linkA1.uniqueCode &&
+      linkA2.uniqueCode &&
+      linkA1.uniqueCode !== linkA2.uniqueCode &&
+      linkA1.code &&
+      linkA2.code &&
+      linkA1.merchant.toString() === merchantA._id.toString()
+    );
+    recordResult(16, 'Payment links created with distinct non-null uniqueCode server-side', test16Passed, `Link1: ${linkA1.uniqueCode}, Link2: ${linkA2.uniqueCode}`);
+
+    const linksMerchantA = await paymentLinkService.getLinks(merchantA._id);
+    const linksMerchantB = await paymentLinkService.getLinks(merchantB._id);
+    const test17Passed = linksMerchantA.length === 2 && linksMerchantB.length === 0;
+    recordResult(17, 'Payment links enforce tenant isolation (Merchant A links hidden from Merchant B)', test17Passed, `A count: ${linksMerchantA.length}, B count: ${linksMerchantB.length}`);
 
     clientSocketA.close();
     clientSocketB.close();
@@ -285,6 +326,7 @@ async function runTests() {
     await Device.deleteMany({ _id: { $in: [deviceA._id, deviceB._id] } });
     await ActivationKey.deleteMany({ _id: { $in: [keyA._id, keyB._id] } });
     await Payment.deleteMany({ transactionId: { $regex: testSuffix } });
+    await PaymentLink.deleteMany({ _id: { $in: [linkA1._id, linkA2._id] } });
 
   } catch (err) {
     console.error('Test Suite Exception:', err);

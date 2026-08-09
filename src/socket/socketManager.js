@@ -132,11 +132,13 @@ const initSocket = (server) => {
 
         for (const dev of staleDevices) {
           dev.isOnline = false;
-          dev.status = 'DISCONNECTED';
+          dev.status = 'OFFLINE';
+          dev.socketConnected = false;
           await dev.save();
 
           if (dev.merchant) {
             const mId = dev.merchant.toString();
+            logger.info(`[Device Ticker] Stale device ${dev.androidId} (${dev._id}) marked OFFLINE for merchant ${mId}`);
             emitDeviceEvent(mId, 'device:offline', dev);
             emitDeviceEvent(mId, 'deviceDisconnected', dev);
           }

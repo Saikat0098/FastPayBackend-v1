@@ -11,6 +11,8 @@ const Merchant = require('../models/Merchant');
 const ApiError = require('../utils/apiError');
 const { generateAccessToken } = require('../config/jwt');
 const { emitDeviceEvent } = require('../socket/socketManager');
+const logger = require('../config/logger');
+const mongoose = require('mongoose');
 
 // POST /api/android/login or /auth/login
 const androidLogin = asyncHandler(async (req, res) => {
@@ -65,6 +67,8 @@ const androidActivate = asyncHandler(async (req, res) => {
     emitDeviceEvent(merchantId, 'deviceConnected', device);
   }
 
+  logger.info(`[API Android Activate] Key: ${activationKey}, AndroidId: ${androidId}, Brand: ${deviceBrand}, Model: ${deviceModel}`);
+
   return res.status(200).json({
     success: true,
     message: 'Device activated successfully',
@@ -75,26 +79,51 @@ const androidActivate = asyncHandler(async (req, res) => {
     expireDate: keyDoc.expireDate,
     device: {
       id: device._id,
+      _id: device._id,
       androidId: device.androidId,
+      deviceBrand: device.deviceBrand,
+      deviceModel: device.deviceModel,
+      androidVersion: device.androidVersion,
+      appVersion: device.appVersion,
       status: device.status,
+      isOnline: device.isOnline,
+      lastOnline: device.lastOnline,
     },
   });
 });
 
 // POST /api/android/heartbeat
 const androidHeartbeat = asyncHandler(async (req, res) => {
-  const deviceId = req.device?._id || req.body.deviceId;
-  if (!deviceId) {
-    throw new ApiError(400, 'Device ID required');
+  const inputId = req.device?._id || req.body.deviceId || req.body.androidId;
+  if (!inputId) {
+    throw new ApiError(400, 'Device ID or Android ID required');
   }
 
-  const device = await Device.findByIdAndUpdate(
-    deviceId,
+  const isMongoId = mongoose.Types.ObjectId.isValid(inputId.toString());
+  const query = {
+    $or: [
+      { androidId: inputId.toString() },
+      ...(isMongoId ? [{ _id: inputId }] : []),
+    ],
+  };
+
+  if (req.device?.merchant || req.merchantId) {
+    query.merchant = req.device?.merchant || req.merchantId;
+  }
+
+  const device = await Device.findOneAndUpdate(
+    query,
     { lastOnline: new Date(), status: 'ACTIVE', isOnline: true },
     { new: true }
   );
 
-  if (device && device.merchant) {
+  if (!device) {
+    throw new ApiError(404, 'Device not found for heartbeat');
+  }
+
+  logger.info(`[API Android Heartbeat] Received from device: ${device.androidId} (${device._id}) for merchant: ${device.merchant}`);
+
+  if (device.merchant) {
     emitDeviceEvent(device.merchant, 'device:heartbeat', device);
     emitDeviceEvent(device.merchant, 'device:online', device);
     emitDeviceEvent(device.merchant, 'device:updated', device);
@@ -103,6 +132,7 @@ const androidHeartbeat = asyncHandler(async (req, res) => {
   return res.status(200).json({
     success: true,
     status: device?.status || 'ACTIVE',
+    isOnline: device?.isOnline ?? true,
     lastOnline: device?.lastOnline || new Date(),
     message: 'Heartbeat received',
   });

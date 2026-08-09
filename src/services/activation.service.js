@@ -1,6 +1,7 @@
 const ActivationKey = require('../models/ActivationKey');
 const Device = require('../models/Device');
 const ApiError = require('../utils/apiError');
+const logger = require('../config/logger');
 
 const generateKeyString = () => {
   const seg = () => Math.random().toString(36).substring(2, 6).toUpperCase();
@@ -66,6 +67,8 @@ const activateDeviceWithKey = async ({
     });
   }
 
+  device.merchant = keyDoc.merchant;
+  device.activationKey = keyDoc._id;
   device.deviceId = androidId;
 
   device.deviceModel = deviceModel || device.deviceModel || 'Android Device';
@@ -74,6 +77,7 @@ const activateDeviceWithKey = async ({
   device.appVersion = appVersion || device.appVersion || '1.0.0';
   device.fcmToken = fcmToken || device.fcmToken || '';
   device.status = 'ACTIVE';
+  device.isOnline = true;
   device.lastOnline = new Date();
   await device.save();
 
@@ -83,6 +87,8 @@ const activateDeviceWithKey = async ({
     keyDoc.activationTime = new Date();
     await keyDoc.save();
   }
+
+  logger.info(`[Device Activation] Device ${androidId} (${device.deviceBrand} ${device.deviceModel}) activated and bound to merchant ${keyDoc.merchant}`);
 
   return { device, keyDoc };
 };

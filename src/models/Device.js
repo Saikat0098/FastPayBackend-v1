@@ -39,7 +39,7 @@ const deviceSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['ACTIVE', 'INACTIVE', 'SUSPENDED', 'DISCONNECTED'],
+      enum: ['ACTIVE', 'INACTIVE', 'SUSPENDED', 'DISCONNECTED', 'ONLINE', 'OFFLINE'],
       default: 'ACTIVE',
     },
     lastOnline: {

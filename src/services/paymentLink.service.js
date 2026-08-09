@@ -4,38 +4,60 @@ const ApiError = require('../utils/apiError');
 const crypto = require('crypto');
 
 const createLink = async ({ merchantId, brandId, title, amount, customerName, customerPhone, customerEmail, expiresInHours = 24 }) => {
-  const brand = await Brand.findOne({ _id: brandId, merchant: merchantId });
-  if (!brand) throw new ApiError(400, 'Brand not found or invalid');
+  if (!merchantId) throw new ApiError(403, 'Tenant context missing');
 
-  const code = `pl_${crypto.randomBytes(6).toString('hex')}`;
-  const expiresAt = new Date(Date.now() + expiresInHours * 60 * 60 * 1000);
+  let resolvedBrand = null;
+  if (brandId) {
+    resolvedBrand = await Brand.findOne({ _id: brandId, merchant: merchantId });
+    if (!resolvedBrand) throw new ApiError(400, 'Brand not found or invalid');
+  } else {
+    resolvedBrand = await Brand.findOne({ merchant: merchantId });
+  }
 
-  const link = await PaymentLink.create({
-    merchant: merchantId,
-    brand: brandId,
-    code,
-    title,
-    amount,
-    customerName: customerName || '',
-    customerPhone: customerPhone || '',
-    customerEmail: customerEmail || '',
-    status: 'PENDING',
-    expiresAt,
-  });
+  const expiresAt = new Date(Date.now() + Number(expiresInHours) * 60 * 60 * 1000);
+  const maxAttempts = 5;
 
-  return link;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const generatedCode = `pl_${crypto.randomBytes(8).toString('hex')}`;
+    try {
+      const link = await PaymentLink.create({
+        merchant: merchantId,
+        brand: resolvedBrand ? resolvedBrand._id : null,
+        code: generatedCode,
+        uniqueCode: generatedCode,
+        title,
+        amount: Number(amount),
+        customerName: customerName || '',
+        customerPhone: customerPhone || '',
+        customerEmail: customerEmail || '',
+        status: 'PENDING',
+        expiresAt,
+      });
+      return link;
+    } catch (err) {
+      if (err.code === 11000 && attempt < maxAttempts) {
+        continue;
+      }
+      throw err;
+    }
+  }
 };
 
 const getLinks = async (merchantId, brandId) => {
+  if (!merchantId) throw new ApiError(403, 'Tenant context missing');
   const query = { merchant: merchantId };
   if (brandId) query.brand = brandId;
   return await PaymentLink.find(query).populate('brand', 'name slug logo').sort({ createdAt: -1 });
 };
 
 const getPublicLink = async (code) => {
-  const link = await PaymentLink.findOne({ code }).populate('brand');
+  if (!code) throw new ApiError(400, 'Payment link code required');
+  const link = await PaymentLink.findOne({
+    $or: [{ code: code }, { uniqueCode: code }],
+  }).populate('brand');
+
   if (!link) throw new ApiError(404, 'Payment link not found');
-  if (link.expiresAt && link.expiresAt < new Date()) {
+  if (link.expiresAt && new Date(link.expiresAt) < new Date()) {
     link.status = 'EXPIRED';
     await link.save();
     throw new ApiError(410, 'Payment link has expired');
