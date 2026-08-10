@@ -438,7 +438,7 @@ async function runTests() {
     const test23Passed = sameKeyRebind.device._id.toString() === deviceA._id.toString() && sameKeyRebind.device.deviceModel === 'Pixel 6 Rebound';
     recordResult(23, 'Factory reset/reinstall using SAME key rebinds existing device without duplicates', test23Passed, `Device ID: ${sameKeyRebind.device._id}`);
 
-    // Test 24: Different device identity trying to use used key is rejected
+    // Test 24: Different device identity trying to use used key is rejected with ACTIVATION_KEY_ALREADY_USED
     let diffDeviceKeyErr = null;
     try {
       await activationService.activateDeviceWithKey({
@@ -448,10 +448,10 @@ async function runTests() {
     } catch (e) {
       diffDeviceKeyErr = e;
     }
-    const test24Passed = diffDeviceKeyErr && diffDeviceKeyErr.message.includes('registered to another device');
-    recordResult(24, 'Different device identity trying to use used key is rejected', test24Passed, `Error: ${diffDeviceKeyErr?.message}`);
+    const test24Passed = Boolean(diffDeviceKeyErr && diffDeviceKeyErr.code === 'ACTIVATION_KEY_ALREADY_USED' && diffDeviceKeyErr.userMessage);
+    recordResult(24, 'Different device identity trying to use used key returns ACTIVATION_KEY_ALREADY_USED', test24Passed, `Code: ${diffDeviceKeyErr?.code}`);
 
-    // Test 25: Active device trying to activate using a DIFFERENT new key is rejected
+    // Test 25: Active device trying to activate using a DIFFERENT new key is rejected with DEVICE_ALREADY_ACTIVATED
     const keyA_New = await activationService.createActivationKey({ merchantId: merchantA._id });
     let diffKeyForSameDeviceErr = null;
     try {
@@ -462,9 +462,52 @@ async function runTests() {
     } catch (e) {
       diffKeyForSameDeviceErr = e;
     }
-    const test25Passed = diffKeyForSameDeviceErr && diffKeyForSameDeviceErr.message.includes('already activated');
-    recordResult(25, 'Active device trying to activate using a DIFFERENT new key is rejected', test25Passed, `Error: ${diffKeyForSameDeviceErr?.message}`);
+    const test25Passed = Boolean(diffKeyForSameDeviceErr && diffKeyForSameDeviceErr.code === 'DEVICE_ALREADY_ACTIVATED' && diffKeyForSameDeviceErr.userMessage);
+    recordResult(25, 'Active device trying to activate using a DIFFERENT key returns DEVICE_ALREADY_ACTIVATED', test25Passed, `Code: ${diffKeyForSameDeviceErr?.code}`);
     await ActivationKey.deleteOne({ _id: keyA_New._id });
+
+    // Test 26: Blocked device trying to activate with a WRONG key returns DEVICE_BLOCKED (Case 5)
+    await Device.findByIdAndUpdate(deviceA._id, { isBlocked: true, blockReason: 'Case 5 Test', blockedUntil: null });
+    let blockedWrongKeyErr = null;
+    try {
+      await activationService.activateDeviceWithKey({
+        keyString: 'SUB-FAKE-KEY1-9999',
+        androidId: deviceA.androidId,
+      });
+    } catch (e) {
+      blockedWrongKeyErr = e;
+    }
+    const test26Passed = Boolean(blockedWrongKeyErr && blockedWrongKeyErr.statusCode === 403 && blockedWrongKeyErr.code === 'DEVICE_BLOCKED');
+    recordResult(26, 'Blocked device trying to activate with WRONG key returns DEVICE_BLOCKED', test26Passed, `Code: ${blockedWrongKeyErr?.code}`);
+
+    // Test 27: Blocked device trying to activate with CORRECT existing key returns DEVICE_BLOCKED (Case 6)
+    let blockedCorrectKeyErr = null;
+    try {
+      await activationService.activateDeviceWithKey({
+        keyString: keyA.key,
+        androidId: deviceA.androidId,
+      });
+    } catch (e) {
+      blockedCorrectKeyErr = e;
+    }
+    const test27Passed = Boolean(blockedCorrectKeyErr && blockedCorrectKeyErr.statusCode === 403 && blockedCorrectKeyErr.code === 'DEVICE_BLOCKED');
+    recordResult(27, 'Blocked device trying to activate with CORRECT key returns DEVICE_BLOCKED', test27Passed, `Code: ${blockedCorrectKeyErr?.code}`);
+
+    // Unblock device for subsequent tests
+    await Device.findByIdAndUpdate(deviceA._id, { isBlocked: false, status: 'ACTIVE' });
+
+    // Test 28: Unblocked device trying to activate with INVALID key returns INVALID_ACTIVATION_KEY (Case 3)
+    let invalidKeyErr = null;
+    try {
+      await activationService.activateDeviceWithKey({
+        keyString: 'SUB-INVALID-KEY-0000',
+        androidId: 'new_unblocked_device_id_888',
+      });
+    } catch (e) {
+      invalidKeyErr = e;
+    }
+    const test28Passed = Boolean(invalidKeyErr && invalidKeyErr.statusCode === 400 && invalidKeyErr.code === 'INVALID_ACTIVATION_KEY');
+    recordResult(28, 'Invalid activation key returns INVALID_ACTIVATION_KEY', test28Passed, `Code: ${invalidKeyErr?.code}`);
 
     // TEST 11: New payment event appears in Live Transactions without refresh
     socketEventsA.length = 0;

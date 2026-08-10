@@ -37,24 +37,15 @@ const activateDeviceWithKey = async ({
   fcmToken,
 }) => {
   if (!keyString || !androidId) {
-    throw new ApiError(400, 'Activation key and Android ID are required');
+    throw new ApiError(400, 'Activation key and Android ID are required', [], '', {
+      code: 'INVALID_ACTIVATION_KEY',
+      userMessage: 'Activation key and Android ID are required.',
+    });
   }
 
-  const cleanKey = keyString.trim().toUpperCase();
-  const keyDoc = await ActivationKey.findOne({ key: cleanKey });
-  if (!keyDoc) {
-    throw new ApiError(404, 'Invalid activation key');
-  }
-
-  if (new Date() > keyDoc.expireDate) {
-    keyDoc.status = 'EXPIRED';
-    await keyDoc.save().catch(() => {});
-    throw new ApiError(400, 'Activation key has expired');
-  }
-
+  // 1. Device Identity & Block Check FIRST (CASE 2, CASE 5, CASE 6)
   let device = await Device.findOne({ androidId });
 
-  // 1. Device Block Check (Requirement 4 & 5)
   if (device && device.isBlocked) {
     if (device.blockedUntil && new Date() >= new Date(device.blockedUntil)) {
       // Temporary block expired -> auto-unblock
@@ -67,29 +58,56 @@ const activateDeviceWithKey = async ({
     } else {
       const reasonStr = device.blockReason || 'Blocked by administrator';
       const untilStr = device.blockedUntil ? ` (Blocked until: ${new Date(device.blockedUntil).toLocaleString()})` : ' (Permanently blocked)';
-      const err = new ApiError(403, `Your device has been blocked. Reason: ${reasonStr}${untilStr}`);
-      err.code = 'DEVICE_BLOCKED';
-      err.reason = reasonStr;
-      err.blockedUntil = device.blockedUntil;
+      const err = new ApiError(403, `This Android device is blocked. Reason: ${reasonStr}${untilStr}`, [], '', {
+        code: 'DEVICE_BLOCKED',
+        reason: reasonStr,
+        blockedUntil: device.blockedUntil ? device.blockedUntil : null,
+        userMessage: 'This Android device has been blocked. Please contact support for assistance.',
+      });
       throw err;
     }
   }
 
-  // 2. Requirement 8: Key is already bound to a DIFFERENT device identity
+  // 2. Validate Activation Key (CASE 3)
+  const cleanKey = keyString.trim().toUpperCase();
+  const keyDoc = await ActivationKey.findOne({ key: cleanKey });
+  if (!keyDoc || keyDoc.status === 'REVOKED') {
+    throw new ApiError(400, 'The activation key is invalid or unavailable.', [], '', {
+      code: 'INVALID_ACTIVATION_KEY',
+      userMessage: 'This activation key is invalid or has already been used. Please check your key and try again.',
+    });
+  }
+
+  if (new Date() > keyDoc.expireDate || keyDoc.status === 'EXPIRED') {
+    keyDoc.status = 'EXPIRED';
+    await keyDoc.save().catch(() => {});
+    throw new ApiError(400, 'The activation key has expired.', [], '', {
+      code: 'INVALID_ACTIVATION_KEY',
+      userMessage: 'This activation key has expired. Please contact support to get a new activation key.',
+    });
+  }
+
+  // 3. Activation Key Belongs to ANOTHER Device (CASE 4)
   if (keyDoc.isUsed && keyDoc.usedByDevice) {
     if (!device || device._id.toString() !== keyDoc.usedByDevice.toString()) {
-      throw new ApiError(400, 'This activation key is already registered to another device.');
+      throw new ApiError(400, 'This activation key is already registered to another device.', [], '', {
+        code: 'ACTIVATION_KEY_ALREADY_USED',
+        userMessage: 'This activation key is already being used on another device. Please use a different activation key.',
+      });
     }
   }
 
-  // 3. Requirement 9: Device is ALREADY activated under a DIFFERENT active key
+  // 4. Device is Already Registered and Active Under a DIFFERENT Key (CASE 1)
   if (device && device.activationKey && device.status !== 'INACTIVE') {
     if (device.activationKey.toString() !== keyDoc._id.toString()) {
-      throw new ApiError(400, 'This Android device is already activated. Please use the existing activation key associated with this device.');
+      throw new ApiError(400, 'This Android device is already registered with an activation key.', [], '', {
+        code: 'DEVICE_ALREADY_ACTIVATED',
+        userMessage: 'This device is already activated. Please use the existing activation key associated with this device.',
+      });
     }
   }
 
-  // 4. If device was previously bound to another key, reset that old key
+  // 5. If device was previously bound to another key, reset that old key
   if (device && device.activationKey && device.activationKey.toString() !== keyDoc._id.toString()) {
     await ActivationKey.findByIdAndUpdate(device.activationKey, {
       isUsed: false,

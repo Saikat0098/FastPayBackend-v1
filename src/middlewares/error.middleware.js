@@ -17,6 +17,7 @@ const errorHandler = (err, req, res, next) => {
     success: false,
     ...(error.code && { code: error.code }),
     message: error.message,
+    ...(error.userMessage !== undefined && { userMessage: error.userMessage }),
     ...(error.reason !== undefined && { reason: error.reason }),
     ...(error.blockedUntil !== undefined && { blockedUntil: error.blockedUntil }),
     errors: error.errors || [],
