@@ -13,9 +13,23 @@ const getDevicesList = asyncHandler(async (req, res) => {
   const query = {};
   if (!isSuperAdmin) {
     if (!merchantId) throw new ApiError(403, 'Tenant context missing');
-    query.merchant = new mongoose.Types.ObjectId(merchantId.toString());
+    const mStr = merchantId.toString();
+    const isValidObjId = mongoose.Types.ObjectId.isValid(mStr);
+    const mObjId = isValidObjId ? new mongoose.Types.ObjectId(mStr) : null;
+    const matches = isValidObjId ? [mObjId, mStr] : [mStr];
+    query.$or = [
+      { merchant: { $in: matches } },
+      { merchantId: { $in: matches } }
+    ];
   } else if (merchantId) {
-    query.merchant = new mongoose.Types.ObjectId(merchantId.toString());
+    const mStr = merchantId.toString();
+    const isValidObjId = mongoose.Types.ObjectId.isValid(mStr);
+    const mObjId = isValidObjId ? new mongoose.Types.ObjectId(mStr) : null;
+    const matches = isValidObjId ? [mObjId, mStr] : [mStr];
+    query.$or = [
+      { merchant: { $in: matches } },
+      { merchantId: { $in: matches } }
+    ];
   }
 
   const devices = await Device.find(query)

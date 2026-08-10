@@ -184,7 +184,9 @@ const emitPaymentUpdated = (merchantId, paymentData) => {
 const emitDeviceEvent = (merchantId, eventName, deviceData) => {
   if (io && merchantId) {
     const mId = merchantId.toString();
-    io.to(`merchant:${mId}`).to(`merchant_${mId}`).emit(eventName, deviceData);
+    const payload = deviceData && deviceData.toObject ? deviceData.toObject() : deviceData;
+    io.to(`merchant:${mId}`).to(`merchant_${mId}`).emit(eventName, payload);
+    io.to('admin').emit(eventName, payload);
   }
 };
 

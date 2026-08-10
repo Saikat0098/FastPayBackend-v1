@@ -73,7 +73,8 @@ const deviceSchema = new mongoose.Schema(
     activationKey: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'ActivationKey',
-      required: true,
+      required: false,
+      default: null,
     },
   },
   {

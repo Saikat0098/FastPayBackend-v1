@@ -34,7 +34,7 @@ const syncCustomersFromPayments = async () => {
     const { recordCustomerPayment } = require('../services/customer.service');
 
     // Drop legacy index if it exists
-    await Customer.collection.dropIndex('merchantId_1_phone_1').catch(() => {});
+    await Customer.collection.dropIndex('merchantId_1_phone_1').catch(() => { });
 
     // Clean up any legacy unassigned customer records
     await Customer.deleteMany({

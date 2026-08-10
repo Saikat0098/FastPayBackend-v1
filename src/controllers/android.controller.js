@@ -115,23 +115,33 @@ const androidHeartbeat = asyncHandler(async (req, res) => {
     throw new ApiError(400, 'Device ID or Android ID required');
   }
 
-  const isMongoId = mongoose.Types.ObjectId.isValid(inputId.toString());
-  const query = {
-    $or: [
-      { androidId: inputId.toString() },
-      ...(isMongoId ? [{ _id: inputId }] : []),
-    ],
-  };
+  let device;
 
-  if (req.device?.merchant || req.merchantId) {
-    query.merchant = req.device?.merchant || req.merchantId;
+  if (req.device?._id) {
+    device = await Device.findByIdAndUpdate(
+      req.device._id,
+      { lastOnline: new Date(), status: 'ACTIVE', isOnline: true },
+      { new: true }
+    );
+  } else {
+    const isMongoId = mongoose.Types.ObjectId.isValid(inputId.toString());
+    const query = {
+      $or: [
+        { androidId: inputId.toString() },
+        ...(isMongoId ? [{ _id: inputId }] : []),
+      ],
+    };
+
+    if (req.merchantId) {
+      query.merchant = req.merchantId;
+    }
+
+    device = await Device.findOneAndUpdate(
+      query,
+      { lastOnline: new Date(), status: 'ACTIVE', isOnline: true },
+      { new: true }
+    );
   }
-
-  const device = await Device.findOneAndUpdate(
-    query,
-    { lastOnline: new Date(), status: 'ACTIVE', isOnline: true },
-    { new: true }
-  );
 
   if (!device) {
     throw new ApiError(404, 'Device not found for heartbeat');

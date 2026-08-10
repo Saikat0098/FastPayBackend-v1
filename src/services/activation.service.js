@@ -59,6 +59,15 @@ const activateDeviceWithKey = async ({
     }
   }
 
+  // If device was previously bound to another key, reset that old key
+  if (device && device.activationKey && device.activationKey.toString() !== keyDoc._id.toString()) {
+    await ActivationKey.findByIdAndUpdate(device.activationKey, {
+      isUsed: false,
+      usedByDevice: null,
+      activationTime: null,
+    });
+  }
+
   if (!device) {
     device = new Device({
       androidId,
