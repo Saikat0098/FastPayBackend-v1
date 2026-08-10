@@ -223,6 +223,74 @@ async function runTests() {
     const devTestG7 = socketAEv > 0 && socketBEv === 0;
     recordResult(10, 'Device socket event reaches only the target merchant room', devTestG7, `Events received: A=${socketAEv}, B=${socketBEv}`);
 
+    // DEVICE BLOCKING & KEY SINGLE-DEVICE CONSTRAINT TESTS
+    const adminController = require('../controllers/admin.controller');
+
+    // Test 20: Admin can block device permanently
+    const reqBlock = { params: { deviceId: deviceA._id.toString() }, body: { blockReason: 'Policy violation', blockType: 'permanent' }, admin: { _id: new mongoose.Types.ObjectId() } };
+    const resBlock = { status: () => resBlock, json: (data) => data };
+    const nextBlock = (err) => { if (err) throw err; };
+    adminController.blockDevice(reqBlock, resBlock, nextBlock);
+    await new Promise((r) => setTimeout(r, 150));
+    const devBlocked = await Device.findOne({ _id: deviceA._id });
+    const test20Passed = Boolean(devBlocked && devBlocked.isBlocked === true && devBlocked.status === 'SUSPENDED');
+    recordResult(20, 'Admin can block device permanently', test20Passed, `Status: ${devBlocked?.status}, isBlocked: ${devBlocked?.isBlocked}`);
+
+    // Test 21: Blocked device activation & heartbeat rejected
+    let blockActivationError = null;
+    try {
+      await activationService.activateDeviceWithKey({ keyString: keyA.key, androidId: deviceA.androidId });
+    } catch (e) {
+      blockActivationError = e;
+    }
+    const test21Passed = blockActivationError && blockActivationError.message.includes('blocked');
+    recordResult(21, 'Blocked device activation is rejected', test21Passed, `Message: ${blockActivationError?.message}`);
+
+    // Test 22: Temporary block auto-expires when time passes
+    const pastUntil = new Date(Date.now() - 1000);
+    await Device.findByIdAndUpdate(deviceA._id, { isBlocked: true, blockedUntil: pastUntil, blockReason: 'Temp test' });
+    const reactivateRes = await activationService.activateDeviceWithKey({ keyString: keyA.key, androidId: deviceA.androidId });
+    const devUnblockedAuto = await Device.findById(deviceA._id);
+    const test22Passed = devUnblockedAuto && devUnblockedAuto.isBlocked === false && reactivateRes.device;
+    recordResult(22, 'Temporary block auto-expires when blockedUntil time passes', test22Passed, `isBlocked: ${devUnblockedAuto?.isBlocked}`);
+
+    // Test 23: Reinstall/Factory reset using SAME original key rebinds existing device
+    const sameKeyRebind = await activationService.activateDeviceWithKey({
+      keyString: keyA.key,
+      androidId: deviceA.androidId,
+      deviceModel: 'Pixel 6 Rebound',
+    });
+    const test23Passed = sameKeyRebind.device._id.toString() === deviceA._id.toString() && sameKeyRebind.device.deviceModel === 'Pixel 6 Rebound';
+    recordResult(23, 'Factory reset/reinstall using SAME key rebinds existing device without duplicates', test23Passed, `Device ID: ${sameKeyRebind.device._id}`);
+
+    // Test 24: Different device identity trying to use used key is rejected
+    let diffDeviceKeyErr = null;
+    try {
+      await activationService.activateDeviceWithKey({
+        keyString: keyA.key,
+        androidId: 'different_android_id_999999',
+      });
+    } catch (e) {
+      diffDeviceKeyErr = e;
+    }
+    const test24Passed = diffDeviceKeyErr && diffDeviceKeyErr.message.includes('registered to another device');
+    recordResult(24, 'Different device identity trying to use used key is rejected', test24Passed, `Error: ${diffDeviceKeyErr?.message}`);
+
+    // Test 25: Active device trying to activate using a DIFFERENT new key is rejected
+    const keyA_New = await activationService.createActivationKey({ merchantId: merchantA._id });
+    let diffKeyForSameDeviceErr = null;
+    try {
+      await activationService.activateDeviceWithKey({
+        keyString: keyA_New.key,
+        androidId: deviceA.androidId,
+      });
+    } catch (e) {
+      diffKeyForSameDeviceErr = e;
+    }
+    const test25Passed = diffKeyForSameDeviceErr && diffKeyForSameDeviceErr.message.includes('already activated');
+    recordResult(25, 'Active device trying to activate using a DIFFERENT new key is rejected', test25Passed, `Error: ${diffKeyForSameDeviceErr?.message}`);
+    await ActivationKey.deleteOne({ _id: keyA_New._id });
+
     // TEST 11: New payment event appears in Live Transactions without refresh
     socketEventsA.length = 0;
     const payNew = await paymentService.processTransactionSync({

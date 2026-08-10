@@ -14,6 +14,8 @@ const LoginHistory = require('../models/LoginHistory');
 const Settings = require('../models/Settings');
 const WebhookLog = require('../models/WebhookLog');
 const ApiError = require('../utils/apiError');
+const logger = require('../config/logger');
+const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
 
 // 1. Comprehensive Real MongoDB Dashboard Stats
@@ -237,11 +239,98 @@ const getAllTransactions = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, payments, 'Transactions list retrieved');
 });
 
-// 6. Connected Devices Management
 const getAllDevices = asyncHandler(async (req, res) => {
-  const devices = await Device.find().populate('merchant', 'name companyName email').sort({ updatedAt: -1 });
+  const devices = await Device.find()
+    .populate('merchant', 'name companyName email')
+    .populate('activationKey')
+    .sort({ updatedAt: -1 });
   console.log("Admin devices query count:", devices.length);
   return ApiResponse.success(res, devices, 'Connected devices list');
+});
+
+const blockDevice = asyncHandler(async (req, res) => {
+  const { deviceId } = req.params;
+  const { blockReason, blockType, blockedUntil } = req.body || {};
+  const dIdStr = deviceId ? deviceId.toString() : '';
+  const isMongoId = mongoose.Types.ObjectId.isValid(dIdStr);
+  const device = await Device.findOne({
+    $or: [
+      ...(isMongoId ? [{ _id: dIdStr }] : []),
+      { androidId: dIdStr },
+      { deviceId: dIdStr },
+    ],
+  });
+
+  if (!device) {
+    throw new ApiError(404, 'Device not found');
+  }
+
+  device.isBlocked = true;
+  device.blockReason = blockReason || 'Blocked by administrator';
+  device.blockedAt = new Date();
+  device.blockedBy = req.admin?._id || req.user?.id || null;
+  device.isOnline = false;
+  device.status = 'SUSPENDED';
+
+  if (blockType === 'temporary' && blockedUntil) {
+    device.blockedUntil = new Date(blockedUntil);
+  } else {
+    device.blockedUntil = null;
+  }
+
+  await device.save();
+
+  const { emitDeviceEvent } = require('../socket/socketManager');
+  if (device.merchant) {
+    emitDeviceEvent(device.merchant, 'device:blocked', device);
+    emitDeviceEvent(device.merchant, 'device:updated', device);
+  } else {
+    emitDeviceEvent('all', 'device:blocked', device);
+  }
+
+  logger.info(`[Admin Block Device] Device ${device.androidId} blocked by admin. Reason: ${device.blockReason}`);
+
+  return ApiResponse.success(res, device, 'Device blocked successfully');
+});
+
+const unblockDevice = asyncHandler(async (req, res) => {
+  const { deviceId } = req.params;
+  const dIdStr = deviceId ? deviceId.toString() : '';
+  const isMongoId = mongoose.Types.ObjectId.isValid(dIdStr);
+  const device = await Device.findOne({
+    $or: [
+      ...(isMongoId ? [{ _id: dIdStr }] : []),
+      { androidId: dIdStr },
+      { deviceId: dIdStr },
+    ],
+  });
+
+  if (!device) {
+    throw new ApiError(404, 'Device not found');
+  }
+
+  device.isBlocked = false;
+  device.blockReason = '';
+  device.blockedAt = null;
+  device.blockedUntil = null;
+  device.blockedBy = null;
+  if (device.status === 'SUSPENDED') {
+    device.status = 'INACTIVE';
+  }
+
+  await device.save();
+
+  const { emitDeviceEvent } = require('../socket/socketManager');
+  if (device.merchant) {
+    emitDeviceEvent(device.merchant, 'device:unblocked', device);
+    emitDeviceEvent(device.merchant, 'device:updated', device);
+  } else {
+    emitDeviceEvent('all', 'device:unblocked', device);
+  }
+
+  logger.info(`[Admin Unblock Device] Device ${device.androidId} unblocked by admin`);
+
+  return ApiResponse.success(res, device, 'Device unblocked successfully');
 });
 
 // 7. Activation Keys Management
@@ -358,6 +447,8 @@ module.exports = {
   deletePlan,
   getAllTransactions,
   getAllDevices,
+  blockDevice,
+  unblockDevice,
   getAllActivationKeys,
   createActivationKey,
   getWebhookLogs,

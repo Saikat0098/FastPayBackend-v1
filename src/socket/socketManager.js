@@ -38,10 +38,25 @@ const initSocket = (server) => {
         socket.isAdmin = true;
       } else if (roleNorm === 'DEVICE') {
         const device = await Device.findById(decoded.id);
-        if (device && device.status !== 'SUSPENDED') {
-          socket.deviceId = device._id.toString();
-          socket.merchantId = device.merchant.toString();
-          socket.isDevice = true;
+        if (device) {
+          // Device Block Check (Requirement 4 & 5)
+          if (device.isBlocked) {
+            if (device.blockedUntil && new Date() >= new Date(device.blockedUntil)) {
+              device.isBlocked = false;
+              device.blockReason = '';
+              device.blockedUntil = null;
+              device.blockedAt = null;
+              device.blockedBy = null;
+              await device.save();
+            } else {
+              return next(new Error('DEVICE_BLOCKED: Device is blocked by administrator'));
+            }
+          }
+          if (device.status !== 'SUSPENDED') {
+            socket.deviceId = device._id.toString();
+            socket.merchantId = device.merchant ? device.merchant.toString() : '';
+            socket.isDevice = true;
+          }
         }
       } else {
         let merchantId = decoded.merchantId || decoded.merchant;
@@ -94,6 +109,7 @@ const initSocket = (server) => {
           emitDeviceEvent(socket.merchantId, 'device:online', devDoc);
           emitDeviceEvent(socket.merchantId, 'device:connected', devDoc);
           emitDeviceEvent(socket.merchantId, 'deviceConnected', devDoc);
+          emitDeviceEvent(socket.merchantId, 'device:updated', devDoc);
         }
       } catch (err) {
         logger.error(`Error updating device online status: ${err.message}`);
@@ -106,12 +122,13 @@ const initSocket = (server) => {
         try {
           const devDoc = await Device.findByIdAndUpdate(
             socket.deviceId,
-            { socketConnected: false, lastOnline: new Date() },
+            { isOnline: false, status: 'OFFLINE', socketConnected: false, lastOnline: new Date() },
             { new: true }
           );
           if (devDoc && socket.merchantId) {
             emitDeviceEvent(socket.merchantId, 'device:offline', devDoc);
             emitDeviceEvent(socket.merchantId, 'deviceDisconnected', devDoc);
+            emitDeviceEvent(socket.merchantId, 'device:updated', devDoc);
           }
         } catch (err) {
           logger.error(`Error updating device disconnect status: ${err.message}`);
@@ -141,6 +158,7 @@ const initSocket = (server) => {
             logger.info(`[Device Ticker] Stale device ${dev.androidId} (${dev._id}) marked OFFLINE for merchant ${mId}`);
             emitDeviceEvent(mId, 'device:offline', dev);
             emitDeviceEvent(mId, 'deviceDisconnected', dev);
+            emitDeviceEvent(mId, 'device:updated', dev);
           }
         }
       } catch (err) {

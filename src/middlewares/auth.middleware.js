@@ -33,9 +33,35 @@ const verifyToken = asyncHandler(async (req, res, next) => {
       req.admin = admin;
     } else if (roleNormalized === 'DEVICE') {
       const device = await Device.findById(decoded.id).populate('merchant');
-      if (!device || device.status === 'SUSPENDED') {
+      if (!device) {
         throw new ApiError(403, 'Device is suspended or not registered');
       }
+
+      // Device Block Check (Requirement 4 & 5)
+      if (device.isBlocked) {
+        if (device.blockedUntil && new Date() >= new Date(device.blockedUntil)) {
+          // Temporary block expired -> auto-unblock
+          device.isBlocked = false;
+          device.blockReason = '';
+          device.blockedUntil = null;
+          device.blockedAt = null;
+          device.blockedBy = null;
+          await device.save();
+        } else {
+          const reasonStr = device.blockReason || 'Blocked by administrator';
+          const untilStr = device.blockedUntil ? ` (Blocked until: ${new Date(device.blockedUntil).toLocaleString()})` : ' (Permanently blocked)';
+          const err = new ApiError(403, `Your device has been blocked. Reason: ${reasonStr}${untilStr}`);
+          err.code = 'DEVICE_BLOCKED';
+          err.reason = reasonStr;
+          err.blockedUntil = device.blockedUntil;
+          throw err;
+        }
+      }
+
+      if (device.status === 'SUSPENDED') {
+        throw new ApiError(403, 'Device is suspended or not registered');
+      }
+
       req.device = device;
       req.merchant = device.merchant;
       req.merchantId = device.merchant?._id;

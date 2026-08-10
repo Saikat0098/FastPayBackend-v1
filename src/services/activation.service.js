@@ -47,22 +47,53 @@ const activateDeviceWithKey = async ({
   }
 
   if (new Date() > keyDoc.expireDate) {
+    keyDoc.status = 'EXPIRED';
+    await keyDoc.save().catch(() => {});
     throw new ApiError(400, 'Activation key has expired');
   }
 
   let device = await Device.findOne({ androidId });
 
-  // Single device binding constraint
-  if (keyDoc.isUsed && keyDoc.usedByDevice) {
-    if (!device || device._id.toString() !== keyDoc.usedByDevice.toString()) {
-      throw new ApiError(400, 'Activation key is already bound to another Android device');
+  // 1. Device Block Check (Requirement 4 & 5)
+  if (device && device.isBlocked) {
+    if (device.blockedUntil && new Date() >= new Date(device.blockedUntil)) {
+      // Temporary block expired -> auto-unblock
+      device.isBlocked = false;
+      device.blockReason = '';
+      device.blockedUntil = null;
+      device.blockedAt = null;
+      device.blockedBy = null;
+      await device.save();
+    } else {
+      const reasonStr = device.blockReason || 'Blocked by administrator';
+      const untilStr = device.blockedUntil ? ` (Blocked until: ${new Date(device.blockedUntil).toLocaleString()})` : ' (Permanently blocked)';
+      const err = new ApiError(403, `Your device has been blocked. Reason: ${reasonStr}${untilStr}`);
+      err.code = 'DEVICE_BLOCKED';
+      err.reason = reasonStr;
+      err.blockedUntil = device.blockedUntil;
+      throw err;
     }
   }
 
-  // If device was previously bound to another key, reset that old key
+  // 2. Requirement 8: Key is already bound to a DIFFERENT device identity
+  if (keyDoc.isUsed && keyDoc.usedByDevice) {
+    if (!device || device._id.toString() !== keyDoc.usedByDevice.toString()) {
+      throw new ApiError(400, 'This activation key is already registered to another device.');
+    }
+  }
+
+  // 3. Requirement 9: Device is ALREADY activated under a DIFFERENT active key
+  if (device && device.activationKey && device.status !== 'INACTIVE') {
+    if (device.activationKey.toString() !== keyDoc._id.toString()) {
+      throw new ApiError(400, 'This Android device is already activated. Please use the existing activation key associated with this device.');
+    }
+  }
+
+  // 4. If device was previously bound to another key, reset that old key
   if (device && device.activationKey && device.activationKey.toString() !== keyDoc._id.toString()) {
     await ActivationKey.findByIdAndUpdate(device.activationKey, {
       isUsed: false,
+      status: 'AVAILABLE',
       usedByDevice: null,
       activationTime: null,
     });
@@ -90,8 +121,9 @@ const activateDeviceWithKey = async ({
   device.lastOnline = new Date();
   await device.save();
 
-  if (!keyDoc.isUsed) {
+  if (!keyDoc.isUsed || keyDoc.status !== 'ACTIVE') {
     keyDoc.isUsed = true;
+    keyDoc.status = 'ACTIVE';
     keyDoc.usedByDevice = device._id;
     keyDoc.activationTime = new Date();
     await keyDoc.save();
@@ -113,6 +145,7 @@ const resetActivationKey = async (keyId) => {
   }
 
   keyDoc.isUsed = false;
+  keyDoc.status = 'REVOKED';
   keyDoc.usedByDevice = null;
   keyDoc.activationTime = null;
   await keyDoc.save();

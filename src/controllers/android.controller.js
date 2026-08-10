@@ -118,11 +118,7 @@ const androidHeartbeat = asyncHandler(async (req, res) => {
   let device;
 
   if (req.device?._id) {
-    device = await Device.findByIdAndUpdate(
-      req.device._id,
-      { lastOnline: new Date(), status: 'ACTIVE', isOnline: true },
-      { new: true }
-    );
+    device = req.device;
   } else {
     const isMongoId = mongoose.Types.ObjectId.isValid(inputId.toString());
     const query = {
@@ -136,16 +132,37 @@ const androidHeartbeat = asyncHandler(async (req, res) => {
       query.merchant = req.merchantId;
     }
 
-    device = await Device.findOneAndUpdate(
-      query,
-      { lastOnline: new Date(), status: 'ACTIVE', isOnline: true },
-      { new: true }
-    );
+    device = await Device.findOne(query);
   }
 
   if (!device) {
     throw new ApiError(404, 'Device not found for heartbeat');
   }
+
+  // Device Block Check (Requirement 4 & 5)
+  if (device.isBlocked) {
+    if (device.blockedUntil && new Date() >= new Date(device.blockedUntil)) {
+      // Temporary block expired -> auto-unblock
+      device.isBlocked = false;
+      device.blockReason = '';
+      device.blockedUntil = null;
+      device.blockedAt = null;
+      device.blockedBy = null;
+    } else {
+      const reasonStr = device.blockReason || 'Blocked by administrator';
+      const untilStr = device.blockedUntil ? ` (Blocked until: ${new Date(device.blockedUntil).toLocaleString()})` : ' (Permanently blocked)';
+      const err = new ApiError(403, `Your device has been blocked. Reason: ${reasonStr}${untilStr}`);
+      err.code = 'DEVICE_BLOCKED';
+      err.reason = reasonStr;
+      err.blockedUntil = device.blockedUntil;
+      throw err;
+    }
+  }
+
+  device.lastOnline = new Date();
+  device.status = 'ACTIVE';
+  device.isOnline = true;
+  await device.save();
 
   logger.info(`[API Android Heartbeat] Received from device: ${device.androidId} (${device._id}) for merchant: ${device.merchant}`);
 

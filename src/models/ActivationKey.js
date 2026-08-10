@@ -18,6 +18,11 @@ const activationKeySchema = new mongoose.Schema(
       type: Number,
       default: 1,
     },
+    status: {
+      type: String,
+      enum: ['AVAILABLE', 'ACTIVE', 'REVOKED', 'EXPIRED'],
+      default: 'AVAILABLE',
+    },
     isUsed: {
       type: Boolean,
       default: false,

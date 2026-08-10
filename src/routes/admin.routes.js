@@ -37,6 +37,8 @@ router.get('/transactions', adminController.getAllTransactions);
 
 // 7. Connected Devices
 router.get('/devices', adminController.getAllDevices);
+router.put('/devices/:deviceId/block', adminController.blockDevice);
+router.put('/devices/:deviceId/unblock', adminController.unblockDevice);
 
 // 8. Activation Keys / Master Keys
 router.get('/activation-keys', adminController.getAllActivationKeys);

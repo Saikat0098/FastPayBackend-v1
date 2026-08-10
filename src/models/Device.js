@@ -76,6 +76,27 @@ const deviceSchema = new mongoose.Schema(
       required: false,
       default: null,
     },
+    isBlocked: {
+      type: Boolean,
+      default: false,
+    },
+    blockReason: {
+      type: String,
+      default: '',
+    },
+    blockedAt: {
+      type: Date,
+      default: null,
+    },
+    blockedUntil: {
+      type: Date,
+      default: null,
+    },
+    blockedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Admin',
+      default: null,
+    },
   },
   {
     timestamps: true,
@@ -84,5 +105,6 @@ const deviceSchema = new mongoose.Schema(
 
 deviceSchema.index({ androidId: 1 });
 deviceSchema.index({ merchant: 1 });
+deviceSchema.index({ isBlocked: 1 });
 
 module.exports = mongoose.model('Device', deviceSchema);
