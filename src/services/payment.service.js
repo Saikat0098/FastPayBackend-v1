@@ -12,6 +12,55 @@ const { recordCustomerPayment } = require('./customer.service');
 const ApiError = require('../utils/apiError');
 const mongoose = require('mongoose');
 
+const verifyDeviceNotBlocked = async ({ deviceId, activationKey, reqDevice }) => {
+  let devDoc = reqDevice || null;
+
+  if (!devDoc && deviceId) {
+    const isMongoId = mongoose.Types.ObjectId.isValid(deviceId.toString());
+    devDoc = await Device.findOne({
+      $or: [
+        { androidId: deviceId.toString() },
+        ...(isMongoId ? [{ _id: deviceId }] : []),
+      ],
+    });
+  }
+
+  if (!devDoc && activationKey) {
+    const cleanKey = activationKey.toString().trim().toUpperCase();
+    const keyDoc = await ActivationKey.findOne({ key: cleanKey }).populate('usedByDevice');
+    if (keyDoc && keyDoc.usedByDevice) {
+      if (typeof keyDoc.usedByDevice === 'object') {
+        devDoc = keyDoc.usedByDevice;
+      } else {
+        devDoc = await Device.findById(keyDoc.usedByDevice);
+      }
+    }
+  }
+
+  if (devDoc && devDoc.isBlocked) {
+    if (devDoc.blockedUntil && new Date() >= new Date(devDoc.blockedUntil)) {
+      // Temporary block expired -> auto-unblock
+      devDoc.isBlocked = false;
+      devDoc.blockReason = '';
+      devDoc.blockedUntil = null;
+      devDoc.blockedAt = null;
+      devDoc.blockedBy = null;
+      devDoc.status = 'OFFLINE';
+      await devDoc.save();
+    } else {
+      const reasonStr = devDoc.blockReason || 'Blocked by administrator';
+      const untilStr = devDoc.blockedUntil ? ` (Blocked until: ${new Date(devDoc.blockedUntil).toLocaleString()})` : ' (Permanently blocked)';
+      const err = new ApiError(403, `Your device has been blocked. Reason: ${reasonStr}${untilStr}`);
+      err.code = 'DEVICE_BLOCKED';
+      err.reason = reasonStr;
+      err.blockedUntil = devDoc.blockedUntil ? devDoc.blockedUntil : null;
+      throw err;
+    }
+  }
+
+  return devDoc;
+};
+
 const processTransactionSync = async ({
   activationKey,
   deviceId,
@@ -39,7 +88,6 @@ const processTransactionSync = async ({
   // 1. Validate Activation Key (if provided)
   let keyDoc = null;
   let resolvedMerchantId = merchantId;
-  let devDoc = null;
 
   if (activationKey) {
     keyDoc = await ActivationKey.findOne({ key: activationKey.toUpperCase().trim() });
@@ -49,21 +97,13 @@ const processTransactionSync = async ({
     resolvedMerchantId = keyDoc.merchant;
   }
 
-  // 2. Validate Device (if provided)
-  if (deviceId) {
-    const isMongoId = mongoose.Types.ObjectId.isValid(deviceId);
-    devDoc = await Device.findOne({
-      $or: [
-        { androidId: deviceId },
-        ...(isMongoId ? [{ _id: deviceId }] : [])
-      ]
-    });
-    if (devDoc) {
-      if (!resolvedMerchantId) resolvedMerchantId = devDoc.merchant;
-      devDoc.lastOnline = new Date();
-      devDoc.status = 'ACTIVE';
-      await devDoc.save();
-    }
+  // 2. Validate Device & Enforce Block Check
+  const devDoc = await verifyDeviceNotBlocked({ deviceId, activationKey });
+  if (devDoc) {
+    if (!resolvedMerchantId) resolvedMerchantId = devDoc.merchant;
+    devDoc.lastOnline = new Date();
+    devDoc.status = 'ACTIVE';
+    await devDoc.save();
   }
 
   // Fallback to default merchant if unresolved
@@ -185,6 +225,10 @@ const processTransactionSync = async ({
 
 
 const processBatchSync = async ({ deviceId, merchantId, transactions }) => {
+  if (deviceId) {
+    await verifyDeviceNotBlocked({ deviceId });
+  }
+
   let syncedCount = 0;
   let failedCount = 0;
 
@@ -211,6 +255,7 @@ const processBatchSync = async ({ deviceId, merchantId, transactions }) => {
       if (res.success) syncedCount++;
       else failedCount++;
     } catch (err) {
+      if (err.code === 'DEVICE_BLOCKED') throw err;
       failedCount++;
     }
   }
@@ -224,6 +269,10 @@ const processBatchSync = async ({ deviceId, merchantId, transactions }) => {
 };
 
 const processIncomingSms = async ({ deviceId, merchantId, rawSms, senderNumber, receiverNumber }) => {
+  if (deviceId) {
+    await verifyDeviceNotBlocked({ deviceId });
+  }
+
   const parsed = parseSms(rawSms, senderNumber);
 
   await SmsLog.create({

@@ -251,6 +251,17 @@ const getAllDevices = asyncHandler(async (req, res) => {
 const blockDevice = asyncHandler(async (req, res) => {
   const { deviceId } = req.params;
   const { blockReason, blockType, blockedUntil } = req.body || {};
+
+  if (!blockReason || !blockReason.trim()) {
+    throw new ApiError(400, 'Block reason is required');
+  }
+
+  if (blockType === 'temporary') {
+    if (!blockedUntil || isNaN(new Date(blockedUntil).getTime()) || new Date(blockedUntil) <= new Date()) {
+      throw new ApiError(400, 'Temporary block requires a valid future date/time');
+    }
+  }
+
   const dIdStr = deviceId ? deviceId.toString() : '';
   const isMongoId = mongoose.Types.ObjectId.isValid(dIdStr);
   const device = await Device.findOne({
@@ -266,13 +277,13 @@ const blockDevice = asyncHandler(async (req, res) => {
   }
 
   device.isBlocked = true;
-  device.blockReason = blockReason || 'Blocked by administrator';
+  device.blockReason = blockReason.trim();
   device.blockedAt = new Date();
   device.blockedBy = req.admin?._id || req.user?.id || null;
   device.isOnline = false;
   device.status = 'SUSPENDED';
 
-  if (blockType === 'temporary' && blockedUntil) {
+  if (blockType === 'temporary') {
     device.blockedUntil = new Date(blockedUntil);
   } else {
     device.blockedUntil = null;
@@ -314,9 +325,8 @@ const unblockDevice = asyncHandler(async (req, res) => {
   device.blockedAt = null;
   device.blockedUntil = null;
   device.blockedBy = null;
-  if (device.status === 'SUSPENDED') {
-    device.status = 'INACTIVE';
-  }
+  device.isOnline = false;
+  device.status = 'OFFLINE';
 
   await device.save();
 

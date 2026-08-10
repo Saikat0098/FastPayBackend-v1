@@ -149,8 +149,90 @@ const verifyApiKey = asyncHandler(async (req, res, next) => {
   throw new ApiError(401, 'Invalid or inactive API Key');
 });
 
+const verifyHeartbeatAuth = asyncHandler(async (req, res, next) => {
+  const logger = require('../config/logger');
+  const jwt = require('jsonwebtoken');
+  const mongoose = require('mongoose');
+
+  logger.info('[ANDROID_HEARTBEAT_AUTH] Processing heartbeat authorization...');
+
+  const authHeader = req.headers.authorization || req.headers.Authorization;
+  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : req.cookies?.accessToken;
+  const bodyDeviceId = req.body?.deviceId || req.body?.androidId;
+
+  let decoded = null;
+  let isTokenExpired = false;
+
+  if (token) {
+    try {
+      decoded = verifyAccessToken(token);
+    } catch (err) {
+      if (err.name === 'TokenExpiredError') {
+        isTokenExpired = true;
+        decoded = jwt.decode(token);
+        logger.info('[ANDROID_HEARTBEAT_AUTH] Access token expired, decoded payload for device lookup');
+      } else {
+        logger.warn(`[ANDROID_HEARTBEAT_AUTH_FAILED] Invalid token signature: ${err.message}`);
+        throw new ApiError(401, 'Invalid or expired token');
+      }
+    }
+  }
+
+  const targetId = decoded?.id || decoded?.androidId || bodyDeviceId;
+
+  logger.info(`[ANDROID_HEARTBEAT_DEVICE_LOOKUP] Looking up device for targetId: ${targetId || 'none'}`);
+
+  if (!targetId) {
+    logger.warn('[ANDROID_HEARTBEAT_AUTH_FAILED] No device identity provided');
+    throw new ApiError(401, 'Invalid or expired token');
+  }
+
+  const isMongoId = mongoose.Types.ObjectId.isValid(targetId.toString());
+  const device = await Device.findOne({
+    $or: [
+      { androidId: targetId.toString() },
+      ...(isMongoId ? [{ _id: targetId }] : []),
+    ],
+  }).populate('merchant');
+
+  if (!device) {
+    logger.warn(`[ANDROID_HEARTBEAT_AUTH_FAILED] Device not found for id: ${targetId}`);
+    throw new ApiError(401, 'Invalid or expired token');
+  }
+
+  // Device Block Check
+  if (device.isBlocked) {
+    if (device.blockedUntil && new Date() >= new Date(device.blockedUntil)) {
+      // Temporary block expired -> auto-unblock
+      device.isBlocked = false;
+      device.blockReason = '';
+      device.blockedUntil = null;
+      device.blockedAt = null;
+      device.blockedBy = null;
+      await device.save();
+    } else {
+      const reasonStr = device.blockReason || 'Blocked by administrator';
+      const untilStr = device.blockedUntil ? ` (Blocked until: ${new Date(device.blockedUntil).toLocaleString()})` : ' (Permanently blocked)';
+      logger.info(`[ANDROID_HEARTBEAT_BLOCKED] Device ${device.androidId} is BLOCKED. Reason: ${reasonStr}`);
+      const err = new ApiError(403, `Your device has been blocked. Reason: ${reasonStr}${untilStr}`);
+      err.code = 'DEVICE_BLOCKED';
+      err.reason = reasonStr;
+      err.blockedUntil = device.blockedUntil ? device.blockedUntil : null;
+      throw err;
+    }
+  }
+
+  req.device = device;
+  req.merchant = device.merchant;
+  req.merchantId = device.merchant?._id;
+  req.isTokenExpired = isTokenExpired;
+
+  next();
+});
+
 module.exports = {
   verifyToken,
+  verifyHeartbeatAuth,
   authorizeRoles,
   verifyApiKey,
 };

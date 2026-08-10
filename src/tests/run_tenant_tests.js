@@ -226,25 +226,200 @@ async function runTests() {
     // DEVICE BLOCKING & KEY SINGLE-DEVICE CONSTRAINT TESTS
     const adminController = require('../controllers/admin.controller');
 
-    // Test 20: Admin can block device permanently
+    // Test 20: Admin can block device permanently with reason
     const reqBlock = { params: { deviceId: deviceA._id.toString() }, body: { blockReason: 'Policy violation', blockType: 'permanent' }, admin: { _id: new mongoose.Types.ObjectId() } };
     const resBlock = { status: () => resBlock, json: (data) => data };
     const nextBlock = (err) => { if (err) throw err; };
-    adminController.blockDevice(reqBlock, resBlock, nextBlock);
+    await adminController.blockDevice(reqBlock, resBlock, nextBlock);
     await new Promise((r) => setTimeout(r, 150));
     const devBlocked = await Device.findOne({ _id: deviceA._id });
-    const test20Passed = Boolean(devBlocked && devBlocked.isBlocked === true && devBlocked.status === 'SUSPENDED');
-    recordResult(20, 'Admin can block device permanently', test20Passed, `Status: ${devBlocked?.status}, isBlocked: ${devBlocked?.isBlocked}`);
+    const test20Passed = Boolean(devBlocked && devBlocked.isBlocked === true && devBlocked.status === 'SUSPENDED' && devBlocked.blockReason === 'Policy violation');
+    recordResult(20, 'Admin can block device permanently with reason', test20Passed, `Status: ${devBlocked?.status}, Reason: ${devBlocked?.blockReason}`);
 
-    // Test 21: Blocked device activation & heartbeat rejected
+    // Test 20b: Block with empty reason or invalid temporary date is rejected
+    let emptyReasonErr = null;
+    await adminController.blockDevice(
+      { params: { deviceId: deviceA._id.toString() }, body: { blockReason: '', blockType: 'permanent' } },
+      resBlock,
+      (err) => { emptyReasonErr = err; }
+    );
+    let invalidTempDateErr = null;
+    await adminController.blockDevice(
+      { params: { deviceId: deviceA._id.toString() }, body: { blockReason: 'Test', blockType: 'temporary', blockedUntil: new Date(Date.now() - 5000) } },
+      resBlock,
+      (err) => { invalidTempDateErr = err; }
+    );
+    const test20bPassed = Boolean(emptyReasonErr && emptyReasonErr.statusCode === 400 && invalidTempDateErr && invalidTempDateErr.statusCode === 400);
+    recordResult('20b', 'Empty block reason or past temporary date is rejected', test20bPassed, `EmptyReason: ${emptyReasonErr?.message}, TempDate: ${invalidTempDateErr?.message}`);
+
+    // Test 21: Blocked device activation & heartbeat rejected (403 DEVICE_BLOCKED)
     let blockActivationError = null;
     try {
       await activationService.activateDeviceWithKey({ keyString: keyA.key, androidId: deviceA.androidId });
     } catch (e) {
       blockActivationError = e;
     }
-    const test21Passed = blockActivationError && blockActivationError.message.includes('blocked');
-    recordResult(21, 'Blocked device activation is rejected', test21Passed, `Message: ${blockActivationError?.message}`);
+    let blockHeartbeatErr = null;
+    const androidController = require('../controllers/android.controller');
+    await androidController.androidHeartbeat(
+      { device: devBlocked, body: { deviceId: deviceA.androidId } },
+      resBlock,
+      (err) => { blockHeartbeatErr = err; }
+    );
+    const test21Passed = Boolean(blockActivationError && blockActivationError.message.includes('blocked') && blockHeartbeatErr && blockHeartbeatErr.code === 'DEVICE_BLOCKED');
+    recordResult(21, 'Blocked device activation & heartbeat return 403 DEVICE_BLOCKED', test21Passed, `Message: ${blockHeartbeatErr?.message}`);
+
+    // Test 21c: Blocked device transaction sync & batch sync rejected with HTTP 403 DEVICE_BLOCKED and zero socket events
+    await adminController.blockDevice({ params: { deviceId: deviceA._id.toString() }, body: { blockReason: 'Fraud Suspicion', blockType: 'permanent' } }, resBlock, nextBlock);
+    await new Promise((r) => setTimeout(r, 150));
+
+    socketEventsA.length = 0;
+    let blockedTxErr = null;
+    try {
+      await paymentService.processTransactionSync({
+        merchantId: merchantA._id,
+        deviceId: deviceA.androidId,
+        gateway: 'bKash',
+        amount: 888,
+        sender: '01700000000',
+        transactionId: `TXA_BLOCKED_${testSuffix}`,
+        paymentStatus: 'COMPLETED',
+      });
+    } catch (e) {
+      blockedTxErr = e;
+    }
+
+    let blockedBatchErr = null;
+    try {
+      await paymentService.processBatchSync({
+        deviceId: deviceA.androidId,
+        merchantId: merchantA._id,
+        transactions: [{ transactionId: `TXA_BLOCKED_BATCH_${testSuffix}`, amount: 999, provider: 'Nagad' }],
+      });
+    } catch (e) {
+      blockedBatchErr = e;
+    }
+
+    await new Promise((r) => setTimeout(r, 150));
+    const createdTxInDb = await Payment.findOne({ transactionId: `TXA_BLOCKED_${testSuffix}` });
+    const createdBatchTxInDb = await Payment.findOne({ transactionId: `TXA_BLOCKED_BATCH_${testSuffix}` });
+    const socketEvCountForBlocked = socketEventsA.filter((e) => e.event === 'payment:created' || e.event === 'paymentReceived').length;
+
+    const test21cPassed = Boolean(
+      blockedTxErr &&
+      blockedTxErr.statusCode === 403 &&
+      blockedTxErr.code === 'DEVICE_BLOCKED' &&
+      blockedTxErr.reason === 'Fraud Suspicion' &&
+      blockedTxErr.blockedUntil === null &&
+      blockedBatchErr &&
+      blockedBatchErr.statusCode === 403 &&
+      !createdTxInDb &&
+      !createdBatchTxInDb &&
+      socketEvCountForBlocked === 0
+    );
+    recordResult('21c', 'Blocked device transaction & batch sync rejected 403 with NO DB records or socket events', test21cPassed, `TxErr: ${blockedTxErr?.message}, SocketEvs: ${socketEvCountForBlocked}`);
+
+    // HTTP Request helper for endpoint authorization testing
+    const makePostRequest = (endpointPath, body, token) => {
+      return new Promise((resolve) => {
+        const postData = JSON.stringify(body || {});
+        const req = http.request(
+          {
+            hostname: 'localhost',
+            port: PORT,
+            path: endpointPath,
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(postData),
+              ...(token && { Authorization: `Bearer ${token}` }),
+            },
+          },
+          (res) => {
+            let data = '';
+            res.on('data', (chunk) => { data += chunk; });
+            res.on('end', () => {
+              try {
+                resolve({ status: res.statusCode, data: JSON.parse(data) });
+              } catch {
+                resolve({ status: res.statusCode, data });
+              }
+            });
+          }
+        );
+        req.on('error', (err) => resolve({ status: 500, error: err }));
+        req.write(postData);
+        req.end();
+      });
+    };
+
+    const jwt = require('jsonwebtoken');
+
+    // Create tokens for Device A
+    const validDeviceAToken = generateAccessToken({
+      id: deviceA._id,
+      androidId: deviceA.androidId,
+      merchantId: merchantA._id,
+      role: 'device',
+    });
+
+    const expiredDeviceAToken = jwt.sign(
+      {
+        id: deviceA._id,
+        androidId: deviceA.androidId,
+        merchantId: merchantA._id,
+        role: 'device',
+      },
+      process.env.JWT_SECRET || 'fallback_secret_32chars_key_2026',
+      { expiresIn: '-1s' }
+    );
+
+    // TEST A: Valid active device + valid JWT -> heartbeat 200
+    await Device.findByIdAndUpdate(deviceA._id, { isBlocked: false, status: 'ACTIVE' });
+    const resTestA = await makePostRequest('/api/v1/android/heartbeat', { deviceId: deviceA.androidId }, validDeviceAToken);
+    const testAPassed = resTestA.status === 200 && resTestA.data?.success === true;
+    recordResult('A', 'Valid active device + valid JWT -> heartbeat 200 OK', testAPassed, `Status: ${resTestA.status}`);
+
+    // TEST B: Blocked device + valid JWT -> 403 DEVICE_BLOCKED
+    await Device.findByIdAndUpdate(deviceA._id, { isBlocked: true, blockReason: 'Stolen Device', blockedUntil: null, status: 'SUSPENDED' });
+    const resTestB = await makePostRequest('/api/v1/android/heartbeat', { deviceId: deviceA.androidId }, validDeviceAToken);
+    const testBPassed = resTestB.status === 403 && resTestB.data?.code === 'DEVICE_BLOCKED' && resTestB.data?.reason === 'Stolen Device';
+    recordResult('B', 'Blocked device + valid JWT -> 403 DEVICE_BLOCKED', testBPassed, `Status: ${resTestB.status}, Code: ${resTestB.data?.code}`);
+
+    // TEST C: Blocked device + expired JWT -> 403 DEVICE_BLOCKED
+    const resTestC = await makePostRequest('/api/v1/android/heartbeat', { deviceId: deviceA.androidId }, expiredDeviceAToken);
+    const testCPassed = resTestC.status === 403 && resTestC.data?.code === 'DEVICE_BLOCKED';
+    recordResult('C', 'Blocked device + expired JWT -> 403 DEVICE_BLOCKED', testCPassed, `Status: ${resTestC.status}, Code: ${resTestC.data?.code}`);
+
+    // TEST D: Unknown device -> 401
+    const unknownToken = generateAccessToken({ id: new mongoose.Types.ObjectId(), androidId: 'unknown_99999', role: 'device' });
+    const resTestD = await makePostRequest('/api/v1/android/heartbeat', { deviceId: 'unknown_99999' }, unknownToken);
+    const testDPassed = resTestD.status === 401;
+    recordResult('D', 'Unknown device -> 401 Unauthorized', testDPassed, `Status: ${resTestD.status}`);
+
+    // TEST E: Invalid device credential -> 401
+    const resTestE = await makePostRequest('/api/v1/android/heartbeat', { deviceId: deviceA.androidId }, 'invalid_jwt_string_123');
+    const testEPassed = resTestE.status === 401;
+    recordResult('E', 'Invalid device credential -> 401 Unauthorized', testEPassed, `Status: ${resTestE.status}`);
+
+    // TEST F: Unblocked device + expired JWT -> 200 OK + fresh token recovery
+    await Device.findByIdAndUpdate(deviceA._id, { isBlocked: false, status: 'OFFLINE' });
+    const resTestF = await makePostRequest('/api/v1/android/heartbeat', { deviceId: deviceA.androidId }, expiredDeviceAToken);
+    const testFPassed = resTestF.status === 200 && resTestF.data?.success === true && Boolean(resTestF.data?.token);
+    recordResult('F', 'Unblocked device + expired JWT -> 200 OK with fresh token recovery', testFPassed, `Status: ${resTestF.status}, HasNewToken: ${Boolean(resTestF.data?.token)}`);
+
+    // TEST G: Blocked device attempting payment sync -> 403 DEVICE_BLOCKED and zero DB/payment/socket/webhook side effects
+    await Device.findByIdAndUpdate(deviceA._id, { isBlocked: true, blockReason: 'Payment Block Test', blockedUntil: null, status: 'SUSPENDED' });
+    socketEventsA.length = 0;
+    const resTestG = await makePostRequest('/transactions/sync', { deviceId: deviceA.androidId, transactionId: `TX_BLOCKED_HTTP_${testSuffix}`, amount: 777 }, validDeviceAToken);
+    await new Promise((r) => setTimeout(r, 150));
+    const createdTxG = await Payment.findOne({ transactionId: `TX_BLOCKED_HTTP_${testSuffix}` });
+    const socketEvsG = socketEventsA.filter((e) => e.event === 'payment:created' || e.event === 'paymentReceived').length;
+    const testGPassed = resTestG.status === 403 && resTestG.data?.code === 'DEVICE_BLOCKED' && !createdTxG && socketEvsG === 0;
+    recordResult('G', 'Blocked device payment sync -> 403 DEVICE_BLOCKED with 0 DB records & 0 socket events', testGPassed, `Status: ${resTestG.status}, SocketEvs: ${socketEvsG}`);
+
+    // Unblock device for subsequent tests
+    await Device.findByIdAndUpdate(deviceA._id, { isBlocked: false, status: 'ACTIVE' });
 
     // Test 22: Temporary block auto-expires when time passes
     const pastUntil = new Date(Date.now() - 1000);

@@ -164,12 +164,22 @@ const androidHeartbeat = asyncHandler(async (req, res) => {
   device.isOnline = true;
   await device.save();
 
-  logger.info(`[API Android Heartbeat] Received from device: ${device.androidId} (${device._id}) for merchant: ${device.merchant}`);
+  logger.info(`[DEVICE_ONLINE] Heartbeat received from device: ${device.androidId} (${device._id}) for merchant: ${device.merchant}`);
 
   if (device.merchant) {
     emitDeviceEvent(device.merchant, 'device:heartbeat', device);
     emitDeviceEvent(device.merchant, 'device:online', device);
     emitDeviceEvent(device.merchant, 'device:updated', device);
+  }
+
+  let freshToken = null;
+  if (req.isTokenExpired && device) {
+    freshToken = generateAccessToken({
+      id: device._id,
+      androidId: device.androidId,
+      merchantId: device.merchant?._id || device.merchant,
+      role: 'device',
+    });
   }
 
   return res.status(200).json({
@@ -178,6 +188,7 @@ const androidHeartbeat = asyncHandler(async (req, res) => {
     isOnline: device?.isOnline ?? true,
     lastOnline: device?.lastOnline || new Date(),
     message: 'Heartbeat received',
+    ...(freshToken && { token: freshToken }),
   });
 });
 
