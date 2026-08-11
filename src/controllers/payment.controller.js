@@ -112,10 +112,27 @@ const verifyPayment = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, payment, 'Payment verified successfully');
 });
 
+// POST /api/v1/payments/verify-checkout
+const verifyCheckoutPayment = asyncHandler(async (req, res) => {
+  const { trxId, transactionId, merchantId, gateway, provider, amount, phone, customerName } = req.body;
+  const payment = await paymentService.verifyCustomerCheckoutPayment({
+    trxId: trxId || transactionId,
+    merchantId,
+    gateway,
+    provider,
+    amount,
+    phone,
+    customerName,
+  });
+  return ApiResponse.success(res, payment, 'Payment verified successfully');
+});
+
 module.exports = {
   syncPayment,
   getPaymentsList,
   getPaymentDetail,
   verifyPayment,
+  verifyCheckoutPayment,
 };
+
 

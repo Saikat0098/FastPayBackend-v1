@@ -7,6 +7,10 @@ const { enforceTenant } = require('../middlewares/tenant.middleware');
 // Sync Payment Endpoint (for Android Listener App)
 router.post('/sync', paymentController.syncPayment);
 
+// Public Customer Checkout Verification Endpoints (No Token Required)
+router.post('/verify-public', paymentController.verifyCheckoutPayment);
+router.post('/verify-checkout', paymentController.verifyCheckoutPayment);
+
 // List & Detail Payments Endpoints
 router.post('/verify', verifyToken, enforceTenant, paymentController.verifyPayment);
 router.put('/:id/status', verifyToken, enforceTenant, paymentController.verifyPayment);

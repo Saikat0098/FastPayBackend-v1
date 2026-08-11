@@ -101,6 +101,10 @@ const paymentSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    isUsed: {
+      type: Boolean,
+      default: false,
+    },
     isUsedForSubscription: {
       type: Boolean,
       default: false,

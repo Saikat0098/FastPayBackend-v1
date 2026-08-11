@@ -21,6 +21,7 @@ const analyticsRoutes = require('./analytics.routes');
 const auditRoutes = require('./audit.routes');
 const deviceRoutes = require('./device.routes');
 const paymentMethodRoutes = require('./paymentMethod.routes');
+const merchantGatewayRoutes = require('./merchantGateway.routes');
 
 // Android Controller for direct legacy compatibility routes
 const androidController = require('../controllers/android.controller');
@@ -33,6 +34,7 @@ router.get('/health', androidController.checkVersion);
 
 // Versioned SaaS Routes
 router.use('/auth', authRoutes);
+router.use('/merchant/gateways', merchantGatewayRoutes);
 router.use('/merchant', merchantRoutes);
 router.use('/admin', adminRoutes);
 router.use('/android', androidRoutes);

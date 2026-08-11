@@ -393,10 +393,91 @@ const verifyOrUpdatePaymentStatus = async ({ paymentId, trxId, merchantId, statu
   return payment;
 };
 
+const verifyCustomerCheckoutPayment = async ({
+  trxId,
+  merchantId,
+  gateway,
+  provider,
+  amount,
+  phone,
+  customerName,
+}) => {
+  if (!trxId || !trxId.trim()) {
+    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+  }
+
+  const cleanTrx = trxId.trim();
+  const targetProvider = (provider || gateway || '').toLowerCase().trim();
+
+  const query = {
+    transactionId: { $regex: new RegExp(`^${cleanTrx}$`, 'i') },
+  };
+
+  if (merchantId && mongoose.Types.ObjectId.isValid(merchantId)) {
+    query.merchant = merchantId;
+  }
+
+  const payment = await Payment.findOne(query);
+  if (!payment) {
+    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+  }
+
+  // 2. Correct merchant/tenant
+  if (merchantId && payment.merchant && payment.merchant.toString() !== merchantId.toString()) {
+    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+  }
+
+  // 3. Correct provider
+  if (targetProvider) {
+    const payProvider = (payment.provider || payment.gateway || '').toLowerCase().trim();
+    if (payProvider !== targetProvider) {
+      throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+    }
+  }
+
+  // 4. Payment completed/successful
+  const validStatuses = ['COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'VERIFIED', 'PARSED', 'SYNCED'];
+  if (!validStatuses.includes((payment.status || '').toUpperCase())) {
+    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+  }
+
+  // 5. Correct amount
+  if (amount && Number(amount) > 0) {
+    if (payment.amount < Number(amount)) {
+      throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+    }
+  }
+
+  // 6. Transaction has not already been used
+  if (payment.isUsed || payment.status === 'USED' || payment.status === 'CLAIMED') {
+    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+  }
+
+  // Mark as verified & used
+  payment.status = 'VERIFIED';
+  payment.paymentStatus = 'VERIFIED';
+  payment.isUsed = true;
+  if (customerName) payment.customerName = customerName;
+  if (phone) payment.phone = phone;
+
+  await payment.save();
+
+  emitPaymentUpdated(payment.merchant, {
+    _id: payment._id,
+    transactionId: payment.transactionId,
+    status: payment.status,
+    amount: payment.amount,
+  });
+
+  return payment;
+};
+
 module.exports = {
   processTransactionSync,
   processBatchSync,
   processIncomingSms,
   getPayments,
   verifyOrUpdatePaymentStatus,
+  verifyCustomerCheckoutPayment,
 };
+
