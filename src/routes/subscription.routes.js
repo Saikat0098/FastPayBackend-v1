@@ -3,9 +3,13 @@ const router = express.Router();
 const subscriptionController = require('../controllers/subscription.controller');
 const { verifyToken, authorizeRoles } = require('../middlewares/auth.middleware');
 
+// Public subscription endpoints
+router.get('/plans', subscriptionController.getPlans);
+router.get('/public-settings', subscriptionController.getPublicSettings);
+
+// Protected endpoints
 router.use(verifyToken);
 
-router.get('/plans', subscriptionController.getPlans);
 router.get('/my', subscriptionController.getMySubscription);
 router.get('/my-subscription', subscriptionController.getMySubscription);
 router.get('/my-application', subscriptionController.getMyApplication);

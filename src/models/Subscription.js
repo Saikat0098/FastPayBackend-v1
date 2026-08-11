@@ -2,16 +2,33 @@ const mongoose = require('mongoose');
 
 const subscriptionSchema = new mongoose.Schema(
   {
+    user: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      index: true,
+    },
     merchant: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Merchant',
       required: true,
       index: true,
     },
+    planId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Plan',
+    },
     plan: {
       type: String,
-      enum: ['30_days', '90_days', '365_days', 'unlimited'],
       default: '30_days',
+    },
+    planName: {
+      type: String,
+      default: '',
+    },
+    billingCycle: {
+      type: String,
+      enum: ['monthly', 'yearly', 'lifetime'],
+      default: 'monthly',
     },
     durationDays: {
       type: Number,
@@ -27,16 +44,34 @@ const subscriptionSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['active', 'expired', 'cancelled'],
+      enum: ['active', 'expired', 'cancelled', 'pending'],
       default: 'active',
     },
     price: {
       type: Number,
       default: 0,
     },
+    amount: {
+      type: Number,
+      default: 0,
+    },
+    paymentMethod: {
+      type: String,
+      default: 'bKash',
+    },
+    transactionId: {
+      type: String,
+      uppercase: true,
+      trim: true,
+      default: '',
+    },
     maxDevices: {
       type: Number,
       default: 5,
+    },
+    integrationLimit: {
+      type: Number,
+      default: 1,
     },
   },
   {
@@ -45,6 +80,9 @@ const subscriptionSchema = new mongoose.Schema(
 );
 
 subscriptionSchema.index({ merchant: 1, status: 1 });
+subscriptionSchema.index({ user: 1, status: 1 });
+subscriptionSchema.index({ transactionId: 1 });
 subscriptionSchema.index({ expireDate: 1 });
 
 module.exports = mongoose.model('Subscription', subscriptionSchema);
+

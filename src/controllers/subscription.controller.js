@@ -2,31 +2,30 @@ const asyncHandler = require('../utils/asyncHandler');
 const ApiResponse = require('../utils/apiResponse');
 const subscriptionService = require('../services/subscription.service');
 const Subscription = require('../models/Subscription');
+const Settings = require('../models/Settings');
 
 const getPlans = asyncHandler(async (req, res) => {
-  const plans = [
-    { id: '30_days', name: 'Standard Monthly', durationDays: 30, price: 500, maxDevices: 2 },
-    { id: '90_days', name: 'Quarterly Pro', durationDays: 90, price: 1350, maxDevices: 5 },
-    { id: '365_days', name: 'Annual Unlimited', durationDays: 365, price: 4800, maxDevices: 10 },
-    { id: 'unlimited', name: 'Lifetime Enterprise', durationDays: 36500, price: 15000, maxDevices: 50 },
-  ];
+  const plans = await subscriptionService.getPublicPlans();
   return ApiResponse.success(res, plans, 'Available subscription plans');
 });
 
 const getMySubscription = asyncHandler(async (req, res) => {
+  const userId = req.user?.id || req.user?._id;
   const merchantId = req.merchant?._id || req.query.merchantId;
-  const subscription = await Subscription.findOne({ merchant: merchantId, status: 'active' });
+  const subscription = await subscriptionService.getUserActiveSubscription(userId, merchantId);
   return ApiResponse.success(res, subscription, 'Subscription details retrieved');
 });
 
 const applySubscription = asyncHandler(async (req, res) => {
-  const { planId, plan, planName, companyName, paymentMethod, paymentReceiver, transactionId, note, amount } = req.body;
+  const { planId, plan, planName, companyName, billingCycle, paymentMethod, paymentReceiver, transactionId, note, amount } = req.body;
 
-  const application = await subscriptionService.submitApplication({
+  const result = await subscriptionService.submitApplication({
     userId: req.user.id,
-    plan: planId || plan || '30_days',
-    planName: planName || 'Standard Plan',
+    planId: planId || plan,
+    plan: plan || planId || 'starter',
+    planName,
     companyName,
+    billingCycle: billingCycle || 'monthly',
     paymentMethod,
     paymentReceiver,
     transactionId,
@@ -34,7 +33,7 @@ const applySubscription = asyncHandler(async (req, res) => {
     amount,
   });
 
-  return ApiResponse.success(res, application, 'Your payment verification request has been submitted.', 201);
+  return ApiResponse.success(res, result, result.message, 201);
 });
 
 const getMyApplication = asyncHandler(async (req, res) => {
@@ -45,7 +44,6 @@ const getMyApplication = asyncHandler(async (req, res) => {
 const getAdminApplications = asyncHandler(async (req, res) => {
   const { status } = req.query;
   const applications = await subscriptionService.getAdminApplications(status);
-  console.log("Admin applications query count:", applications.length);
   return ApiResponse.success(res, applications, 'Admin applications list');
 });
 
@@ -65,12 +63,13 @@ const rejectAdminSubscription = asyncHandler(async (req, res) => {
 });
 
 const renewSubscription = asyncHandler(async (req, res) => {
-  const { merchantId, plan, durationDays, price, maxDevices } = req.body;
+  const { merchantId, plan, billingCycle, durationDays, price, maxDevices } = req.body;
   const targetMerchant = merchantId || req.merchant?._id;
 
   const subscription = await subscriptionService.createSubscription({
     merchantId: targetMerchant,
-    plan: plan || '30_days',
+    plan: plan || 'starter',
+    billingCycle: billingCycle || 'monthly',
     durationDays: durationDays || 30,
     price: price || 0,
     maxDevices: maxDevices || 5,
@@ -80,8 +79,29 @@ const renewSubscription = asyncHandler(async (req, res) => {
 });
 
 const getAllSubscriptions = asyncHandler(async (req, res) => {
-  const subscriptions = await Subscription.find().populate('merchant', 'name email companyName').sort({ createdAt: -1 });
+  const subscriptions = await Subscription.find()
+    .populate('merchant', 'name email companyName')
+    .populate('user', 'name email phone')
+    .sort({ createdAt: -1 });
   return ApiResponse.success(res, subscriptions, 'All subscriptions list');
+});
+
+const getPublicSettings = asyncHandler(async (req, res) => {
+  let settings = await Settings.findOne();
+  if (!settings) {
+    settings = {
+      siteName: 'FastPay Auto Payment Gateway',
+      supportEmail: 'support@autopaymentgateway.com',
+      supportPhone: '+8801700000000',
+      whatsappNumber: '+8801700000000',
+    };
+  }
+  return ApiResponse.success(res, {
+    siteName: settings.siteName || 'FastPay Auto Payment Gateway',
+    supportEmail: settings.supportEmail || 'support@autopaymentgateway.com',
+    supportPhone: settings.supportPhone || '+8801700000000',
+    whatsappNumber: settings.whatsappNumber || '+8801700000000',
+  }, 'Public support settings');
 });
 
 module.exports = {
@@ -94,4 +114,5 @@ module.exports = {
   rejectAdminSubscription,
   renewSubscription,
   getAllSubscriptions,
+  getPublicSettings,
 };

@@ -20,6 +20,7 @@ const teamRoutes = require('./team.routes');
 const analyticsRoutes = require('./analytics.routes');
 const auditRoutes = require('./audit.routes');
 const deviceRoutes = require('./device.routes');
+const paymentMethodRoutes = require('./paymentMethod.routes');
 
 // Android Controller for direct legacy compatibility routes
 const androidController = require('../controllers/android.controller');
@@ -54,5 +55,7 @@ router.use('/customers', customerRoutes);
 router.use('/team', teamRoutes);
 router.use('/analytics', analyticsRoutes);
 router.use('/audit-logs', auditRoutes);
+router.use('/payment-methods', paymentMethodRoutes);
+router.use('/payment-method', paymentMethodRoutes);
 
 module.exports = router;

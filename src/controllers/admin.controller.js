@@ -166,35 +166,66 @@ const deleteMerchant = asyncHandler(async (req, res) => {
 
 // 4. Subscription Plans CRUD
 const getAllPlans = asyncHandler(async (req, res) => {
-  let plans = await Plan.find().sort({ priceBDT: 1, durationDays: 1 });
+  let plans = await Plan.find().sort({ displayOrder: 1, priceMonthly: 1, createdAt: -1 });
   if (plans.length === 0) {
-    // Seed default plans if collection is empty
-    plans = await Plan.insertMany([
-      { name: '30_days', title: 'Standard (30 Days)', durationDays: 30, priceBDT: 1500, maxDevices: 3, features: ['SMS Reader', 'Webhooks', '3 Devices'] },
-      { name: '90_days', title: 'Business (90 Days)', durationDays: 90, priceBDT: 3800, maxDevices: 10, features: ['All Standard', '10 Devices', 'Payment Forms'] },
-      { name: '365_days', title: 'Enterprise (1 Year)', durationDays: 365, priceBDT: 12000, maxDevices: 50, features: ['All Business', '50 Devices', 'Priority Support'] },
-      { name: 'unlimited', title: 'Lifetime Enterprise', durationDays: 36500, priceBDT: 35000, maxDevices: 999, features: ['Unlimited Access'] }
-    ]);
+    const subscriptionService = require('../services/subscription.service');
+    plans = await subscriptionService.getPublicPlans();
   }
   console.log("Admin plans query count:", plans.length);
   return ApiResponse.success(res, plans, 'Subscription plans list');
 });
 
 const createPlan = asyncHandler(async (req, res) => {
-  const { name, title, durationDays, priceBDT, maxDevices, features, description } = req.body;
-  if (!name || !title || !durationDays || priceBDT === undefined) {
-    throw new ApiError(400, 'Name, title, durationDays, and priceBDT are required');
+  const {
+    name,
+    title,
+    description,
+    priceMonthly,
+    priceYearly,
+    yearlyDiscountPercent,
+    integrationLimit,
+    maxDevices,
+    features,
+    isPopular,
+    isActive,
+    displayOrder,
+  } = req.body;
+
+  if (!name || !title) {
+    throw new ApiError(400, 'Name and title are required');
+  }
+
+  const cleanName = name.toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+  const existing = await Plan.findOne({ name: cleanName });
+  if (existing) {
+    throw new ApiError(400, `Plan with identifier '${cleanName}' already exists`);
+  }
+
+  const pMonthly = Number(priceMonthly) || 0;
+  const pYearly = Number(priceYearly) || 0;
+  let discount = Number(yearlyDiscountPercent) || 0;
+
+  if (!discount && pMonthly > 0 && pYearly > 0) {
+    const annualNormal = pMonthly * 12;
+    if (annualNormal > pYearly) {
+      discount = Math.round(((annualNormal - pYearly) / annualNormal) * 100);
+    }
   }
 
   const plan = await Plan.create({
-    name,
+    name: cleanName,
     title,
-    durationDays,
-    priceBDT,
-    maxDevices: maxDevices || 5,
-    features: Array.isArray(features) ? features : [],
     description: description || '',
-    isActive: true
+    priceMonthly: pMonthly,
+    priceYearly: pYearly,
+    priceBDT: pMonthly,
+    yearlyDiscountPercent: discount,
+    integrationLimit: Number(integrationLimit) || 1,
+    maxDevices: Number(maxDevices) || 1,
+    features: Array.isArray(features) ? features : (typeof features === 'string' ? features.split(',').map(f => f.trim()).filter(Boolean) : []),
+    isPopular: Boolean(isPopular),
+    isActive: isActive !== undefined ? Boolean(isActive) : true,
+    displayOrder: Number(displayOrder) || 0,
   });
 
   return ApiResponse.success(res, plan, 'Subscription plan created', 201);
@@ -202,7 +233,26 @@ const createPlan = asyncHandler(async (req, res) => {
 
 const updatePlan = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const plan = await Plan.findByIdAndUpdate(id, req.body, { new: true });
+  const updates = { ...req.body };
+
+  if (updates.features && typeof updates.features === 'string') {
+    updates.features = updates.features.split(',').map(f => f.trim()).filter(Boolean);
+  }
+
+  if (updates.priceMonthly !== undefined || updates.priceYearly !== undefined) {
+    const pMonthly = Number(updates.priceMonthly) || 0;
+    const pYearly = Number(updates.priceYearly) || 0;
+    if (pMonthly > 0) updates.priceBDT = pMonthly;
+
+    if (!updates.yearlyDiscountPercent && pMonthly > 0 && pYearly > 0) {
+      const annualNormal = pMonthly * 12;
+      if (annualNormal > pYearly) {
+        updates.yearlyDiscountPercent = Math.round(((annualNormal - pYearly) / annualNormal) * 100);
+      }
+    }
+  }
+
+  const plan = await Plan.findByIdAndUpdate(id, updates, { new: true, runValidators: true });
   if (!plan) throw new ApiError(404, 'Plan not found');
   return ApiResponse.success(res, plan, 'Subscription plan updated');
 });

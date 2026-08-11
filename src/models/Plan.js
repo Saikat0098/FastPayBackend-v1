@@ -6,16 +6,37 @@ const planSchema = new mongoose.Schema(
       type: String,
       required: true,
       unique: true,
-      enum: ['FREE', 'STARTER', 'BUSINESS', 'ENTERPRISE'],
+      trim: true,
     },
     title: {
       type: String,
       required: true,
     },
-    priceBDT: {
+    description: {
+      type: String,
+      default: '',
+    },
+    priceMonthly: {
       type: Number,
       required: true,
       default: 0,
+    },
+    priceYearly: {
+      type: Number,
+      required: true,
+      default: 0,
+    },
+    priceBDT: {
+      type: Number,
+      default: 0,
+    },
+    yearlyDiscountPercent: {
+      type: Number,
+      default: 0,
+    },
+    integrationLimit: {
+      type: Number,
+      default: 1,
     },
     maxDevices: {
       type: Number,
@@ -34,9 +55,17 @@ const planSchema = new mongoose.Schema(
         type: String,
       },
     ],
+    isPopular: {
+      type: Boolean,
+      default: false,
+    },
     isActive: {
       type: Boolean,
       default: true,
+    },
+    displayOrder: {
+      type: Number,
+      default: 0,
     },
   },
   {
@@ -45,3 +74,4 @@ const planSchema = new mongoose.Schema(
 );
 
 module.exports = mongoose.model('Plan', planSchema);
+

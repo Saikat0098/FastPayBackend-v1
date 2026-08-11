@@ -21,10 +21,14 @@ const merchantApplicationSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    billingCycle: {
+      type: String,
+      enum: ['monthly', 'yearly', 'lifetime'],
+      default: 'monthly',
+    },
     paymentMethod: {
       type: String,
       required: true,
-      enum: ['bKash', 'Nagad', 'Rocket', 'Bank Transfer', 'Other'],
       default: 'bKash',
     },
     paymentReceiver: {
