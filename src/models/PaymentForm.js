@@ -1,5 +1,47 @@
 const mongoose = require('mongoose');
 
+const customFieldSchema = new mongoose.Schema(
+  {
+    id: {
+      type: String,
+      required: true,
+    },
+    label: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    placeholder: {
+      type: String,
+      default: '',
+    },
+    type: {
+      type: String,
+      enum: ['text', 'textarea', 'email', 'phone', 'number', 'dropdown', 'radio', 'checkbox', 'date', 'file', 'trxId'],
+      default: 'text',
+    },
+    required: {
+      type: Boolean,
+      default: false,
+    },
+    options: [
+      {
+        type: String,
+        trim: true,
+      },
+    ],
+    displayOrder: {
+      type: Number,
+      default: 0,
+    },
+    isEnabled: {
+      type: Boolean,
+      default: true,
+    },
+  },
+  { _id: false }
+);
+
 const paymentFormSchema = new mongoose.Schema(
   {
     merchant: {
@@ -11,7 +53,7 @@ const paymentFormSchema = new mongoose.Schema(
     brand: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Brand',
-      required: true,
+      required: false,
       index: true,
     },
     title: {
@@ -28,6 +70,18 @@ const paymentFormSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    productName: {
+      type: String,
+      default: '',
+    },
+    logo: {
+      type: String,
+      default: '',
+    },
+    currency: {
+      type: String,
+      default: 'BDT',
+    },
     themeColor: {
       type: String,
       default: '#6366f1',
@@ -39,17 +93,22 @@ const paymentFormSchema = new mongoose.Schema(
     supportedGateways: [
       {
         type: String,
-        enum: ['bKash', 'Nagad', 'Rocket', 'Upay', 'Bank Transfer'],
+        enum: ['bKash', 'Nagad', 'Rocket', 'Upay', 'bkash', 'nagad', 'rocket', 'upay', 'Bank Transfer'],
       },
     ],
     amountType: {
       type: String,
       enum: ['FIXED', 'FLEXIBLE'],
-      default: 'FLEXIBLE',
+      default: 'FIXED',
     },
     fixedAmount: {
       type: Number,
       default: 0,
+    },
+    customFields: [customFieldSchema],
+    expiresAt: {
+      type: Date,
+      default: null,
     },
     successUrl: {
       type: String,
