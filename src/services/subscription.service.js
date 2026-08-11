@@ -238,10 +238,12 @@ const submitApplication = async ({
   const user = await User.findById(userId);
   let merchant = user.merchant ? await Merchant.findById(user.merchant) : null;
   if (!merchant) {
+    merchant = await Merchant.findOne({ email: user.email });
+  }
+  if (!merchant) {
     merchant = await Merchant.create({
       name: user.name || companyName.trim(),
       email: user.email,
-      password: user.password || 'MerchantPass123!',
       companyName: companyName.trim(),
       apiKey: `ap_key_${uuidv4().replace(/-/g, '')}`,
       apiSecret: `ap_sec_${uuidv4().replace(/-/g, '')}`,
@@ -256,6 +258,21 @@ const submitApplication = async ({
   user.role = 'MERCHANT';
   user.merchant = merchant._id;
   await user.save();
+
+  // Generate fresh JWT tokens with role: 'merchant' for immediate frontend auth synchronization
+  const { generateAccessToken, generateRefreshToken } = require('../config/jwt');
+  const freshAccessToken = generateAccessToken({
+    id: user._id,
+    email: user.email,
+    role: 'merchant',
+    merchant: merchant._id,
+  });
+  const freshRefreshToken = generateRefreshToken({
+    id: user._id,
+    email: user.email,
+    role: 'merchant',
+    merchant: merchant._id,
+  });
 
   const durationDays = selectedCycle === 'yearly' ? 365 : 30;
 
@@ -311,6 +328,20 @@ const submitApplication = async ({
     message: 'Payment Successful! Your subscription is now active.',
     subscription,
     application,
+    user: {
+      _id: user._id,
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      role: 'MERCHANT',
+      merchantId: merchant._id,
+      companyName: merchant.companyName,
+      apiKey: merchant.apiKey,
+    },
+    merchant,
+    token: freshAccessToken,
+    accessToken: freshAccessToken,
+    refreshToken: freshRefreshToken,
   };
 };
 

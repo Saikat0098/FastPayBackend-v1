@@ -63,14 +63,103 @@ const registerMerchant = async ({ name, email, password, companyName, plan = '30
 const loginMerchant = async ({ email, username, password, apiKey, ipAddress = '', userAgent = '' }) => {
   const loginEmail = (email || username || '').toLowerCase().trim();
 
-  let merchant;
+  // 1. If API Key provided, authenticate directly via Merchant model
   if (apiKey) {
-    merchant = await Merchant.findOne({ apiKey }).select('+password +apiSecret');
-  } else {
-    merchant = await Merchant.findOne({ email: loginEmail }).select('+password +apiSecret');
+    const merchant = await Merchant.findOne({ apiKey }).select('+password +apiSecret');
+    if (!merchant) {
+      throw new ApiError(401, 'Invalid API Key');
+    }
+    if (merchant.status !== 'active') {
+      throw new ApiError(403, 'Account is suspended or pending approval');
+    }
+    await LoginHistory.create({ user: merchant._id, userType: 'merchant', email: merchant.email, ipAddress, userAgent, status: 'SUCCESS' });
+    const accessToken = generateAccessToken({ id: merchant._id, email: merchant.email, role: 'merchant', merchant: merchant._id });
+    const refreshToken = generateRefreshToken({ id: merchant._id, email: merchant.email, role: 'merchant', merchant: merchant._id });
+    return {
+      success: true,
+      token: accessToken,
+      accessToken,
+      refreshToken,
+      role: 'MERCHANT',
+      merchantName: merchant.name,
+      companyName: merchant.companyName,
+      apiKey: merchant.apiKey,
+      merchant,
+    };
   }
 
-  // 1. If found as Merchant
+  // 2. Check User Model first for email/username login (Preserves original password authentication)
+  const user = await User.findOne({ email: loginEmail }).select('+password').populate('merchant');
+  if (user) {
+    const isMatch = await user.comparePassword(password);
+    if (!isMatch) {
+      await LoginHistory.create({ user: user._id, userType: 'user', email: loginEmail, ipAddress, userAgent, status: 'FAILED', failReason: 'Invalid password' });
+      throw new ApiError(401, 'Invalid email or password');
+    }
+
+    const normRole = (user.role || 'USER').toUpperCase();
+    const loginUserType = normRole === 'MERCHANT' ? 'merchant' : 'user';
+
+    if (user.status !== 'active') {
+      await LoginHistory.create({ user: user._id, userType: loginUserType, email: loginEmail, ipAddress, userAgent, status: 'FAILED', failReason: 'Account inactive or suspended' });
+      throw new ApiError(403, 'Account is suspended or inactive');
+    }
+
+    await LoginHistory.create({ user: user._id, userType: loginUserType, email: loginEmail, ipAddress, userAgent, status: 'SUCCESS' });
+    if (normRole === 'MERCHANT') {
+      // Ensure linked Merchant profile exists for converted merchant
+      let merchantObj = user.merchant;
+      if (!merchantObj) {
+        merchantObj = await Merchant.findOne({ email: loginEmail });
+      }
+      if (!merchantObj) {
+        const { v4: uuidv4 } = require('uuid');
+        merchantObj = await Merchant.create({
+          name: user.name,
+          email: user.email,
+          companyName: user.name || 'Merchant Store',
+          apiKey: `ap_key_${uuidv4().replace(/-/g, '')}`,
+          apiSecret: `ap_sec_${uuidv4().replace(/-/g, '')}`,
+          status: 'active',
+        });
+        user.merchant = merchantObj._id;
+        await user.save();
+      }
+
+      const merchantId = merchantObj._id || merchantObj.id;
+      const accessToken = generateAccessToken({ id: user._id, email: user.email, role: 'merchant', merchant: merchantId });
+      const refreshToken = generateRefreshToken({ id: user._id, email: user.email, role: 'merchant', merchant: merchantId });
+
+      return {
+        success: true,
+        token: accessToken,
+        accessToken,
+        refreshToken,
+        role: 'MERCHANT',
+        merchantName: merchantObj.name || user.name,
+        companyName: merchantObj.companyName || user.name,
+        apiKey: merchantObj.apiKey || '',
+        user,
+        merchant: merchantObj,
+      };
+    }
+
+    const roleForToken = normRole === 'SUPER_ADMIN' || normRole === 'ADMIN' ? 'superadmin' : 'user';
+    const accessToken = generateAccessToken({ id: user._id, email: user.email, role: roleForToken, merchant: user.merchant?._id || null });
+    const refreshToken = generateRefreshToken({ id: user._id, email: user.email, role: roleForToken, merchant: user.merchant?._id || null });
+
+    return {
+      success: true,
+      token: accessToken,
+      accessToken,
+      refreshToken,
+      role: normRole,
+      user,
+    };
+  }
+
+  // 3. Check Direct Merchant Model (registered directly via registerMerchant)
+  const merchant = await Merchant.findOne({ email: loginEmail }).select('+password +apiSecret');
   if (merchant) {
     const isMatch = await merchant.comparePassword(password);
     if (!isMatch) {
@@ -85,8 +174,8 @@ const loginMerchant = async ({ email, username, password, apiKey, ipAddress = ''
 
     await LoginHistory.create({ user: merchant._id, userType: 'merchant', email: loginEmail, ipAddress, userAgent, status: 'SUCCESS' });
 
-    const accessToken = generateAccessToken({ id: merchant._id, email: merchant.email, role: 'merchant' });
-    const refreshToken = generateRefreshToken({ id: merchant._id, email: merchant.email, role: 'merchant' });
+    const accessToken = generateAccessToken({ id: merchant._id, email: merchant.email, role: 'merchant', merchant: merchant._id });
+    const refreshToken = generateRefreshToken({ id: merchant._id, email: merchant.email, role: 'merchant', merchant: merchant._id });
 
     return {
       success: true,
@@ -96,35 +185,12 @@ const loginMerchant = async ({ email, username, password, apiKey, ipAddress = ''
       role: 'MERCHANT',
       merchantName: merchant.name,
       companyName: merchant.companyName,
+      apiKey: merchant.apiKey,
       merchant,
     };
   }
 
-  // 2. Check User Model
-  const user = await User.findOne({ email: loginEmail }).select('+password');
-  if (user) {
-    const isMatch = await user.comparePassword(password);
-    if (!isMatch) {
-      throw new ApiError(401, 'Invalid email or password');
-    }
-
-    const normRole = (user.role || 'USER').toUpperCase();
-    const roleForToken = normRole === 'SUPER_ADMIN' ? 'superadmin' : normRole === 'MERCHANT' ? 'merchant' : 'user';
-
-    const accessToken = generateAccessToken({ id: user._id, email: user.email, role: roleForToken, merchant: user.merchant });
-    const refreshToken = generateRefreshToken({ id: user._id, email: user.email, role: roleForToken, merchant: user.merchant });
-
-    return {
-      success: true,
-      token: accessToken,
-      accessToken,
-      refreshToken,
-      role: normRole,
-      user,
-    };
-  }
-
-  // 3. Check Admin Model
+  // 4. Check Admin Model
   const admin = await Admin.findOne({ email: loginEmail }).select('+password');
   if (admin) {
     const isMatch = await admin.comparePassword(password);

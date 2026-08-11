@@ -9,7 +9,7 @@ const loginHistorySchema = new mongoose.Schema(
     },
     userType: {
       type: String,
-      enum: ['admin', 'merchant', 'merchant_user', 'device'],
+      enum: ['admin', 'merchant', 'merchant_user', 'device', 'user'],
       required: true,
     },
     email: {

@@ -1,8 +1,9 @@
 const ApiError = require('../utils/apiError');
+const asyncHandler = require('../utils/asyncHandler');
 const Merchant = require('../models/Merchant');
 const User = require('../models/User');
 
-const enforceTenant = async (req, res, next) => {
+const enforceTenant = asyncHandler(async (req, res, next) => {
   const userRoleNorm = (req.user?.role || '').toUpperCase().replace(/_/g, '');
 
   // 1. Super Admin / Admin role: can access globally or filter by optional query/header merchantId
@@ -35,6 +36,6 @@ const enforceTenant = async (req, res, next) => {
   req.merchantId = merchantId;
   req.tenantFilter = { merchant: merchantId };
   next();
-};
+});
 
 module.exports = { enforceTenant };
