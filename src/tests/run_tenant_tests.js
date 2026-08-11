@@ -269,8 +269,7 @@ async function runTests() {
     const test21Passed = Boolean(blockActivationError && blockActivationError.message.includes('blocked') && blockHeartbeatErr && blockHeartbeatErr.code === 'DEVICE_BLOCKED');
     recordResult(21, 'Blocked device activation & heartbeat return 403 DEVICE_BLOCKED', test21Passed, `Message: ${blockHeartbeatErr?.message}`);
 
-    // Test 21c: Blocked device transaction sync & batch sync rejected with HTTP 403 DEVICE_BLOCKED and zero socket events
-    await adminController.blockDevice({ params: { deviceId: deviceA._id.toString() }, body: { blockReason: 'Fraud Suspicion', blockType: 'permanent' } }, resBlock, nextBlock);
+    await Device.findByIdAndUpdate(deviceA._id, { isBlocked: true, blockReason: 'Fraud Suspicion', blockedUntil: null, status: 'SUSPENDED' });
     await new Promise((r) => setTimeout(r, 150));
 
     socketEventsA.length = 0;

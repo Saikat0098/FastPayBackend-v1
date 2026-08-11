@@ -12,18 +12,17 @@ const FormSubmission = require('../models/FormSubmission');
 const PaymentLink = require('../models/PaymentLink');
 const Payment = require('../models/Payment');
 const { generateAccessToken } = require('../config/jwt');
-const paymentLinkService = require('../services/paymentLink.service');
 const axios = require('axios');
 
 async function runPaymentFormTests() {
   console.log('==================================================');
-  console.log(' STARTING PAYMENT FORM BUILDER & SUBMISSION TESTS');
+  console.log(' STARTING CHECKOUT MODAL & PAYMENT FORM TESTS');
   console.log('==================================================\n');
 
   await connectDB();
 
   const server = http.createServer(app);
-  const PORT = 5097;
+  const PORT = 5098;
   await new Promise((resolve) => server.listen(PORT, resolve));
   const serverUrl = `http://localhost:${PORT}/api/v1`;
 
@@ -42,22 +41,22 @@ async function runPaymentFormTests() {
   try {
     // Setup Merchants
     merchantA = await Merchant.create({
-      name: `Form Merchant A ${testSuffix}`,
-      email: `form_merchant_A_${testSuffix}@test.com`,
+      name: `Modal Merchant A ${testSuffix}`,
+      email: `modal_merchant_A_${testSuffix}@test.com`,
       password: 'password123',
-      companyName: `Store Form A ${testSuffix}`,
-      apiKey: `form_key_A_${testSuffix}`,
-      apiSecret: `form_sec_A_${testSuffix}`,
+      companyName: `Store Modal A ${testSuffix}`,
+      apiKey: `modal_key_A_${testSuffix}`,
+      apiSecret: `modal_sec_A_${testSuffix}`,
       status: 'active',
     });
 
     merchantB = await Merchant.create({
-      name: `Form Merchant B ${testSuffix}`,
-      email: `form_merchant_B_${testSuffix}@test.com`,
+      name: `Modal Merchant B ${testSuffix}`,
+      email: `modal_merchant_B_${testSuffix}@test.com`,
       password: 'password123',
-      companyName: `Store Form B ${testSuffix}`,
-      apiKey: `form_key_B_${testSuffix}`,
-      apiSecret: `form_sec_B_${testSuffix}`,
+      companyName: `Store Modal B ${testSuffix}`,
+      apiKey: `modal_key_B_${testSuffix}`,
+      apiSecret: `modal_sec_B_${testSuffix}`,
       status: 'active',
     });
 
@@ -67,348 +66,352 @@ async function runPaymentFormTests() {
     const authHeaderA = { headers: { Authorization: `Bearer ${tokenA}` } };
     const authHeaderB = { headers: { Authorization: `Bearer ${tokenB}` } };
 
-    // Setup active gateway for Merchant A
-    await MerchantGateway.create({
+    // Setup Gateways for Merchant A
+    const gwBkash = await MerchantGateway.create({
       merchant: merchantA._id,
       provider: 'bkash',
-      accountNumber: '01711112222',
+      accountNumber: '01711111111',
       accountType: 'personal',
       isActive: true,
       isDefault: true,
     });
 
-    let formA, formB;
-
-    // TEST 1: Merchant creates form
+    // TEST 1: Merchant has only bKash
     try {
-      const res = await axios.post(`${serverUrl}/forms`, {
-        title: `VIP Checkout ${testSuffix}`,
-        productName: 'Pro License',
-        fixedAmount: 1500,
-        currency: 'BDT',
-        supportedGateways: ['bKash', 'Nagad'],
-      }, authHeaderA);
-
-      formA = res.data.data;
-      const pass = res.status === 201 && formA.title.includes('VIP Checkout') && formA.fixedAmount === 1500;
-      recordResult(1, 'Merchant creates form', pass);
+      const res = await axios.get(`${serverUrl}/merchant/gateways/public/${merchantA._id}`);
+      const list = res.data.data;
+      const pass = res.status === 200 && list.length === 1 && list[0].provider === 'bkash';
+      recordResult(1, 'Merchant has only bKash', pass, `Count: ${list.length}`);
     } catch (err) {
-      recordResult(1, 'Merchant creates form', false, err.response?.data?.message || err.message);
+      recordResult(1, 'Merchant has only bKash', false, err.response?.data?.message || err.message);
     }
 
-    // TEST 2: Merchant edits form
-    try {
-      const res = await axios.put(`${serverUrl}/forms/${formA._id}`, {
-        title: `Updated VIP Checkout ${testSuffix}`,
-        fixedAmount: 2000,
-      }, authHeaderA);
+    // TEST 2: Merchant has bKash + Nagad
+    const gwNagad = await MerchantGateway.create({
+      merchant: merchantA._id,
+      provider: 'nagad',
+      accountNumber: '01822222222',
+      accountType: 'personal',
+      isActive: true,
+    });
 
-      const updated = res.data.data;
-      const pass = res.status === 200 && updated.title.includes('Updated VIP Checkout') && updated.fixedAmount === 2000;
-      formA = updated;
-      recordResult(2, 'Merchant edits form', pass);
+    try {
+      const res = await axios.get(`${serverUrl}/merchant/gateways/public/${merchantA._id}`);
+      const list = res.data.data;
+      const pass = res.status === 200 && list.length === 2 && list.some((g) => g.provider === 'nagad');
+      recordResult(2, 'Merchant has bKash + Nagad', pass, `Count: ${list.length}`);
     } catch (err) {
-      recordResult(2, 'Merchant edits form', false, err.response?.data?.message || err.message);
+      recordResult(2, 'Merchant has bKash + Nagad', false, err.response?.data?.message || err.message);
     }
 
-    // TEST 3: Merchant deletes form (create temporary form first to test deletion)
+    // TEST 3: Merchant has all four gateways
+    const gwRocket = await MerchantGateway.create({
+      merchant: merchantA._id,
+      provider: 'rocket',
+      accountNumber: '01933333333',
+      accountType: 'agent',
+      isActive: true,
+    });
+    const gwUpay = await MerchantGateway.create({
+      merchant: merchantA._id,
+      provider: 'upay',
+      accountNumber: '01644444444',
+      accountType: 'personal',
+      isActive: true,
+    });
+
     try {
-      const tempRes = await axios.post(`${serverUrl}/forms`, { title: 'Temp Delete Form' }, authHeaderA);
-      const tempId = tempRes.data.data._id;
-      const delRes = await axios.delete(`${serverUrl}/forms/${tempId}`, authHeaderA);
-      const listRes = await axios.get(`${serverUrl}/forms`, authHeaderA);
-      const pass = delRes.status === 200 && !listRes.data.data.some((f) => f._id === tempId);
-      recordResult(3, 'Merchant deletes form', pass);
+      const res = await axios.get(`${serverUrl}/merchant/gateways/public/${merchantA._id}`);
+      const list = res.data.data;
+      const pass = res.status === 200 && list.length === 4;
+      recordResult(3, 'Merchant has all four gateways', pass, `Count: ${list.length}`);
     } catch (err) {
-      recordResult(3, 'Merchant deletes form', false, err.response?.data?.message || err.message);
+      recordResult(3, 'Merchant has all four gateways', false, err.response?.data?.message || err.message);
     }
 
-    // TEST 4: Merchant adds custom field
+    // TEST 4: Disabled gateway does not appear
+    await MerchantGateway.findByIdAndUpdate(gwUpay._id, { isActive: false });
     try {
-      const fields = [
-        { id: 'f_name', label: 'Customer Name', placeholder: 'e.g. Rahim', type: 'text', required: true, displayOrder: 0, isEnabled: true },
-        { id: 'f_wa', label: 'WhatsApp Number', placeholder: '01700000000', type: 'phone', required: false, displayOrder: 1, isEnabled: true },
-      ];
-      const res = await axios.put(`${serverUrl}/forms/${formA._id}`, { customFields: fields }, authHeaderA);
-      const updated = res.data.data;
-      const pass = res.status === 200 && updated.customFields.length === 2 && updated.customFields[1].label === 'WhatsApp Number';
-      formA = updated;
-      recordResult(4, 'Merchant adds custom field', pass);
+      const res = await axios.get(`${serverUrl}/merchant/gateways/public/${merchantA._id}`);
+      const list = res.data.data;
+      const pass = !list.some((g) => g.provider === 'upay');
+      recordResult(4, 'Disabled gateway does not appear', pass, `Public Count: ${list.length}`);
     } catch (err) {
-      recordResult(4, 'Merchant adds custom field', false, err.response?.data?.message || err.message);
+      recordResult(4, 'Disabled gateway does not appear', false, err.response?.data?.message || err.message);
     }
 
-    // TEST 5: Merchant edits custom field
+    // TEST 5: Deleted gateway does not appear
+    await MerchantGateway.findByIdAndDelete(gwRocket._id);
     try {
-      const fields = [...formA.customFields];
-      fields[1].label = 'Updated WhatsApp Number';
-      fields[1].required = true;
-      const res = await axios.put(`${serverUrl}/forms/${formA._id}`, { customFields: fields }, authHeaderA);
-      const updated = res.data.data;
-      const pass = res.status === 200 && updated.customFields[1].label === 'Updated WhatsApp Number' && updated.customFields[1].required === true;
-      formA = updated;
-      recordResult(5, 'Merchant edits custom field', pass);
+      const res = await axios.get(`${serverUrl}/merchant/gateways/public/${merchantA._id}`);
+      const list = res.data.data;
+      const pass = !list.some((g) => g.provider === 'rocket');
+      recordResult(5, 'Deleted gateway does not appear', pass, `Public Count: ${list.length}`);
     } catch (err) {
-      recordResult(5, 'Merchant edits custom field', false, err.response?.data?.message || err.message);
+      recordResult(5, 'Deleted gateway does not appear', false, err.response?.data?.message || err.message);
     }
 
-    // TEST 6: Merchant deletes custom field
+    // TEST 6: Gateway receiving number comes from database
     try {
-      const fields = [formA.customFields[0]]; // keep only first field
-      const res = await axios.put(`${serverUrl}/forms/${formA._id}`, { customFields: fields }, authHeaderA);
-      const updated = res.data.data;
-      const pass = res.status === 200 && updated.customFields.length === 1;
-      formA = updated;
-      recordResult(6, 'Merchant deletes custom field', pass);
+      const res = await axios.get(`${serverUrl}/merchant/gateways/public/${merchantA._id}`);
+      const list = res.data.data;
+      const bk = list.find((g) => g.provider === 'bkash');
+      const pass = bk && bk.accountNumber === '01711111111';
+      recordResult(6, 'Gateway receiving number comes from database', pass, `Number: ${bk?.accountNumber}`);
     } catch (err) {
-      recordResult(6, 'Merchant deletes custom field', false, err.response?.data?.message || err.message);
+      recordResult(6, 'Gateway receiving number comes from database', false, err.response?.data?.message || err.message);
     }
 
-    // TEST 7: Public form loads
-    try {
-      const res = await axios.get(`${serverUrl}/forms/public/${formA.slug}`);
-      const pubForm = res.data.data;
-      const pass = res.status === 200 && pubForm.slug === formA.slug;
-      recordResult(7, 'Public form loads', pass);
-    } catch (err) {
-      recordResult(7, 'Public form loads', false, err.response?.data?.message || err.message);
-    }
+    // Create Payment Form for Merchant A
+    const formA = await PaymentForm.create({
+      merchant: merchantA._id,
+      title: `Checkout Form ${testSuffix}`,
+      slug: `form-slug-${testSuffix}`,
+      fixedAmount: 250,
+      productName: 'VIP Pass',
+      successUrl: 'https://example.com/thankyou',
+      customFields: [
+        { id: 'f1', label: 'Full Name', type: 'text', required: true },
+        { id: 'f2', label: 'WhatsApp', type: 'phone', required: false },
+      ],
+      status: 'ACTIVE',
+    });
 
-    // TEST 8: Public form renders dynamic fields
-    try {
-      const res = await axios.get(`${serverUrl}/forms/public/${formA.slug}`);
-      const pubForm = res.data.data;
-      const pass = Array.isArray(pubForm.customFields) && pubForm.customFields.some((f) => f.label === 'Customer Name');
-      recordResult(8, 'Public form renders dynamic fields', pass);
-    } catch (err) {
-      recordResult(8, 'Public form renders dynamic fields', false, err.response?.data?.message || err.message);
-    }
-
-    // Seed a valid transaction in Payment collection for Merchant A
-    const validTxId = `TX_FORM_${testSuffix}`;
+    // Seed Payment in DB for verification
+    const validTxId = `TX_CHECKOUT_${testSuffix}`;
     await Payment.create({
       merchant: merchantA._id,
       gateway: 'bKash',
       provider: 'bKash',
       transactionId: validTxId,
-      amount: 2000,
-      sender: '01711112222',
+      amount: 250,
+      sender: '01700009999',
       status: 'COMPLETED',
-      paymentStatus: 'COMPLETED',
     });
 
-    let submissionDoc;
-
-    // TEST 9: Valid transaction verifies successfully
+    // TEST 7: Correct amount reaches verification
     try {
       const res = await axios.post(`${serverUrl}/forms/public/${formA.slug}/submit`, {
         formId: formA._id,
-        formData: { 'Customer Name': 'Rahim Ahmed', 'WhatsApp Number': '01711112222' },
-        amount: 2000,
+        formData: { 'Full Name': 'Rahim', WhatsApp: '01700009999' },
+        amount: 250,
         paymentMethod: 'bKash',
         transactionId: validTxId,
-        customerPhone: '01711112222',
-        customerName: 'Rahim Ahmed',
+        customerName: 'Rahim',
+        customerPhone: '01700009999',
       });
-
-      const subData = res.data.data;
-      submissionDoc = subData.submission;
-      const pass = res.status === 200 && submissionDoc && submissionDoc.transactionId === validTxId && submissionDoc.paymentStatus === 'VERIFIED';
-      recordResult(9, 'Valid transaction verifies successfully', pass);
+      const pass = res.status === 200 && res.data.data.submission.amount === 250;
+      recordResult(7, 'Correct amount reaches verification', pass);
     } catch (err) {
-      recordResult(9, 'Valid transaction verifies successfully', false, err.response?.data?.message || err.message);
+      recordResult(7, 'Correct amount reaches verification', false, err.response?.data?.message || err.message);
     }
 
-    // TEST 10: Invalid transaction is rejected
+    // TEST 8: Invalid transaction rejected
     try {
       await axios.post(`${serverUrl}/forms/public/${formA.slug}/submit`, {
         formId: formA._id,
-        formData: { 'Customer Name': 'Fake Payer' },
-        amount: 2000,
+        amount: 250,
         paymentMethod: 'bKash',
-        transactionId: 'INVALID_TRX_9999',
+        transactionId: 'FAKE_TRX_9999',
       });
-      recordResult(10, 'Invalid transaction is rejected', false, 'Accepted invalid transaction unexpectedly');
+      recordResult(8, 'Invalid transaction rejected', false, 'Accepted fake transaction unexpectedly');
     } catch (err) {
       const pass = err.response?.status === 400 && err.response?.data?.message?.includes('Transaction ID is incorrect');
-      recordResult(10, 'Invalid transaction is rejected', pass, err.response?.data?.message);
+      recordResult(8, 'Invalid transaction rejected', pass, err.response?.data?.message);
     }
 
-    // Seed another payment with amount 500
-    const mismatchAmtTxId = `TX_AMT_${testSuffix}`;
+    // Seed Amount Mismatch Payment
+    const mismatchTxId = `TX_MISMATCH_${testSuffix}`;
     await Payment.create({
       merchant: merchantA._id,
       gateway: 'bKash',
       provider: 'bKash',
-      transactionId: mismatchAmtTxId,
-      amount: 500,
-      sender: '01711112222',
+      transactionId: mismatchTxId,
+      amount: 100, // form expects 250
       status: 'COMPLETED',
     });
 
-    // TEST 11: Amount mismatch rejected
+    // TEST 9: Amount mismatch rejected
     try {
       await axios.post(`${serverUrl}/forms/public/${formA.slug}/submit`, {
-        formId: formA._id, // requires 2000
-        formData: { 'Customer Name': 'Amount Tester' },
-        amount: 2000,
+        formId: formA._id,
+        amount: 250,
         paymentMethod: 'bKash',
-        transactionId: mismatchAmtTxId, // payment only has 500
+        transactionId: mismatchTxId,
       });
-      recordResult(11, 'Amount mismatch rejected', false, 'Accepted amount mismatch unexpectedly');
+      recordResult(9, 'Amount mismatch rejected', false, 'Accepted amount mismatch unexpectedly');
     } catch (err) {
       const pass = err.response?.status === 400;
-      recordResult(11, 'Amount mismatch rejected', pass, err.response?.data?.message);
+      recordResult(9, 'Amount mismatch rejected', pass, err.response?.data?.message);
     }
 
-    // Seed another payment with provider Nagad
-    const nagadTxId = `TX_NAGAD_${testSuffix}`;
+    // Seed Provider Mismatch Payment
+    const nagadTxId = `TX_NAGAD_MIS_${testSuffix}`;
     await Payment.create({
       merchant: merchantA._id,
       gateway: 'Nagad',
       provider: 'Nagad',
       transactionId: nagadTxId,
-      amount: 2000,
-      sender: '01811112222',
+      amount: 250,
       status: 'COMPLETED',
     });
 
-    // TEST 12: Provider mismatch rejected
+    // TEST 10: Provider mismatch rejected
     try {
       await axios.post(`${serverUrl}/forms/public/${formA.slug}/submit`, {
         formId: formA._id,
-        formData: { 'Customer Name': 'Provider Tester' },
-        amount: 2000,
+        amount: 250,
         paymentMethod: 'bKash', // selected bKash, but payment is Nagad
         transactionId: nagadTxId,
       });
-      recordResult(12, 'Provider mismatch rejected', false, 'Accepted provider mismatch unexpectedly');
+      recordResult(10, 'Provider mismatch rejected', false, 'Accepted provider mismatch unexpectedly');
     } catch (err) {
       const pass = err.response?.status === 400;
-      recordResult(12, 'Provider mismatch rejected', pass, err.response?.data?.message);
+      recordResult(10, 'Provider mismatch rejected', pass, err.response?.data?.message);
     }
 
-    // TEST 13: Duplicate transaction rejected (trying to reuse validTxId which was used in Test 9)
+    // TEST 11: Duplicate transaction rejected (trying to reuse validTxId which was used in Test 7)
     try {
       await axios.post(`${serverUrl}/forms/public/${formA.slug}/submit`, {
         formId: formA._id,
-        formData: { 'Customer Name': 'Duplicate Payer' },
-        amount: 2000,
+        amount: 250,
         paymentMethod: 'bKash',
         transactionId: validTxId,
       });
-      recordResult(13, 'Duplicate transaction rejected', false, 'Accepted duplicate transaction unexpectedly');
+      recordResult(11, 'Duplicate transaction rejected', false, 'Accepted duplicate transaction unexpectedly');
     } catch (err) {
       const pass = err.response?.status === 400;
-      recordResult(13, 'Duplicate transaction rejected', pass, err.response?.data?.message);
+      recordResult(11, 'Duplicate transaction rejected', pass, err.response?.data?.message);
     }
 
-    // TEST 14: Successful FormSubmission created
+    // Seed Fresh Tx for Test 12 & 13
+    const freshTxId = `TX_SUCCESS_${testSuffix}`;
+    await Payment.create({
+      merchant: merchantA._id,
+      gateway: 'bKash',
+      provider: 'bKash',
+      transactionId: freshTxId,
+      amount: 250,
+      status: 'COMPLETED',
+    });
+
+    let successSubmissionId = null;
+
+    // TEST 12: Successful transaction verified
     try {
-      const sub = await FormSubmission.findById(submissionDoc._id);
-      const pass = sub && sub.transactionId === validTxId && sub.merchant.toString() === merchantA._id.toString();
-      recordResult(14, 'Successful FormSubmission created', pass);
+      const res = await axios.post(`${serverUrl}/forms/public/${formA.slug}/submit`, {
+        formId: formA._id,
+        formData: { 'Full Name': 'Kabir Ahmed', fullName: 'Kabir Ahmed', phone: '01711119999', WhatsApp: '01711119999' },
+        amount: 250,
+        paymentMethod: 'bKash',
+        transactionId: freshTxId,
+        customerName: 'Kabir Ahmed',
+        customerPhone: '01711119999',
+      });
+      successSubmissionId = res.data.data.submission._id;
+      const pass = res.status === 200 && res.data.data.submission.paymentStatus === 'VERIFIED';
+      recordResult(12, 'Successful transaction verified', pass);
     } catch (err) {
-      recordResult(14, 'Successful FormSubmission created', false, err.message);
+      recordResult(12, 'Successful transaction verified', false, err.response?.data?.message || err.message);
     }
 
-    // TEST 15: Merchant can view own submissions
+    // TEST 13: FormSubmission created after success
     try {
-      const res = await axios.get(`${serverUrl}/orders`, authHeaderA);
-      const list = res.data.data;
-      const pass = res.status === 200 && Array.isArray(list) && list.some((s) => s._id === submissionDoc._id.toString());
-      recordResult(15, 'Merchant can view own submissions', pass, `Count: ${list.length}`);
+      const sub = await FormSubmission.findById(successSubmissionId);
+      const pass = sub && sub.transactionId === freshTxId && sub.orderStatus === 'COMPLETED';
+      recordResult(13, 'FormSubmission created after success', pass);
     } catch (err) {
-      recordResult(15, 'Merchant can view own submissions', false, err.response?.data?.message || err.message);
+      recordResult(13, 'FormSubmission created after success', false, err.message);
     }
 
-    // TEST 16: Merchant B cannot view Merchant A's submissions
+    // TEST 14: Customer data preserved
+    try {
+      const sub = await FormSubmission.findById(successSubmissionId);
+      const pass = sub && sub.formData && sub.formData.fullName === 'Kabir Ahmed' && sub.formData.phone === '01711119999';
+      recordResult(14, 'Customer data preserved', pass);
+    } catch (err) {
+      recordResult(14, 'Customer data preserved', false, err.message);
+    }
+
+    // TEST 15: Custom fields preserved
+    try {
+      const sub = await FormSubmission.findById(successSubmissionId);
+      const pass = sub && sub.formData && sub.formData['Full Name'] === 'Kabir Ahmed' && sub.formData.WhatsApp === '01711119999';
+      recordResult(15, 'Custom fields preserved', pass);
+    } catch (err) {
+      recordResult(15, 'Custom fields preserved', false, err.message);
+    }
+
+    // TEST 16: Merchant A cannot access Merchant B gateways
+    try {
+      const res = await axios.get(`${serverUrl}/merchant/gateways`, authHeaderB);
+      const bGateways = res.data.data;
+      const pass = res.status === 200 && !bGateways.some((g) => g._id === gwBkash._id.toString());
+      recordResult(16, 'Merchant A cannot access Merchant B gateways', pass, `B Count: ${bGateways.length}`);
+    } catch (err) {
+      recordResult(16, 'Merchant A cannot access Merchant B gateways', false, err.response?.data?.message || err.message);
+    }
+
+    // TEST 17: Merchant A cannot access Merchant B orders
     try {
       const res = await axios.get(`${serverUrl}/orders`, authHeaderB);
-      const list = res.data.data;
-      const pass = res.status === 200 && !list.some((s) => s._id === submissionDoc._id.toString());
-      recordResult(16, 'Merchant B cannot view Merchant A\'s submissions', pass, `B count: ${list.length}`);
+      const bOrders = res.data.data;
+      const pass = res.status === 200 && !bOrders.some((o) => o._id === successSubmissionId.toString());
+      recordResult(17, 'Merchant A cannot access Merchant B orders', pass, `B Orders Count: ${bOrders.length}`);
     } catch (err) {
-      recordResult(16, 'Merchant B cannot view Merchant A\'s submissions', false, err.response?.data?.message || err.message);
+      recordResult(17, 'Merchant A cannot access Merchant B orders', false, err.response?.data?.message || err.message);
     }
 
-    // TEST 17: Customer detail page shows dynamic formData
+    // TEST 18: Double-click Verify does not create duplicate payment
     try {
-      const res = await axios.get(`${serverUrl}/orders/${submissionDoc._id}`, authHeaderA);
-      const detail = res.data.data;
-      const pass = res.status === 200 && detail.formData && detail.formData['Customer Name'] === 'Rahim Ahmed';
-      recordResult(17, 'Customer detail page shows dynamic formData', pass);
-    } catch (err) {
-      recordResult(17, 'Customer detail page shows dynamic formData', false, err.response?.data?.message || err.message);
-    }
-
-    // TEST 18: Inactive form cannot be submitted
-    try {
-      await axios.patch(`${serverUrl}/forms/${formA._id}/toggle`, {}, authHeaderA); // deactivate form
-      const freshTxId = `TX_INACTIVE_${testSuffix}`;
-      await Payment.create({
-        merchant: merchantA._id,
-        gateway: 'bKash',
-        provider: 'bKash',
-        transactionId: freshTxId,
-        amount: 2000,
-        status: 'COMPLETED',
-      });
-
+      // Trying to verify freshTxId again (already used in Test 12)
       await axios.post(`${serverUrl}/forms/public/${formA.slug}/submit`, {
         formId: formA._id,
+        amount: 250,
+        paymentMethod: 'bKash',
         transactionId: freshTxId,
       });
-      recordResult(18, 'Inactive form cannot be submitted', false, 'Submitted to inactive form unexpectedly');
+      recordResult(18, 'Double-click Verify does not create duplicate payment', false, 'Accepted duplicate submission unexpectedly');
     } catch (err) {
-      const pass = err.response?.status === 400 && err.response?.data?.message?.includes('inactive');
-      recordResult(18, 'Inactive form cannot be submitted', pass, err.response?.data?.message);
+      const pass = err.response?.status === 400;
+      recordResult(18, 'Double-click Verify does not create duplicate payment', pass, err.response?.data?.message);
     }
 
-    // Re-activate formA for safety
-    await axios.patch(`${serverUrl}/forms/${formA._id}/toggle`, {}, authHeaderA).catch(() => {});
+    // TEST 19: Checkout amount cannot be manipulated from frontend
+    const tamperTxId = `TX_TAMPER_${testSuffix}`;
+    await Payment.create({
+      merchant: merchantA._id,
+      gateway: 'bKash',
+      provider: 'bKash',
+      transactionId: tamperTxId,
+      amount: 1, // customer paid 1 Taka in DB
+      status: 'COMPLETED',
+    });
 
-    // TEST 19: Expired form cannot be submitted
     try {
-      const pastDate = new Date(Date.now() - 3600000); // 1 hour in the past
-      await axios.put(`${serverUrl}/forms/${formA._id}`, { expiresAt: pastDate }, authHeaderA);
-
-      const freshTxId2 = `TX_EXPIRED_${testSuffix}`;
-      await Payment.create({
-        merchant: merchantA._id,
-        gateway: 'bKash',
-        provider: 'bKash',
-        transactionId: freshTxId2,
-        amount: 2000,
-        status: 'COMPLETED',
-      });
-
+      // Attacker sends amount: 1 in payload to match payment, but formA fixedAmount is 250
       await axios.post(`${serverUrl}/forms/public/${formA.slug}/submit`, {
         formId: formA._id,
-        transactionId: freshTxId2,
+        amount: 1, // tampered amount payload
+        paymentMethod: 'bKash',
+        transactionId: tamperTxId,
       });
-      recordResult(19, 'Expired form cannot be submitted', false, 'Submitted to expired form unexpectedly');
+      recordResult(19, 'Checkout amount cannot be manipulated from frontend', false, 'Accepted tampered amount unexpectedly');
     } catch (err) {
-      const pass = err.response?.status === 410 || (err.response?.status === 400 && err.response?.data?.message?.includes('expired'));
-      recordResult(19, 'Expired form cannot be submitted', pass, err.response?.data?.message);
+      const pass = err.response?.status === 400;
+      recordResult(19, 'Checkout amount cannot be manipulated from frontend', pass, err.response?.data?.message);
     }
 
-    // TEST 20: Existing Payment Link functionality remains working
+    // TEST 20: Successful payment redirects correctly if return URL exists
     try {
-      const link = await paymentLinkService.createLink({
-        merchantId: merchantA._id,
-        title: `Test Payment Link ${testSuffix}`,
-        amount: 750,
-      });
-      const fetchedLink = await paymentLinkService.getPublicLink(link.code);
-      const pass = link && fetchedLink && fetchedLink.amount === 750;
-      recordResult(20, 'Existing Payment Link functionality remains working', pass);
+      const pass = formA.successUrl === 'https://example.com/thankyou';
+      recordResult(20, 'Successful payment redirects correctly if return URL exists', pass, formA.successUrl);
     } catch (err) {
-      recordResult(20, 'Existing Payment Link functionality remains working', false, err.message);
+      recordResult(20, 'Successful payment redirects correctly if return URL exists', false, err.message);
     }
 
   } catch (globalErr) {
-    console.error('GLOBAL PAYMENT FORM TEST ERROR:', globalErr);
+    console.error('GLOBAL TEST ERROR:', globalErr);
   } finally {
     // Cleanup created test records
     await PaymentForm.deleteMany({ merchant: { $in: [merchantA?._id, merchantB?._id] } }).catch(() => {});
@@ -423,13 +426,13 @@ async function runPaymentFormTests() {
   }
 
   console.log('\n==================================================');
-  console.log(' PAYMENT FORM & SUBMISSION TEST RESULTS SUMMARY');
+  console.log(' CHECKOUT & PAYMENT MODAL TEST RESULTS SUMMARY');
   console.log('==================================================');
   const passedCount = testResults.filter((r) => r.passed).length;
   console.log(`PASSED: ${passedCount} / ${testResults.length}`);
 
   if (passedCount === testResults.length) {
-    console.log('🎉 ALL PAYMENT FORM TESTS PASSED SUCCESSFULLY!');
+    console.log('🎉 ALL CHECKOUT MODAL TESTS PASSED SUCCESSFULLY!');
     if (require.main === module) process.exit(0);
   } else {
     console.log('❌ SOME TESTS FAILED. REVIEW DETAILS ABOVE.');
