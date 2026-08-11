@@ -101,6 +101,14 @@ const paymentSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    isUsedForSubscription: {
+      type: Boolean,
+      default: false,
+    },
+    usedBySubscription: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Subscription',
+    },
     environment: {
       type: String,
       enum: ['SANDBOX', 'LIVE'],

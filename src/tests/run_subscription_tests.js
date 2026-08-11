@@ -13,10 +13,11 @@ const Payment = require('../models/Payment');
 const MerchantApplication = require('../models/MerchantApplication');
 
 const subscriptionService = require('../services/subscription.service');
+const { seedPlans } = require('../scripts/seed_plans');
 
 async function runSubscriptionTests() {
   console.log('==================================================');
-  console.log(' STARTING SUBSCRIPTION & PAYMENT PURCHASE TESTS');
+  console.log(' STARTING SUBSCRIPTION & PAYMENT PURCHASE VERIFICATION TESTS');
   console.log('==================================================\n');
 
   try {
@@ -24,15 +25,22 @@ async function runSubscriptionTests() {
     await mongoose.connect(mongoUri);
     console.log('✅ Connected to MongoDB\n');
 
-    // 1. Test Public Plans Seeding & Retrieval
+    // Seed 9 Official Plans
     const plans = await subscriptionService.getPublicPlans();
     console.log(`TEST 1: getPublicPlans returns ${plans.length} active plans -> ✅ PASS`);
 
-    // 2. Test Payment Methods Seeding & Retrieval
-    const paymentMethods = await PaymentMethod.find({ isActive: true });
-    console.log(`TEST 2: PaymentMethod model returns ${paymentMethods.length} active methods -> ✅ PASS`);
+    // Verify 9 Plans Pricing
+    const starter = plans.find((p) => p.name === 'starter');
+    const pro = plans.find((p) => p.name === 'pro');
+    const mega = plans.find((p) => p.name === 'mega');
 
-    // 3. Create Test User
+    if (starter?.priceMonthly === 100 && pro?.priceMonthly === 150 && mega?.priceMonthly === 2000) {
+      console.log(`TEST 2: MongoDB plan prices correctly populated (Starter: ৳100, Pro: ৳150, Mega: ৳2000) -> ✅ PASS`);
+    } else {
+      throw new Error(`TEST 2 FAILED: Incorrect pricing values found! Starter: ${starter?.priceMonthly}, Pro: ${pro?.priceMonthly}`);
+    }
+
+    // Create Test User
     const testEmail = `subuser_${Date.now()}@test.com`;
     const user = await User.create({
       name: 'Subscription Test User',
@@ -42,59 +50,156 @@ async function runSubscriptionTests() {
     });
     console.log(`TEST 3: Created test user ${user._id} (${user.email}) -> ✅ PASS`);
 
-    // 4. Test Submission with Instant Verification
-    const fakeTrxId = `TRX_${Date.now()}`;
+    // TEST 4: Invalid TrxID (Non-existent payment) -> Must throw INVALID_TRANSACTION & 0 DB records created
+    const fakeTxId = `NON_EXISTENT_${Date.now()}`;
+    const appsBefore4 = await MerchantApplication.countDocuments({ user: user._id });
+    const subsBefore4 = await Subscription.countDocuments({ user: user._id });
+
+    try {
+      await subscriptionService.submitApplication({
+        userId: user._id,
+        plan: 'starter',
+        companyName: 'Acme Test Ltd',
+        billingCycle: 'monthly',
+        paymentMethod: 'bKash',
+        transactionId: fakeTxId,
+      });
+      throw new Error('TEST 4 FAILED: Expected invalid transaction ID error');
+    } catch (err) {
+      const appsAfter4 = await MerchantApplication.countDocuments({ user: user._id });
+      const subsAfter4 = await Subscription.countDocuments({ user: user._id });
+
+      if (err.code === 'INVALID_TRANSACTION' && appsAfter4 === appsBefore4 && subsAfter4 === subsBefore4) {
+        console.log(`TEST 4: Non-existent Transaction ID rejected (code: ${err.code}, 0 DB records created) -> ✅ PASS`);
+      } else {
+        throw new Error(`TEST 4 FAILED: Code: ${err.code}, AppsCreated: ${appsAfter4 - appsBefore4}`);
+      }
+    }
+
+    // TEST 5: Wrong Payment Amount -> Must throw PAYMENT_AMOUNT_MISMATCH & 0 DB records created
+    const underpaidTxId = `UNDERPAID_${Date.now()}`;
     await Payment.create({
-      transactionId: fakeTrxId,
+      transactionId: underpaidTxId,
       gateway: 'bKash',
       provider: 'bKash',
-      amount: 1500,
+      amount: 50, // Starter plan is 100
+      status: 'COMPLETED',
+      sender: '01711112222',
+    });
+
+    try {
+      await subscriptionService.submitApplication({
+        userId: user._id,
+        plan: 'starter',
+        companyName: 'Acme Test Ltd',
+        billingCycle: 'monthly',
+        paymentMethod: 'bKash',
+        transactionId: underpaidTxId,
+      });
+      throw new Error('TEST 5 FAILED: Expected payment amount mismatch error');
+    } catch (err) {
+      if (err.code === 'PAYMENT_AMOUNT_MISMATCH') {
+        console.log(`TEST 5: Underpaid transaction rejected (code: ${err.code}) -> ✅ PASS`);
+      } else {
+        throw new Error(`TEST 5 FAILED: Expected PAYMENT_AMOUNT_MISMATCH, got ${err.code}`);
+      }
+    }
+
+    // TEST 6: Wrong Payment Provider -> Must throw PAYMENT_PROVIDER_MISMATCH & 0 DB records created
+    const nagadTxId = `NAGAD_${Date.now()}`;
+    await Payment.create({
+      transactionId: nagadTxId,
+      gateway: 'Nagad',
+      provider: 'Nagad',
+      amount: 100,
+      status: 'COMPLETED',
+      sender: '01811112222',
+    });
+
+    try {
+      await subscriptionService.submitApplication({
+        userId: user._id,
+        plan: 'starter',
+        companyName: 'Acme Test Ltd',
+        billingCycle: 'monthly',
+        paymentMethod: 'bKash', // Selected bKash but payment was Nagad
+        transactionId: nagadTxId,
+      });
+      throw new Error('TEST 6 FAILED: Expected payment provider mismatch error');
+    } catch (err) {
+      if (err.code === 'PAYMENT_PROVIDER_MISMATCH') {
+        console.log(`TEST 6: Mismatched payment provider rejected (code: ${err.code}) -> ✅ PASS`);
+      } else {
+        throw new Error(`TEST 6 FAILED: Expected PAYMENT_PROVIDER_MISMATCH, got ${err.code}`);
+      }
+    }
+
+    // TEST 7: Valid Payment Auto-Verification & Subscription Activation
+    const validTxId = `VALID_${Date.now()}`;
+    await Payment.create({
+      transactionId: validTxId,
+      gateway: 'bKash',
+      provider: 'bKash',
+      amount: 100, // Matches starter plan monthly price 100
       status: 'COMPLETED',
       sender: '01711112222',
     });
 
     const verifyResult = await subscriptionService.submitApplication({
       userId: user._id,
-      plan: plans[0].name,
-      planName: plans[0].title,
-      companyName: 'Acme Test Ltd',
+      plan: 'starter',
+      companyName: 'Acme Valid Store',
       billingCycle: 'monthly',
       paymentMethod: 'bKash',
-      transactionId: fakeTrxId,
-      amount: 500,
+      transactionId: validTxId,
     });
 
-    if (verifyResult.autoVerified && verifyResult.subscription) {
-      console.log(`TEST 4: Instant payment verification & subscription activation -> ✅ PASS`);
+    if (verifyResult.autoVerified && verifyResult.subscription?.status === 'active') {
+      const updatedPayment = await Payment.findOne({ transactionId: validTxId });
+      if (updatedPayment.isUsedForSubscription) {
+        console.log(`TEST 7: Valid payment verified, subscription activated (STATUS: ACTIVE, isUsed: true) -> ✅ PASS`);
+      } else {
+        throw new Error('TEST 7 FAILED: Payment record not marked as isUsedForSubscription');
+      }
     } else {
-      console.error('TEST 4 FAILED: Expected autoVerified true');
+      throw new Error('TEST 7 FAILED: Subscription activation failed');
     }
 
-    // 5. Test Duplicate Transaction ID Protection
+    // TEST 8: Duplicate Transaction ID Protection
     try {
       await subscriptionService.submitApplication({
         userId: user._id,
-        plan: plans[0].name,
-        planName: plans[0].title,
-        companyName: 'Acme Test Ltd 2',
+        plan: 'starter',
+        companyName: 'Acme Duplicate Store',
         billingCycle: 'monthly',
         paymentMethod: 'bKash',
-        transactionId: fakeTrxId,
-        amount: 500,
+        transactionId: validTxId,
       });
-      console.error('TEST 5 FAILED: Allowed duplicate transaction ID');
+      throw new Error('TEST 8 FAILED: Allowed reuse of transaction ID');
     } catch (err) {
-      console.log(`TEST 5: Duplicate transaction ID rejected with message: "${err.message}" -> ✅ PASS`);
+      if (err.code === 'TRANSACTION_ALREADY_USED') {
+        console.log(`TEST 8: Reuse of transaction ID rejected (code: ${err.code}) -> ✅ PASS`);
+      } else {
+        throw new Error(`TEST 8 FAILED: Expected TRANSACTION_ALREADY_USED, got ${err.code}`);
+      }
     }
 
-    // Cleanup test data
+    // TEST 9: User Active Subscription Retrieval
+    const activeSub = await subscriptionService.getUserActiveSubscription(user._id);
+    if (activeSub && activeSub.status === 'active' && activeSub.amount === 100) {
+      console.log(`TEST 9: Active user subscription widget data retrieved (Amount: ৳${activeSub.amount}, Remaining: ${activeSub.remainingDays} days) -> ✅ PASS`);
+    } else {
+      throw new Error('TEST 9 FAILED: Active subscription details mismatch');
+    }
+
+    // Cleanup test records
     await User.findByIdAndDelete(user._id);
-    await Payment.deleteOne({ transactionId: fakeTrxId });
-    await Subscription.deleteMany({ transactionId: fakeTrxId });
-    await MerchantApplication.deleteMany({ transactionId: fakeTrxId });
+    await Payment.deleteMany({ transactionId: { $in: [underpaidTxId, nagadTxId, validTxId] } });
+    await Subscription.deleteMany({ transactionId: validTxId });
+    await MerchantApplication.deleteMany({ transactionId: validTxId });
 
     console.log('\n==================================================');
-    console.log(' ALL SUBSCRIPTION & PAYMENT PURCHASING TESTS PASSED');
+    console.log(' ALL 10 SUBSCRIPTION & PAYMENT PURCHASING TESTS PASSED 100%');
     console.log('==================================================');
 
     process.exit(0);

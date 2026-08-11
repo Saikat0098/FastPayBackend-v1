@@ -4,6 +4,7 @@ const Merchant = require('../models/Merchant');
 const User = require('../models/User');
 const Plan = require('../models/Plan');
 const Payment = require('../models/Payment');
+const PaymentMethod = require('../models/PaymentMethod');
 const MerchantApplication = require('../models/MerchantApplication');
 const ApiError = require('../utils/apiError');
 const { v4: uuidv4 } = require('uuid');
@@ -12,84 +13,37 @@ const getPublicPlans = async () => {
   let plans = await Plan.find({ isActive: true }).sort({ displayOrder: 1, priceMonthly: 1 });
 
   if (plans.length === 0) {
-    plans = await Plan.insertMany([
-      {
-        name: 'starter',
-        title: 'Starter',
-        description: 'Perfect for small businesses getting started with MFS automation.',
-        priceMonthly: 500,
-        priceYearly: 4800,
-        priceBDT: 500,
-        yearlyDiscountPercent: 20,
-        integrationLimit: 1,
-        maxDevices: 1,
-        features: ['1 Website Integration', '1 Android Device', 'Real-time SMS Auto-Reader', 'Instant Webhook Notifications', 'bKash, Nagad & Rocket'],
-        isPopular: false,
-        isActive: true,
-        displayOrder: 1,
-      },
-      {
-        name: 'pro',
-        title: 'Pro',
-        description: 'Ideal for growing businesses needing multi-channel and multi-device support.',
-        priceMonthly: 1500,
-        priceYearly: 12000,
-        priceBDT: 1500,
-        yearlyDiscountPercent: 33,
-        integrationLimit: 3,
-        maxDevices: 5,
-        features: ['3 Website Integrations', '5 Android Devices', 'All Starter Features', 'Payment Link Generator', 'Custom Hosted Payment Forms', 'Priority Support'],
-        isPopular: true,
-        isActive: true,
-        displayOrder: 2,
-      },
-      {
-        name: 'business',
-        title: 'Business',
-        description: 'Designed for high volume merchants requiring maximum scale and isolation.',
-        priceMonthly: 3500,
-        priceYearly: 25200,
-        priceBDT: 3500,
-        yearlyDiscountPercent: 40,
-        integrationLimit: 10,
-        maxDevices: 15,
-        features: ['10 Website Integrations', '15 Android Devices', 'All Pro Features', 'Zero-Latency Dispatch', 'Multi-Brand Isolation', 'Dedicated Support Manager'],
-        isPopular: false,
-        isActive: true,
-        displayOrder: 3,
-      },
-      {
-        name: 'enterprise',
-        title: 'Enterprise',
-        description: 'Ultimate power and custom infrastructure for enterprise organizations.',
-        priceMonthly: 8000,
-        priceYearly: 48000,
-        priceBDT: 8000,
-        yearlyDiscountPercent: 50,
-        integrationLimit: 30,
-        maxDevices: 50,
-        features: ['Unlimited Integrations', '50 Android Devices', 'All Business Features', 'Audit Logs & Vault', 'Custom SLAs & Webhooks'],
-        isPopular: false,
-        isActive: true,
-        displayOrder: 4,
-      },
-    ]);
+    const { OFFICIAL_PLANS } = require('../scripts/seed_plans');
+    plans = await Plan.insertMany(OFFICIAL_PLANS);
   }
 
   return plans;
 };
 
-const createSubscription = async ({ userId, merchantId, planId, plan = '30_days', planName = '', billingCycle = 'monthly', durationDays = 30, price = 0, amount = 0, paymentMethod = 'bKash', transactionId = '', maxDevices = 5, integrationLimit = 1 }) => {
+const createSubscription = async ({
+  userId,
+  merchantId,
+  planId,
+  plan = 'starter',
+  planName = '',
+  billingCycle = 'monthly',
+  durationDays = 30,
+  price = 0,
+  amount = 0,
+  paymentMethod = 'bKash',
+  transactionId = '',
+  maxDevices = 1,
+  integrationLimit = 1,
+}) => {
   const startDate = new Date();
   const expireDate = new Date();
 
-  if (plan === 'unlimited' || billingCycle === 'lifetime') {
+  if (billingCycle === 'lifetime') {
     expireDate.setFullYear(expireDate.getFullYear() + 100);
   } else {
     expireDate.setDate(expireDate.getDate() + durationDays);
   }
 
-  // Deactivate old subscriptions for this merchant/user
   const subQuery = {};
   if (merchantId) subQuery.merchant = merchantId;
   else if (userId) subQuery.user = userId;
@@ -167,7 +121,18 @@ const getUserActiveSubscription = async (userId, merchantId) => {
   };
 };
 
-const submitApplication = async ({ userId, planId, plan, planName, companyName, billingCycle = 'monthly', paymentMethod, paymentReceiver, transactionId, note, amount }) => {
+const submitApplication = async ({
+  userId,
+  planId,
+  plan,
+  planName,
+  companyName,
+  billingCycle = 'monthly',
+  paymentMethod,
+  paymentReceiver,
+  transactionId,
+  note,
+}) => {
   if (!companyName || !companyName.trim()) {
     throw new ApiError(400, 'Please enter your Company / Business name.');
   }
@@ -178,9 +143,9 @@ const submitApplication = async ({ userId, planId, plan, planName, companyName, 
   const cleanTrxId = transactionId.trim().toUpperCase();
   const selectedCycle = billingCycle === 'yearly' ? 'yearly' : 'monthly';
 
-  // 1. Fetch backend plan and enforce backend pricing security
-  let targetPlan = null;
+  // 1. Fetch Plan from MongoDB
   const pId = planId || plan;
+  let targetPlan = null;
   if (pId) {
     const isMongoId = mongoose.Types.ObjectId.isValid(pId);
     targetPlan = await Plan.findOne({
@@ -191,146 +156,160 @@ const submitApplication = async ({ userId, planId, plan, planName, companyName, 
     });
   }
 
-  let calculatedAmount = amount || 0;
-  let planTitle = planName || 'Standard Plan';
-  let planKey = plan || '30_days';
-  let deviceLimit = 5;
-  let webLimit = 1;
-
-  if (targetPlan) {
-    if (!targetPlan.isActive) {
-      throw new ApiError(400, 'Please select a valid active subscription plan.');
-    }
-    planTitle = targetPlan.title || targetPlan.name;
-    planKey = targetPlan.name;
-    calculatedAmount = selectedCycle === 'yearly' ? targetPlan.priceYearly : (targetPlan.priceMonthly || targetPlan.priceBDT);
-    deviceLimit = targetPlan.maxDevices || 5;
-    webLimit = targetPlan.integrationLimit || 1;
+  if (!targetPlan || !targetPlan.isActive) {
+    const err = new ApiError(400, 'Please select a valid active subscription plan.');
+    err.code = 'PLAN_INACTIVE';
+    throw err;
   }
 
-  // 2. Check for duplicate Transaction ID in existing Subscriptions & Applications (Security check)
+  // 2. Validate Payment Method Active Status
+  if (paymentMethod) {
+    const pmDoc = await PaymentMethod.findOne({
+      $or: [
+        { code: paymentMethod.toString().toLowerCase() },
+        { name: { $regex: paymentMethod.toString(), $options: 'i' } },
+      ],
+    });
+    if (pmDoc && !pmDoc.isActive) {
+      const err = new ApiError(400, 'Selected payment method is currently unavailable. Please select another method.');
+      err.code = 'PAYMENT_METHOD_INACTIVE';
+      throw err;
+    }
+  }
+
+  // 3. Server-side expected amount calculation
+  const expectedAmount = selectedCycle === 'yearly'
+    ? targetPlan.priceYearly
+    : (targetPlan.priceMonthly || targetPlan.priceBDT);
+
+  // 4. Duplicate Transaction ID Protection
   const existingSub = await Subscription.findOne({
     transactionId: cleanTrxId,
     status: { $in: ['active', 'pending'] },
   });
-  if (existingSub) {
-    throw new ApiError(400, 'This transaction has already been used for another subscription.');
-  }
-
-  const existingTrx = await MerchantApplication.findOne({
+  const existingUsedPayment = await Payment.findOne({
     transactionId: cleanTrxId,
-    status: { $in: ['PENDING', 'APPROVED'] },
+    isUsedForSubscription: true,
   });
-  if (existingTrx) {
-    throw new ApiError(400, 'This transaction has already been used for another subscription.');
+  const existingApp = await MerchantApplication.findOne({
+    transactionId: cleanTrxId,
+    status: { $in: ['APPROVED', 'PENDING'] },
+  });
+
+  if (existingSub || existingUsedPayment || existingApp) {
+    const err = new ApiError(400, 'This transaction has already been used for another subscription.');
+    err.code = 'TRANSACTION_ALREADY_USED';
+    throw err;
   }
 
-  // 3. Attempt automated verification against existing MFS Payment records synced to MongoDB
+  // 5. Verify against existing Payment Collection (Source of Truth)
   const paymentRecord = await Payment.findOne({ transactionId: cleanTrxId });
-  let autoVerified = false;
-
-  if (paymentRecord) {
-    const isCompleted = ['COMPLETED', 'VERIFIED', 'SUCCESS', 'SUCCESSFUL', 'PAID'].includes((paymentRecord.status || '').toUpperCase());
-    const methodMatches = !paymentMethod || (paymentRecord.provider || paymentRecord.gateway || '').toLowerCase().includes(paymentMethod.toLowerCase());
-    const amountMatches = (paymentRecord.amount || 0) >= calculatedAmount;
-
-    if (isCompleted && methodMatches && amountMatches) {
-      autoVerified = true;
-    }
+  if (!paymentRecord) {
+    const err = new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment. Please check your Transaction ID and try again.');
+    err.code = 'INVALID_TRANSACTION';
+    throw err;
   }
 
+  // 6. Check Payment Provider Match
+  const paymentProviderStr = (paymentRecord.provider || paymentRecord.gateway || '').toLowerCase();
+  const selectedProviderStr = (paymentMethod || '').toLowerCase();
+  if (selectedProviderStr && !paymentProviderStr.includes(selectedProviderStr) && !selectedProviderStr.includes(paymentProviderStr)) {
+    const err = new ApiError(400, 'This Transaction ID does not belong to the selected payment method. Please select the correct payment method and try again.');
+    err.code = 'PAYMENT_PROVIDER_MISMATCH';
+    throw err;
+  }
+
+  // 7. Check Payment Completion Status
+  const isCompleted = ['COMPLETED', 'VERIFIED', 'SUCCESS', 'SUCCESSFUL', 'PAID'].includes((paymentRecord.status || '').toUpperCase());
+  if (!isCompleted) {
+    const err = new ApiError(400, 'Payment has not been completed yet. Please wait or check your transaction.');
+    err.code = 'PAYMENT_NOT_COMPLETED';
+    throw err;
+  }
+
+  // 8. Check Payment Amount
+  if ((paymentRecord.amount || 0) < expectedAmount) {
+    const err = new ApiError(400, 'The payment amount does not match the selected plan. Please make the correct payment and try again.');
+    err.code = 'PAYMENT_AMOUNT_MISMATCH';
+    throw err;
+  }
+
+  // ALL VERIFICATIONS PASSED -> Activate Subscription Immediately
   const user = await User.findById(userId);
-
-  if (autoVerified) {
-    // Perform instant subscription activation
-    let merchant = user.merchant ? await Merchant.findById(user.merchant) : null;
-    if (!merchant) {
-      merchant = await Merchant.create({
-        name: user.name || companyName.trim(),
-        email: user.email,
-        password: user.password || 'MerchantPass123!',
-        companyName: companyName.trim(),
-        apiKey: `ap_key_${uuidv4().replace(/-/g, '')}`,
-        apiSecret: `ap_sec_${uuidv4().replace(/-/g, '')}`,
-        status: 'active',
-      });
-    }
-
-    user.role = 'MERCHANT';
-    user.merchant = merchant._id;
-    await user.save();
-
-    const durationDays = selectedCycle === 'yearly' ? 365 : 30;
-
-    const subscription = await createSubscription({
-      userId: user._id,
-      merchantId: merchant._id,
-      planId: targetPlan ? targetPlan._id : null,
-      plan: planKey,
-      planName: planTitle,
-      billingCycle: selectedCycle,
-      durationDays,
-      price: calculatedAmount,
-      amount: calculatedAmount,
-      paymentMethod: paymentMethod || paymentRecord.provider || 'bKash',
-      transactionId: cleanTrxId,
-      maxDevices: deviceLimit,
-      integrationLimit: webLimit,
-    });
-
-    // Also record in MerchantApplication for history
-    const app = await MerchantApplication.create({
-      user: userId,
-      plan: planKey,
-      planName: planTitle,
+  let merchant = user.merchant ? await Merchant.findById(user.merchant) : null;
+  if (!merchant) {
+    merchant = await Merchant.create({
+      name: user.name || companyName.trim(),
+      email: user.email,
+      password: user.password || 'MerchantPass123!',
       companyName: companyName.trim(),
-      billingCycle: selectedCycle,
-      paymentMethod: paymentMethod || 'bKash',
-      paymentReceiver: paymentReceiver || '',
-      transactionId: cleanTrxId,
-      paymentNote: note || '',
-      amount: calculatedAmount,
-      status: 'APPROVED',
-      submittedAt: new Date(),
-      reviewedAt: new Date(),
+      apiKey: `ap_key_${uuidv4().replace(/-/g, '')}`,
+      apiSecret: `ap_sec_${uuidv4().replace(/-/g, '')}`,
+      status: 'active',
     });
-
-    paymentRecord.status = 'VERIFIED';
-    paymentRecord.paymentStatus = 'VERIFIED';
-    await paymentRecord.save().catch(() => {});
-
-    return {
-      autoVerified: true,
-      message: 'Payment verified successfully! Your subscription is active.',
-      subscription,
-      application: app,
-    };
+  } else {
+    merchant.companyName = companyName.trim() || merchant.companyName;
+    merchant.status = 'active';
+    await merchant.save();
   }
 
-  // If not auto-verified, queue application as PENDING for admin manual review
-  const existingPending = await MerchantApplication.findOne({ user: userId, status: 'PENDING' });
-  if (existingPending) {
-    throw new ApiError(400, 'Your payment verification is pending. Please allow a few moments or contact support.');
-  }
+  user.role = 'MERCHANT';
+  user.merchant = merchant._id;
+  await user.save();
+
+  const durationDays = selectedCycle === 'yearly' ? 365 : 30;
+
+  const subscription = await createSubscription({
+    userId: user._id,
+    merchantId: merchant._id,
+    planId: targetPlan._id,
+    plan: targetPlan.name,
+    planName: targetPlan.title,
+    billingCycle: selectedCycle,
+    durationDays,
+    price: expectedAmount,
+    amount: expectedAmount,
+    paymentMethod: paymentMethod || paymentRecord.provider || 'bKash',
+    transactionId: cleanTrxId,
+    maxDevices: targetPlan.maxDevices || 1,
+    integrationLimit: targetPlan.integrationLimit || 1,
+  });
+
+  paymentRecord.status = 'VERIFIED';
+  paymentRecord.paymentStatus = 'COMPLETED';
+  paymentRecord.isUsedForSubscription = true;
+  paymentRecord.usedBySubscription = subscription._id;
+  await paymentRecord.save().catch(() => {});
 
   const application = await MerchantApplication.create({
     user: userId,
-    plan: planKey,
-    planName: planTitle,
+    plan: targetPlan.name,
+    planName: targetPlan.title,
     companyName: companyName.trim(),
     billingCycle: selectedCycle,
-    paymentMethod: paymentMethod || 'bKash',
-    paymentReceiver: paymentReceiver || '',
+    paymentMethod: paymentMethod || paymentRecord.provider || 'bKash',
+    paymentReceiver: paymentReceiver || paymentRecord.accountNumber || '',
     transactionId: cleanTrxId,
     paymentNote: note || '',
-    amount: calculatedAmount,
-    status: 'PENDING',
+    amount: expectedAmount,
+    status: 'APPROVED',
     submittedAt: new Date(),
+    reviewedAt: new Date(),
+  });
+
+  const { emitPaymentUpdated } = require('../socket/socketManager');
+  emitPaymentUpdated(merchant._id.toString(), {
+    _id: paymentRecord._id,
+    transactionId: cleanTrxId,
+    status: 'VERIFIED',
+    subscriptionActive: true,
   });
 
   return {
-    autoVerified: false,
-    message: 'Your payment verification request has been submitted and is pending verification.',
+    autoVerified: true,
+    code: 'PAYMENT_VERIFIED',
+    message: 'Payment Successful! Your subscription is now active.',
+    subscription,
     application,
   };
 };
