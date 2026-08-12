@@ -43,13 +43,40 @@ const getDashboardStats = asyncHandler(async (req, res) => {
   }, 'Merchant dashboard stats');
 });
 
+const getCredentials = asyncHandler(async (req, res) => {
+  const merchantId = req.merchantId || req.merchant?._id;
+  if (!merchantId) {
+    throw new ApiError(403, 'Tenant context missing');
+  }
+
+  let merchant = await Merchant.findById(merchantId).select('+apiSecret');
+  if (!merchant) throw new ApiError(404, 'Merchant profile not found');
+
+  if (!merchant.webhookSecret) {
+    merchant.webhookSecret = `whsec_${uuidv4().replace(/-/g, '')}`;
+    await merchant.save();
+  }
+
+  return ApiResponse.success(res, {
+    merchantId: merchant._id,
+    companyName: merchant.companyName,
+    email: merchant.email,
+    apiKey: merchant.apiKey,
+    apiSecret: merchant.apiSecret,
+    webhookUrl: merchant.webhookUrl || '',
+    webhookSecret: merchant.webhookSecret,
+    isSandbox: merchant.isSandbox,
+    status: merchant.status,
+  }, 'Developer credentials fetched successfully');
+});
+
 const updateProfile = asyncHandler(async (req, res) => {
   const merchantId = req.merchantId || req.merchant?._id;
   if (!merchantId) {
     throw new ApiError(403, 'Tenant context missing');
   }
 
-  const { companyName, webhookUrl, regenerateApiKey } = req.body;
+  const { companyName, webhookUrl, regenerateApiKey, regenerateWebhookSecret } = req.body;
   const update = {};
   if (companyName) update.companyName = companyName;
   if (webhookUrl !== undefined) update.webhookUrl = webhookUrl;
@@ -57,18 +84,71 @@ const updateProfile = asyncHandler(async (req, res) => {
     update.apiKey = `ap_key_${uuidv4().replace(/-/g, '')}`;
     update.apiSecret = `ap_sec_${uuidv4().replace(/-/g, '')}`;
   }
+  if (regenerateWebhookSecret) {
+    update.webhookSecret = `whsec_${uuidv4().replace(/-/g, '')}`;
+  }
 
   const merchant = await Merchant.findByIdAndUpdate(
     merchantId,
     update,
     { new: true, runValidators: true }
-  );
+  ).select('+apiSecret');
+
   if (!merchant) throw new ApiError(404, 'Merchant profile not found');
 
-  return ApiResponse.success(res, merchant, 'Profile updated successfully');
+  return ApiResponse.success(res, {
+    merchantId: merchant._id,
+    companyName: merchant.companyName,
+    email: merchant.email,
+    apiKey: merchant.apiKey,
+    apiSecret: merchant.apiSecret,
+    webhookUrl: merchant.webhookUrl || '',
+    webhookSecret: merchant.webhookSecret,
+    isSandbox: merchant.isSandbox,
+    status: merchant.status,
+  }, 'Profile updated successfully');
+});
+
+const regenerateApiKey = asyncHandler(async (req, res) => {
+  const merchantId = req.merchantId || req.merchant?._id;
+  if (!merchantId) throw new ApiError(403, 'Tenant context missing');
+
+  const merchant = await Merchant.findById(merchantId).select('+apiSecret');
+  if (!merchant) throw new ApiError(404, 'Merchant profile not found');
+
+  merchant.apiKey = `ap_key_${uuidv4().replace(/-/g, '')}`;
+  merchant.apiSecret = `ap_sec_${uuidv4().replace(/-/g, '')}`;
+  await merchant.save();
+
+  return ApiResponse.success(res, {
+    merchantId: merchant._id,
+    apiKey: merchant.apiKey,
+    apiSecret: merchant.apiSecret,
+    webhookUrl: merchant.webhookUrl,
+    webhookSecret: merchant.webhookSecret,
+  }, 'API key rotated successfully');
+});
+
+const regenerateWebhookSecret = asyncHandler(async (req, res) => {
+  const merchantId = req.merchantId || req.merchant?._id;
+  if (!merchantId) throw new ApiError(403, 'Tenant context missing');
+
+  const merchant = await Merchant.findById(merchantId);
+  if (!merchant) throw new ApiError(404, 'Merchant profile not found');
+
+  merchant.webhookSecret = `whsec_${uuidv4().replace(/-/g, '')}`;
+  await merchant.save();
+
+  return ApiResponse.success(res, {
+    merchantId: merchant._id,
+    webhookSecret: merchant.webhookSecret,
+  }, 'Webhook secret rotated successfully');
 });
 
 module.exports = {
   getDashboardStats,
+  getCredentials,
   updateProfile,
+  regenerateApiKey,
+  regenerateWebhookSecret,
 };

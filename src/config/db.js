@@ -68,16 +68,31 @@ const syncCustomersFromPayments = async () => {
 };
 
 const connectDB = async () => {
+  const primaryUri = process.env.MONGODB_URI;
+  const localUri = 'mongodb://127.0.0.1:27017/autopayment';
+
   try {
-    const conn = await mongoose.connect(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/autopayment', {
+    const conn = await mongoose.connect(primaryUri || localUri, {
       autoIndex: true,
+      serverSelectionTimeoutMS: 5000,
     });
     logger.info(`MongoDB Connected: ${conn.connection.host}`);
     await fixLegacyPaymentLinks();
     await syncCustomersFromPayments();
   } catch (error) {
-    logger.error(`Error connecting to MongoDB: ${error.message}`);
-    process.exit(1);
+    logger.warn(`Primary MongoDB Connection Failed (${error.message}). Attempting local fallback: ${localUri}`);
+    try {
+      const conn = await mongoose.connect(localUri, {
+        autoIndex: true,
+        serverSelectionTimeoutMS: 5000,
+      });
+      logger.info(`Local Fallback MongoDB Connected: ${conn.connection.host}`);
+      await fixLegacyPaymentLinks();
+      await syncCustomersFromPayments();
+    } catch (localError) {
+      logger.error(`Error connecting to MongoDB: ${error.message} / Local: ${localError.message}`);
+      process.exit(1);
+    }
   }
 };
 

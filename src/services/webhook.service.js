@@ -27,10 +27,10 @@ const sendWebhook = async ({ merchantId, brandId, payment, event = 'payment.veri
     }
 
     if (!targetUrl && merchantId) {
-      const merchant = await Merchant.findById(merchantId);
+      const merchant = await Merchant.findById(merchantId).select('+apiSecret');
       if (merchant && merchant.webhookUrl) {
         targetUrl = merchant.webhookUrl;
-        secret = merchant.apiKey || 'whsec_default';
+        secret = merchant.webhookSecret || merchant.apiSecret || merchant.apiKey || 'whsec_default';
       }
     }
 

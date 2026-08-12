@@ -40,6 +40,10 @@ const merchantSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    webhookSecret: {
+      type: String,
+      default: '',
+    },
     isSandbox: {
       type: Boolean,
       default: true,

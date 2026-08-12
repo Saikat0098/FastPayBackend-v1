@@ -124,10 +124,15 @@ const authorizeRoles = (...roles) => {
 };
 
 const verifyApiKey = asyncHandler(async (req, res, next) => {
-  const apiKey = req.headers['x-api-key'] || req.headers['x-brand-key'] || req.query.apiKey;
+  let apiKey = req.headers['x-api-key'] || req.headers['x-brand-key'] || req.query.apiKey;
+
+  const authHeader = req.headers.authorization || req.headers.Authorization;
+  if (!apiKey && authHeader && authHeader.startsWith('Bearer ')) {
+    apiKey = authHeader.split(' ')[1];
+  }
 
   if (!apiKey) {
-    throw new ApiError(401, 'API Key is required in X-API-Key header');
+    throw new ApiError(401, 'API Key is required in X-API-Key or Authorization header');
   }
 
   // 1. Check Brand API Key first
@@ -136,6 +141,7 @@ const verifyApiKey = asyncHandler(async (req, res, next) => {
   if (brand) {
     req.brand = brand;
     req.merchant = brand.merchant;
+    req.merchantId = brand.merchant?._id || brand.merchant;
     return next();
   }
 
@@ -143,6 +149,7 @@ const verifyApiKey = asyncHandler(async (req, res, next) => {
   const merchant = await Merchant.findOne({ apiKey, status: 'active' });
   if (merchant) {
     req.merchant = merchant;
+    req.merchantId = merchant._id;
     return next();
   }
 

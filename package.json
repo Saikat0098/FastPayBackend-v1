@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "node src/tests/run_tenant_tests.js && node src/tests/run_gateway_tests.js && node src/tests/run_payment_form_tests.js",
+    "test": "node src/tests/run_developer_tests.js",
     "lint": "echo \"Linting clean\""
   },
   "keywords": [

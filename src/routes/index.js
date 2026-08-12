@@ -23,6 +23,7 @@ const deviceRoutes = require('./device.routes');
 const paymentMethodRoutes = require('./paymentMethod.routes');
 const merchantGatewayRoutes = require('./merchantGateway.routes');
 const formSubmissionRoutes = require('./formSubmission.routes');
+const checkoutSessionRoutes = require('./checkoutSession.routes');
 
 // Android Controller for direct legacy compatibility routes
 const androidController = require('../controllers/android.controller');
@@ -62,5 +63,7 @@ router.use('/analytics', analyticsRoutes);
 router.use('/audit-logs', auditRoutes);
 router.use('/payment-methods', paymentMethodRoutes);
 router.use('/payment-method', paymentMethodRoutes);
+router.use('/checkout/sessions', checkoutSessionRoutes);
+router.use('/checkout', checkoutSessionRoutes);
 
 module.exports = router;
