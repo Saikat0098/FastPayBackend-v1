@@ -13,6 +13,31 @@ const generateSignature = (payloadString, secret, timestamp) => {
     .digest('hex');
 };
 
+const verifySignature = (signatureHeader, payloadString, secret) => {
+  if (!signatureHeader || typeof signatureHeader !== 'string' || !secret) return false;
+
+  const parts = {};
+  signatureHeader.split(',').forEach((part) => {
+    const [key, val] = part.split('=');
+    if (key && val) parts[key.trim()] = val.trim();
+  });
+
+  const timestamp = parts.t;
+  const signature = parts.v1;
+  if (!timestamp || !signature) return false;
+
+  const expectedSig = generateSignature(payloadString, secret, timestamp);
+
+  try {
+    const sigBuf = Buffer.from(signature, 'hex');
+    const expBuf = Buffer.from(expectedSig, 'hex');
+    if (sigBuf.length !== expBuf.length) return false;
+    return crypto.timingSafeEqual(sigBuf, expBuf);
+  } catch (err) {
+    return false;
+  }
+};
+
 const sendWebhook = async ({ merchantId, brandId, payment, event = 'payment.verified' }) => {
   try {
     let targetUrl = '';
@@ -166,4 +191,6 @@ module.exports = {
   sendWebhook,
   retryWebhook,
   getWebhookLogs,
+  generateSignature,
+  verifySignature,
 };

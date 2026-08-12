@@ -10,14 +10,32 @@ const { apiLimiter } = require('./middlewares/rateLimiter.middleware');
 
 const app = express();
 
-// Security Middlewares
-app.use(helmet());
-app.use(cors({
-  origin: process.env.CORS_ORIGIN || '*',
-  credentials: true,
-}));
+// Security Middlewares & Headers
+app.use(
+  helmet({
+    frameguard: { action: 'sameorigin' },
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        frameAncestors: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
+      },
+    },
+    referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+    noSniff: true,
+  })
+);
 
-// Rate Limiter
+app.use(
+  cors({
+    origin: process.env.CORS_ORIGIN || '*',
+    credentials: true,
+  })
+);
+
+// General Rate Limiter
 app.use('/api', apiLimiter);
 
 // General Middlewares
@@ -25,10 +43,11 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 app.use(compression());
-app.use(morgan('combined'));
+if (process.env.NODE_ENV !== 'test') {
+  app.use(morgan('combined'));
+}
 
-// Mount both root (for legacy Android Retrofit calls like /auth/login, /transactions/sync, /health)
-// and /api/v1 for clean SaaS API versioning
+// Mount both root (for legacy Android Retrofit calls) and /api/v1 for SaaS API versioning
 app.use('/', routes);
 app.use('/api/v1', routes);
 

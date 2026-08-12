@@ -133,26 +133,36 @@ async function runDeveloperIntegrationTests() {
         return Promise.resolve(doc);
       };
 
+      const MerchantGateway = require('../models/MerchantGateway');
+      MerchantGateway.findOne = () => Promise.resolve({
+        _id: new mongoose.Types.ObjectId(),
+        merchant: merchantIdA,
+        provider: 'bKash',
+        accountNumber: '01711111111',
+        isActive: true,
+      });
+
       CheckoutSession.findOne = (query) => {
         const session = mockSessions.get(query.sessionId);
         const match = session && (!query.merchant || session.merchant.toString() === query.merchant.toString());
         const target = match ? session : null;
 
+        const makeTarget = () => target ? {
+          ...target,
+          save: function () {
+            mockSessions.set(target.sessionId, this);
+            return Promise.resolve(this);
+          }
+        } : null;
+
         const chain = {
-          populate: () => Promise.resolve(target ? {
-            ...target,
-            save: function () {
-              mockSessions.set(target.sessionId, this);
-              return Promise.resolve(this);
-            }
-          } : null),
-          then: (resolve) => resolve(target ? {
-            ...target,
-            save: function () {
-              mockSessions.set(target.sessionId, this);
-              return Promise.resolve(this);
-            }
-          } : null)
+          populate: function () {
+            return {
+              populate: () => Promise.resolve(makeTarget()),
+              then: (resolve) => resolve(makeTarget()),
+            };
+          },
+          then: (resolve) => resolve(makeTarget()),
         };
         return chain;
       };
@@ -193,6 +203,27 @@ async function runDeveloperIntegrationTests() {
             return Promise.resolve(p);
           }
         });
+      };
+
+      Payment.findOneAndUpdate = (query, update) => {
+        let p = null;
+        if (query._id) {
+          for (const v of mockPayments.values()) {
+            if (v._id.toString() === query._id.toString()) {
+              p = v;
+              break;
+            }
+          }
+        }
+        if (!p) return Promise.resolve(null);
+        if (p.isUsed || (query.isUsed && query.isUsed.$ne === true && p.isUsed === true)) {
+          return Promise.resolve(null);
+        }
+        if (update.$set) {
+          Object.assign(p, update.$set);
+        }
+        mockPayments.set(p.transactionId, p);
+        return Promise.resolve(p);
       };
     }
 

@@ -1,10 +1,31 @@
 const CheckoutSession = require('../models/CheckoutSession');
 const Merchant = require('../models/Merchant');
+const MerchantGateway = require('../models/MerchantGateway');
 const Brand = require('../models/Brand');
 const { verifyCustomerCheckoutPayment } = require('./payment.service');
 const { sendWebhook } = require('./webhook.service');
 const ApiError = require('../utils/apiError');
-const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
+
+const validateReturnUrl = (urlStr) => {
+  if (!urlStr || typeof urlStr !== 'string') {
+    throw new ApiError(400, 'Return URL is required');
+  }
+
+  const trimmed = urlStr.trim();
+  let parsed = null;
+  try {
+    parsed = new URL(trimmed);
+  } catch (err) {
+    throw new ApiError(400, 'Invalid Return URL format. Must be a valid HTTP or HTTPS URL.');
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new ApiError(400, 'Invalid Return URL protocol. Only http:// and https:// URLs are allowed.');
+  }
+
+  return trimmed;
+};
 
 const createCheckoutSession = async ({
   merchantId,
@@ -33,8 +54,10 @@ const createCheckoutSession = async ({
     throw new ApiError(400, 'Amount must be greater than 0');
   }
 
-  if (!returnUrl || !returnUrl.trim()) {
-    throw new ApiError(400, 'Return URL is required');
+  const safeReturnUrl = validateReturnUrl(returnUrl);
+  let safeCancelUrl = '';
+  if (cancelUrl && cancelUrl.trim()) {
+    safeCancelUrl = validateReturnUrl(cancelUrl);
   }
 
   const merchant = await Merchant.findById(merchantId);
@@ -42,8 +65,12 @@ const createCheckoutSession = async ({
     throw new ApiError(404, 'Active merchant not found');
   }
 
-  const sessionId = `cs_${merchant._id.toString().slice(-6)}_${uuidv4().replace(/-/g, '').slice(0, 16)}`;
-  const expiresAt = new Date(Date.now() + (parseInt(expiresInMinutes) || 30) * 60 * 1000);
+  // Cryptographically secure random opaque session ID
+  const randomHex = crypto.randomBytes(24).toString('hex');
+  const sessionId = `cs_live_${merchant._id.toString().slice(-6)}_${randomHex}`;
+  
+  const expMins = Math.min(Math.max(parseInt(expiresInMinutes) || 15, 5), 60);
+  const expiresAt = new Date(Date.now() + expMins * 60 * 1000);
 
   const session = await CheckoutSession.create({
     sessionId,
@@ -57,8 +84,8 @@ const createCheckoutSession = async ({
     customerEmail: customerEmail.trim(),
     customerAddress: customerAddress.trim(),
     customFields,
-    returnUrl: returnUrl.trim(),
-    cancelUrl: cancelUrl ? cancelUrl.trim() : '',
+    returnUrl: safeReturnUrl,
+    cancelUrl: safeCancelUrl,
     status: 'PENDING',
     expiresAt,
   });
@@ -71,7 +98,14 @@ const getPublicCheckoutSession = async (sessionId) => {
     throw new ApiError(400, 'Session ID is required');
   }
 
-  const session = await CheckoutSession.findOne({ sessionId }).populate('merchant brand');
+  const session = await CheckoutSession.findOne({ sessionId }).populate({
+    path: 'merchant',
+    select: 'companyName name logo status',
+  }).populate({
+    path: 'brand',
+    select: 'name logo status',
+  });
+
   if (!session) {
     throw new ApiError(404, 'Checkout session not found');
   }
@@ -92,12 +126,21 @@ const verifySessionPayment = async ({
   customerName,
   phone,
 }) => {
-  const session = await getPublicCheckoutSession(sessionId);
+  const session = await CheckoutSession.findOne({ sessionId }).populate('merchant brand');
+  if (!session) {
+    throw new ApiError(404, 'Checkout session not found');
+  }
+
+  if (session.status === 'PENDING' && new Date() > new Date(session.expiresAt)) {
+    session.status = 'EXPIRED';
+    await session.save();
+  }
 
   if (session.status === 'VERIFIED') {
     return {
       session,
       payment: session.payment,
+      returnUrl: session.returnUrl,
       message: 'Checkout session is already verified',
     };
   }
@@ -112,12 +155,29 @@ const verifySessionPayment = async ({
     throw new ApiError(400, 'Checkout session was cancelled.');
   }
 
-  // Authoritative server-side verification
+  const targetProvider = (provider || gateway || '').trim();
+  if (!targetProvider) {
+    throw new ApiError(400, 'Payment wallet provider is required');
+  }
+
+  // Validate Gateway Ownership & Active Status
+  const mId = session.merchant._id || session.merchant;
+  const activeGateway = await MerchantGateway.findOne({
+    merchant: mId,
+    provider: { $regex: new RegExp(`^${targetProvider}$`, 'i') },
+    isActive: true,
+  });
+
+  if (!activeGateway) {
+    throw new ApiError(400, `Selected payment channel (${targetProvider}) is invalid or inactive for this merchant.`);
+  }
+
+  // Authoritative server-side verification with strict session amount matching
   const payment = await verifyCustomerCheckoutPayment({
     trxId,
-    merchantId: session.merchant._id || session.merchant,
-    gateway: gateway || provider,
-    provider: provider || gateway,
+    merchantId: mId,
+    gateway: activeGateway.provider,
+    provider: activeGateway.provider,
     amount: session.amount,
     phone: phone || session.customerPhone,
     customerName: customerName || session.customerName,
@@ -133,7 +193,7 @@ const verifySessionPayment = async ({
 
   // Dispatch webhook event asynchronously
   sendWebhook({
-    merchantId: session.merchant._id || session.merchant,
+    merchantId: mId,
     brandId: session.brand ? (session.brand._id || session.brand) : null,
     payment,
     event: 'payment.verified',

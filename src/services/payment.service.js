@@ -453,23 +453,38 @@ const verifyCustomerCheckoutPayment = async ({
     throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
   }
 
-  // Mark as verified & used
-  payment.status = 'VERIFIED';
-  payment.paymentStatus = 'VERIFIED';
-  payment.isUsed = true;
-  if (customerName) payment.customerName = customerName;
-  if (phone) payment.phone = phone;
+  // Mark as verified & used atomically to prevent concurrent race conditions
+  const claimedPayment = await Payment.findOneAndUpdate(
+    {
+      _id: payment._id,
+      isUsed: { $ne: true },
+      status: { $nin: ['USED', 'CLAIMED'] },
+    },
+    {
+      $set: {
+        status: 'VERIFIED',
+        paymentStatus: 'VERIFIED',
+        isUsed: true,
+        usedAt: new Date(),
+        ...(customerName ? { customerName } : {}),
+        ...(phone ? { phone } : {}),
+      },
+    },
+    { new: true }
+  );
 
-  await payment.save();
+  if (!claimedPayment) {
+    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+  }
 
-  emitPaymentUpdated(payment.merchant, {
-    _id: payment._id,
-    transactionId: payment.transactionId,
-    status: payment.status,
-    amount: payment.amount,
+  emitPaymentUpdated(claimedPayment.merchant, {
+    _id: claimedPayment._id,
+    transactionId: claimedPayment.transactionId,
+    status: claimedPayment.status,
+    amount: claimedPayment.amount,
   });
 
-  return payment;
+  return claimedPayment;
 };
 
 module.exports = {
