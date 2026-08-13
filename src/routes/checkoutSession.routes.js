@@ -10,6 +10,10 @@ router.post('/public/:sessionId/verify', verifyLimiter, checkoutSessionControlle
 
 // Merchant Server APIs (Secured via API Key or Bearer Token)
 router.post('/', sessionLimiter, verifyApiKey, checkoutSessionController.createSession);
+router.post('/verify', verifyLimiter, verifyApiKey, checkoutSessionController.verifyMerchantSessionPayment);
+router.post('/:sessionId/verify-payment', verifyLimiter, verifyApiKey, checkoutSessionController.verifyMerchantSessionPayment);
+router.post('/:sessionId/verify', verifyLimiter, verifyApiKey, checkoutSessionController.verifyMerchantSessionPayment);
 router.get('/:sessionId', verifyApiKey, checkoutSessionController.getMerchantSessionStatus);
 
 module.exports = router;
+

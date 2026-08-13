@@ -125,84 +125,129 @@ const verifySessionPayment = async ({
   provider,
   customerName,
   phone,
+  merchantId,
 }) => {
-  const session = await CheckoutSession.findOne({ sessionId }).populate('merchant brand');
-  if (!session) {
-    throw new ApiError(404, 'Checkout session not found');
+  if (!sessionId && !trxId) {
+    throw new ApiError(400, 'Session ID or Transaction ID is required');
   }
 
-  if (session.status === 'PENDING' && new Date() > new Date(session.expiresAt)) {
-    session.status = 'EXPIRED';
-    await session.save();
+  let session = null;
+  if (sessionId) {
+    session = await CheckoutSession.findOne({ sessionId }).populate('merchant brand');
+    if (!session) {
+      const err = new ApiError(404, 'Checkout session not found');
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+
+    const sMerchantId = session.merchant._id || session.merchant;
+    if (merchantId && sMerchantId.toString() !== merchantId.toString()) {
+      const err = new ApiError(404, 'Checkout session not found or access denied');
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
+
+    if (session.status === 'PENDING' && new Date() > new Date(session.expiresAt)) {
+      session.status = 'EXPIRED';
+      await session.save();
+    }
+
+    if (session.status === 'VERIFIED') {
+      return {
+        session,
+        payment: session.payment,
+        returnUrl: session.returnUrl,
+        message: 'Checkout session is already verified',
+      };
+    }
+
+    if (session.status === 'EXPIRED') {
+      const err = new ApiError(400, 'Checkout session has expired. Please create a new checkout session.');
+      err.code = 'EXPIRED_SESSION';
+      throw err;
+    }
+
+    if (session.status === 'CANCELLED') {
+      const err = new ApiError(400, 'Checkout session was cancelled.');
+      err.code = 'CANCELLED_SESSION';
+      throw err;
+    }
   }
 
-  if (session.status === 'VERIFIED') {
-    return {
-      session,
-      payment: session.payment,
-      returnUrl: session.returnUrl,
-      message: 'Checkout session is already verified',
-    };
+  const mId = merchantId || (session ? (session.merchant._id || session.merchant) : null);
+  const cleanTrx = (trxId || '').trim();
+
+  if (!cleanTrx) {
+    throw new ApiError(400, 'Transaction ID is required');
   }
 
-  if (session.status === 'EXPIRED') {
-    const err = new ApiError(400, 'Checkout session has expired. Please create a new checkout session.');
-    err.code = 'EXPIRED_SESSION';
+  let targetProvider = (provider || gateway || '').trim();
+  if (!targetProvider) {
+    const Payment = require('../models/Payment');
+    const matchedPayment = await Payment.findOne({
+      transactionId: { $regex: new RegExp(`^${cleanTrx}$`, 'i') },
+      ...(mId ? { merchant: mId } : {}),
+    });
+    if (matchedPayment) {
+      targetProvider = matchedPayment.provider || matchedPayment.gateway;
+    }
+  }
+
+  if (!targetProvider) {
+    const err = new ApiError(400, 'Payment wallet provider is required or could not be determined');
+    err.code = 'PAYMENT_PROVIDER_MISMATCH';
     throw err;
   }
 
-  if (session.status === 'CANCELLED') {
-    throw new ApiError(400, 'Checkout session was cancelled.');
-  }
-
-  const targetProvider = (provider || gateway || '').trim();
-  if (!targetProvider) {
-    throw new ApiError(400, 'Payment wallet provider is required');
-  }
-
   // Validate Gateway Ownership & Active Status
-  const mId = session.merchant._id || session.merchant;
-  const activeGateway = await MerchantGateway.findOne({
-    merchant: mId,
-    provider: { $regex: new RegExp(`^${targetProvider}$`, 'i') },
-    isActive: true,
-  });
+  if (mId) {
+    const activeGateway = await MerchantGateway.findOne({
+      merchant: mId,
+      provider: { $regex: new RegExp(`^${targetProvider}$`, 'i') },
+      isActive: true,
+    });
 
-  if (!activeGateway) {
-    throw new ApiError(400, `Selected payment channel (${targetProvider}) is invalid or inactive for this merchant.`);
+    if (!activeGateway) {
+      const err = new ApiError(400, `Selected payment channel (${targetProvider}) is invalid or inactive for this merchant.`);
+      err.code = 'PAYMENT_PROVIDER_MISMATCH';
+      throw err;
+    }
   }
 
   // Authoritative server-side verification with strict session amount matching
   const payment = await verifyCustomerCheckoutPayment({
-    trxId,
+    trxId: cleanTrx,
     merchantId: mId,
-    gateway: activeGateway.provider,
-    provider: activeGateway.provider,
-    amount: session.amount,
-    phone: phone || session.customerPhone,
-    customerName: customerName || session.customerName,
+    gateway: targetProvider,
+    provider: targetProvider,
+    amount: session ? session.amount : undefined,
+    phone: phone || (session ? session.customerPhone : undefined),
+    customerName: customerName || (session ? session.customerName : undefined),
   });
 
-  session.status = 'VERIFIED';
-  session.payment = payment._id;
-  session.transactionId = payment.transactionId;
-  if (customerName) session.customerName = customerName;
-  if (phone) session.customerPhone = phone;
-
-  await session.save();
+  if (session) {
+    session.status = 'VERIFIED';
+    session.payment = payment._id;
+    session.transactionId = payment.transactionId;
+    if (customerName) session.customerName = customerName;
+    if (phone) session.customerPhone = phone;
+    await session.save();
+  }
 
   // Dispatch webhook event asynchronously
-  sendWebhook({
-    merchantId: mId,
-    brandId: session.brand ? (session.brand._id || session.brand) : null,
-    payment,
-    event: 'payment.verified',
-  }).catch(() => {});
+  if (mId) {
+    sendWebhook({
+      merchantId: mId,
+      brandId: session && session.brand ? (session.brand._id || session.brand) : null,
+      payment,
+      event: 'payment.verified',
+    }).catch(() => {});
+  }
 
   return {
     session,
     payment,
-    returnUrl: session.returnUrl,
+    returnUrl: session ? session.returnUrl : '',
     message: 'Payment verified successfully',
   };
 };

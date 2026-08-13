@@ -97,9 +97,30 @@ const getMerchantSessionStatus = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, session, 'Checkout session status fetched');
 });
 
+// POST /api/v1/checkout/sessions/verify or POST /api/v1/checkout/sessions/:sessionId/verify-payment
+const verifyMerchantSessionPayment = asyncHandler(async (req, res) => {
+  const merchantId = req.merchantId || req.merchant?._id;
+  const { sessionId: paramSessionId } = req.params;
+  const { sessionId: bodySessionId, trxId, transactionId, gateway, provider, customerName, phone, amount } = req.body;
+
+  const result = await checkoutSessionService.verifySessionPayment({
+    sessionId: paramSessionId || bodySessionId,
+    trxId: trxId || transactionId,
+    gateway: gateway || provider,
+    provider: provider || gateway,
+    customerName,
+    phone,
+    merchantId,
+  });
+
+  return ApiResponse.success(res, result, 'Payment verified successfully for merchant');
+});
+
 module.exports = {
   createSession,
   getPublicSession,
   verifyPublicSessionPayment,
   getMerchantSessionStatus,
+  verifyMerchantSessionPayment,
 };
+
