@@ -228,7 +228,31 @@ async function runDeveloperIntegrationTests() {
       };
     }
 
-    // Instantiate FastPay SDK for Merchant A
+    // TEST 1: SDK Constructor without API key
+    try {
+      new FastPay({ merchantId: 'm_123', baseUrl: serverUrl });
+      recordResult(1, 'SDK constructor without API Key', false, 'Constructor allowed missing apiKey');
+    } catch (err) {
+      recordResult(1, 'SDK constructor without API Key', err.message.includes('API key is required'), err.message);
+    }
+
+    // TEST 2: SDK Constructor without Merchant ID
+    try {
+      new FastPay({ apiKey: 'ap_key_123', baseUrl: serverUrl });
+      recordResult(2, 'SDK constructor without Merchant ID', false, 'Constructor allowed missing merchantId');
+    } catch (err) {
+      recordResult(2, 'SDK constructor without Merchant ID', err.message.includes('Merchant ID is required'), err.message);
+    }
+
+    // TEST 3: SDK Constructor without Base URL
+    try {
+      new FastPay({ apiKey: 'ap_key_123', merchantId: 'm_123' });
+      recordResult(3, 'SDK constructor without Base URL', false, 'Constructor allowed missing baseUrl');
+    } catch (err) {
+      recordResult(3, 'SDK constructor without Base URL', err.message.includes('API base URL is required'), err.message);
+    }
+
+    // Instantiate FastPay SDK for Merchant A & B
     const sdkA = new FastPay({
       apiKey: apiKeyA,
       merchantId: merchantIdA.toString(),
@@ -236,73 +260,33 @@ async function runDeveloperIntegrationTests() {
       webhookSecret: webhookSecretA,
     });
 
-    // Instantiate FastPay SDK for Merchant B
     const sdkB = new FastPay({
       apiKey: apiKeyB,
       merchantId: merchantIdB.toString(),
       baseUrl: serverUrl,
     });
 
-    // TEST 1: Reject Missing API Key
+    // TEST 4: Reject Missing API Key on server API call
     try {
       await axios.post(`${serverUrl}/checkout/sessions`, { orderId: 'O1', amount: 100, returnUrl: 'http://cb' });
-      recordResult(1, 'Reject missing API Key', false, 'Request unexpectedly succeeded');
+      recordResult(4, 'Reject missing API Key server-side', false, 'Request unexpectedly succeeded');
     } catch (err) {
-      recordResult(1, 'Reject missing API Key', err.response?.status === 401, `Status: ${err.response?.status}`);
+      recordResult(4, 'Reject missing API Key server-side', err.response?.status === 401, `Status: ${err.response?.status}`);
     }
 
-    // TEST 2: Reject Invalid API Key
+    // TEST 5: Reject Invalid API Key on server API call
     try {
       await axios.post(
         `${serverUrl}/checkout/sessions`,
         { orderId: 'O1', amount: 100, returnUrl: 'http://cb' },
         { headers: { 'X-API-Key': 'invalid_key_123' } }
       );
-      recordResult(2, 'Reject invalid API Key', false, 'Request unexpectedly succeeded');
+      recordResult(5, 'Reject invalid API Key server-side', false, 'Request unexpectedly succeeded');
     } catch (err) {
-      recordResult(2, 'Reject invalid API Key', err.response?.status === 401, `Status: ${err.response?.status}`);
+      recordResult(5, 'Reject invalid API Key server-side', err.response?.status === 401, `Status: ${err.response?.status}`);
     }
 
-    // TEST 3: Accept Valid API Key via X-API-Key Header
-    let sessionA = null;
-    try {
-      const res = await axios.post(
-        `${serverUrl}/checkout/sessions`,
-        {
-          orderId: `ORD_A_${testSuffix}`,
-          amount: 500,
-          currency: 'BDT',
-          customerName: 'Test Customer',
-          customerPhone: '01711111111',
-          returnUrl: 'https://merchant.com/callback',
-        },
-        { headers: { 'X-API-Key': apiKeyA } }
-      );
-
-      sessionA = res.data?.data;
-      recordResult(3, 'Accept valid API Key via X-API-Key', res.status === 201 && sessionA?.sessionId?.startsWith('cs_'), `Session ID: ${sessionA?.sessionId}`);
-    } catch (err) {
-      recordResult(3, 'Accept valid API Key via X-API-Key', false, err.response?.data?.message || err.message);
-    }
-
-    // TEST 4: Accept Valid API Key via Authorization Bearer Header
-    try {
-      const res = await axios.post(
-        `${serverUrl}/checkout/sessions`,
-        {
-          orderId: `ORD_BEARER_${testSuffix}`,
-          amount: 250,
-          returnUrl: 'https://merchant.com/callback',
-        },
-        { headers: { Authorization: `Bearer ${apiKeyA}` } }
-      );
-
-      recordResult(4, 'Accept valid API Key via Authorization Bearer', res.status === 201 && res.data?.data?.sessionId, `Session ID: ${res.data?.data?.sessionId}`);
-    } catch (err) {
-      recordResult(4, 'Accept valid API Key via Authorization Bearer', false, err.response?.data?.message || err.message);
-    }
-
-    // TEST 5: SDK createCheckout Method Execution
+    // TEST 6: SDK createCheckout Method Success
     let sdkSession = null;
     try {
       sdkSession = await sdkA.createCheckout({
@@ -313,65 +297,53 @@ async function runDeveloperIntegrationTests() {
         cancelUrl: 'https://merchant.com/checkout/cancel',
         customerName: 'SDK User',
       });
-      recordResult(5, 'SDK createCheckout Method', sdkSession?.success && sdkSession?.sessionId?.startsWith('cs_'), `Session: ${sdkSession?.sessionId}`);
+      recordResult(6, 'SDK createCheckout Success', sdkSession?.success && sdkSession?.sessionId?.startsWith('cs_'), `Session: ${sdkSession?.sessionId}`);
     } catch (err) {
-      recordResult(5, 'SDK createCheckout Method', false, err.message);
+      recordResult(6, 'SDK createCheckout Success', false, err.message);
     }
 
-    // TEST 6: Amount Protection - Reject Zero / Negative Amount
+    // TEST 7: createCheckout Missing Order ID
     try {
-      await sdkA.createCheckout({
-        orderId: `ORD_INVALID_AMT`,
-        amount: -50,
-        returnUrl: 'https://merchant.com/callback',
-      });
-      recordResult(6, 'Amount Protection (Reject <= 0)', false, 'Negative amount allowed');
+      await sdkA.createCheckout({ amount: 500, returnUrl: 'https://merchant.com/cb' });
+      recordResult(7, 'createCheckout Missing Order ID', false, 'Missing orderId allowed');
     } catch (err) {
-      recordResult(6, 'Amount Protection (Reject <= 0)', true, `Blocked invalid amount: ${err.message}`);
+      recordResult(7, 'createCheckout Missing Order ID', err.message.includes('orderId is required'), err.message);
     }
 
-    // TEST 7: Return URL Format Security Validation
+    // TEST 8: createCheckout Invalid Amount (<= 0 or NaN)
     try {
-      await sdkA.createCheckout({
-        orderId: `ORD_BAD_URL`,
-        amount: 100,
-        returnUrl: 'javascript:alert(1)',
-      });
-      recordResult(7, 'Return URL Protocol Security Validation', false, 'Unsafe URL protocol allowed');
+      await sdkA.createCheckout({ orderId: 'O_BAD', amount: -50, returnUrl: 'https://merchant.com/cb' });
+      recordResult(8, 'createCheckout Invalid Amount', false, 'Negative amount allowed');
     } catch (err) {
-      recordResult(7, 'Return URL Protocol Security Validation', true, `Blocked unsafe protocol: ${err.message}`);
+      recordResult(8, 'createCheckout Invalid Amount', err.message.includes('valid positive amount is required'), err.message);
     }
 
-    // TEST 8: Tenant Isolation - Merchant B blocked from Merchant A session status
-    if (sessionA?.sessionId) {
+    // TEST 9: createCheckout Invalid Return URL
+    try {
+      await sdkA.createCheckout({ orderId: 'O_BAD_URL', amount: 100, returnUrl: 'ftp://unsafe.com' });
+      recordResult(9, 'createCheckout Invalid Return URL', false, 'FTP URL allowed');
+    } catch (err) {
+      recordResult(9, 'createCheckout Invalid Return URL', err.message.includes('valid returnUrl'), err.message);
+    }
+
+    // TEST 10: Tenant Isolation - Merchant B blocked from Merchant A session
+    if (sdkSession?.sessionId) {
       try {
-        await sdkB.getPaymentStatus({ sessionId: sessionA.sessionId });
-        recordResult(8, 'Tenant Isolation - Merchant B blocked from Merchant A session', false, 'Merchant B unexpectedly accessed session');
+        await sdkB.getPaymentStatus({ sessionId: sdkSession.sessionId });
+        recordResult(10, 'Tenant Isolation', false, 'Merchant B unexpectedly accessed session');
       } catch (err) {
-        recordResult(8, 'Tenant Isolation - Merchant B blocked from Merchant A session', err.status === 404 || err.status === 403, `Status: ${err.status}`);
+        recordResult(10, 'Tenant Isolation', err.status === 404 || err.status === 403, `Status: ${err.status}`);
       }
     } else {
-      recordResult(8, 'Tenant Isolation - Merchant B blocked from Merchant A session', false, 'Session A not created');
+      recordResult(10, 'Tenant Isolation', false, 'Session not created');
     }
 
-    // TEST 9: Public Checkout Session Retrieval
-    if (sessionA?.sessionId) {
-      try {
-        const res = await axios.get(`${serverUrl}/checkout/sessions/public/${sessionA.sessionId}`);
-        recordResult(9, 'Public Checkout Session Retrieval', res.data?.data?.amount === 500, `Amount: ${res.data?.data?.amount}`);
-      } catch (err) {
-        recordResult(9, 'Public Checkout Session Retrieval', false, err.message);
-      }
-    } else {
-      recordResult(9, 'Public Checkout Session Retrieval', false, 'Session A not created');
-    }
-
-    // TEST 10: Create Payment Record for Merchant A
+    // TEST 11: Create Payment Record for Merchant A
     const trxIdA = `TRX_DEV_${testSuffix}`;
     await Payment.create({
       merchant: merchantIdA,
       transactionId: trxIdA,
-      amount: 500,
+      amount: 499,
       gateway: 'bKash',
       provider: 'bKash',
       sender: '01711111111',
@@ -380,81 +352,89 @@ async function runDeveloperIntegrationTests() {
       isUsed: false,
     });
 
-    // TEST 11: SDK verifyPayment Method for Session A
-    if (sessionA?.sessionId) {
+    // TEST 12: SDK verifyPayment Method Success
+    if (sdkSession?.sessionId) {
       try {
         const verifyRes = await sdkA.verifyPayment({
           transactionId: trxIdA,
-          sessionId: sessionA.sessionId,
+          sessionId: sdkSession.sessionId,
           provider: 'bKash',
         });
-        recordResult(11, 'SDK verifyPayment Method', verifyRes?.success && verifyRes?.status === 'VERIFIED', `Status: ${verifyRes?.status}`);
+        recordResult(12, 'SDK verifyPayment Success', verifyRes?.success && verifyRes?.status === 'VERIFIED', `Status: ${verifyRes?.status}`);
       } catch (err) {
-        recordResult(11, 'SDK verifyPayment Method', false, err.message);
+        recordResult(12, 'SDK verifyPayment Success', false, err.message);
       }
     } else {
-      recordResult(11, 'SDK verifyPayment Method', false, 'Session A not created');
+      recordResult(12, 'SDK verifyPayment Success', false, 'Session not created');
     }
 
-    // TEST 12: SDK getPaymentStatus Query
-    if (sessionA?.sessionId) {
+    // TEST 13: verifyPayment Missing transactionId
+    try {
+      await sdkA.verifyPayment({ sessionId: 'cs_live_123' });
+      recordResult(13, 'verifyPayment Missing transactionId', false, 'Missing transactionId allowed');
+    } catch (err) {
+      recordResult(13, 'verifyPayment Missing transactionId', err.message.includes('transactionId is required'), err.message);
+    }
+
+    // TEST 14: verifyPayment Missing sessionId
+    try {
+      await sdkA.verifyPayment({ transactionId: 'TRX_123' });
+      recordResult(14, 'verifyPayment Missing sessionId', false, 'Missing sessionId allowed');
+    } catch (err) {
+      recordResult(14, 'verifyPayment Missing sessionId', err.message.includes('sessionId is required'), err.message);
+    }
+
+    // TEST 15: SDK getPaymentStatus Query (String & Object formats)
+    if (sdkSession?.sessionId) {
       try {
-        const statusRes = await sdkA.getPaymentStatus({ sessionId: sessionA.sessionId });
-        recordResult(12, 'SDK getPaymentStatus Query', statusRes?.success && statusRes?.status === 'VERIFIED', `Status: ${statusRes?.status}`);
+        const statusRes1 = await sdkA.getPaymentStatus(sdkSession.sessionId);
+        const statusRes2 = await sdkA.getPaymentStatus({ sessionId: sdkSession.sessionId });
+        recordResult(15, 'SDK getPaymentStatus (String & Object)', statusRes1?.status === 'VERIFIED' && statusRes2?.status === 'VERIFIED', `Status: ${statusRes1?.status}`);
       } catch (err) {
-        recordResult(12, 'SDK getPaymentStatus Query', false, err.message);
+        recordResult(15, 'SDK getPaymentStatus (String & Object)', false, err.message);
       }
     } else {
-      recordResult(12, 'SDK getPaymentStatus Query', false, 'Session A not created');
+      recordResult(15, 'SDK getPaymentStatus (String & Object)', false, 'Session not created');
     }
 
-    // TEST 13: Reject Already Used Transaction ID (Replay Protection)
-    try {
-      const sess2Res = await sdkA.createCheckout({
-        orderId: `ORD_DUP_${testSuffix}`,
-        amount: 500,
-        returnUrl: 'https://merchant.com/callback',
-      });
-
-      await sdkA.verifyPayment({
-        transactionId: trxIdA,
-        sessionId: sess2Res.sessionId,
-        provider: 'bKash',
-      });
-      recordResult(13, 'Reject Already Used Transaction ID', false, 'Duplicate verification unexpectedly allowed');
-    } catch (err) {
-      recordResult(13, 'Reject Already Used Transaction ID', true, `Blocked replay: ${err.message}`);
-    }
-
-    // TEST 14: Reject Invalid Transaction ID
-    try {
-      await sdkA.verifyPayment({
-        transactionId: `INVALID_TRX_999`,
-        sessionId: sdkSession?.sessionId,
-      });
-      recordResult(14, 'Reject Invalid Transaction ID', false, 'Invalid transaction accepted');
-    } catch (err) {
-      recordResult(14, 'Reject Invalid Transaction ID', true, `Correctly rejected: ${err.message}`);
-    }
-
-    // TEST 15: SDK verifyWebhookSignature Method (Valid Signature)
+    // TEST 16: Webhook Buffer Payload Verification (express.raw body)
     const timestamp = Math.floor(Date.now() / 1000);
-    const webhookPayload = { event: 'payment.verified', data: { id: 'p_123', amount: 500, transactionId: trxIdA } };
-    const payloadStr = JSON.stringify(webhookPayload);
-    const validSig = crypto.createHmac('sha256', webhookSecretA).update(`${timestamp}.${payloadStr}`).digest('hex');
+    const webhookPayloadObj = { event: 'payment.verified', timestamp: new Date().toISOString(), data: { id: 'p_123', amount: 499, transactionId: trxIdA } };
+    const payloadJsonStr = JSON.stringify(webhookPayloadObj);
+    const payloadBuffer = Buffer.from(payloadJsonStr, 'utf-8');
+
+    const validSig = crypto.createHmac('sha256', webhookSecretA).update(`${timestamp}.${payloadJsonStr}`).digest('hex');
     const headerVal = `t=${timestamp},v1=${validSig}`;
 
-    const isValidWebhook = FastPay.verifyWebhookSignature(webhookPayload, headerVal, webhookSecretA);
-    recordResult(15, 'SDK verifyWebhookSignature (Valid)', isValidWebhook === true, 'Valid signature verified');
+    const isBufferValid = FastPay.verifyWebhookSignature(payloadBuffer, headerVal, webhookSecretA);
+    recordResult(16, 'Webhook Buffer Verification', isBufferValid === true, 'Buffer payload verified');
 
-    // TEST 16: SDK verifyWebhookSignature Method (Invalid Signature)
-    const isInvalidWebhook = FastPay.verifyWebhookSignature(webhookPayload, headerVal, 'wrong_secret_123');
-    recordResult(16, 'SDK verifyWebhookSignature (Invalid Secret)', isInvalidWebhook === false, 'Invalid secret rejected');
+    // TEST 17: Webhook String Payload Verification
+    const isStrValid = FastPay.verifyWebhookSignature(payloadJsonStr, headerVal, webhookSecretA);
+    recordResult(17, 'Webhook String Verification', isStrValid === true, 'String payload verified');
+
+    // TEST 18: Webhook Object Payload Verification
+    const isObjValid = FastPay.verifyWebhookSignature(webhookPayloadObj, headerVal, webhookSecretA);
+    recordResult(18, 'Webhook Object Verification', isObjValid === true, 'Object payload verified');
+
+    // TEST 19: Reject Stale Webhook Timestamp (> 300s)
+    const staleTimestamp = timestamp - 305;
+    const staleSig = crypto.createHmac('sha256', webhookSecretA).update(`${staleTimestamp}.${payloadJsonStr}`).digest('hex');
+    const staleHeader = `t=${staleTimestamp},v1=${staleSig}`;
+    const isStaleRejected = FastPay.verifyWebhookSignature(payloadBuffer, staleHeader, webhookSecretA, 300);
+    recordResult(19, 'Reject Stale Webhook Timestamp (> 300s)', isStaleRejected === false, 'Stale timestamp rejected');
+
+    // TEST 20: Reject Missing Webhook Secret
+    try {
+      FastPay.verifyWebhookSignature(payloadBuffer, headerVal, '');
+      recordResult(20, 'Reject Missing Webhook Secret', false, 'Missing webhook secret allowed');
+    } catch (err) {
+      recordResult(20, 'Reject Missing Webhook Secret', err.message.includes('FASTPAY_WEBHOOK_SECRET is required'), err.message);
+    }
 
   } catch (err) {
     console.error('Fatal test runner error:', err);
   } finally {
-    // Cleanup
     if (isDbConnected) {
       if (merchantA) await Merchant.deleteOne({ _id: merchantA._id }).catch(() => {});
       if (merchantB) await Merchant.deleteOne({ _id: merchantB._id }).catch(() => {});

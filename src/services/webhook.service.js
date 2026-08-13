@@ -47,7 +47,7 @@ const sendWebhook = async ({ merchantId, brandId, payment, event = 'payment.veri
       const brand = await Brand.findById(brandId);
       if (brand && brand.webhookUrl) {
         targetUrl = brand.webhookUrl;
-        secret = brand.webhookSecret || 'whsec_default';
+        secret = brand.webhookSecret || '';
       }
     }
 
@@ -55,12 +55,12 @@ const sendWebhook = async ({ merchantId, brandId, payment, event = 'payment.veri
       const merchant = await Merchant.findById(merchantId).select('+apiSecret');
       if (merchant && merchant.webhookUrl) {
         targetUrl = merchant.webhookUrl;
-        secret = merchant.webhookSecret || merchant.apiSecret || merchant.apiKey || 'whsec_default';
+        secret = merchant.webhookSecret || merchant.apiSecret || merchant.apiKey || '';
       }
     }
 
-    if (!targetUrl) {
-      logger.info(`[Webhook Engine] No webhook URL configured for merchant ${merchantId} / brand ${brandId}`);
+    if (!targetUrl || !secret) {
+      logger.info(`[Webhook Engine] Webhook URL or Secret not configured for merchant ${merchantId} / brand ${brandId}`);
       return null;
     }
 
@@ -131,9 +131,14 @@ const retryWebhook = async (webhookLogId, merchantId) => {
     throw new Error('Webhook log not found');
   }
 
+  const merchant = await Merchant.findById(merchantId).select('+apiSecret');
+  const secret = merchant ? (merchant.webhookSecret || merchant.apiSecret || merchant.apiKey) : '';
+  if (!secret) {
+    throw new Error('Webhook signing secret not configured');
+  }
+
   const payloadString = JSON.stringify(logEntry.payload);
   const timestamp = Math.floor(Date.now() / 1000);
-  const secret = 'whsec_retry_secret';
   const signature = generateSignature(payloadString, secret, timestamp);
 
   logEntry.attempts += 1;

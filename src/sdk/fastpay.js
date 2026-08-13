@@ -9,25 +9,35 @@ class FastPay {
   /**
    * @param {Object} config
    * @param {string} config.apiKey - Merchant API Key (e.g. ap_key_xxxxx)
-   * @param {string} [config.merchantId] - Optional Merchant ID
-   * @param {string} [config.baseUrl='http://localhost:5000/api/v1'] - Fast Pay API Base URL
-   * @param {string} [config.webhookSecret] - Webhook Secret for HMAC SHA-256 verification
+   * @param {string} config.merchantId - Merchant ID (e.g. m_xxxxx)
+   * @param {string} config.baseUrl - Fast Pay API Base URL (e.g. https://api.fastpay.com/api/v1)
+   * @param {string} [config.webhookSecret] - Optional Webhook Secret for HMAC SHA-256 verification
    * @param {number} [config.timeout=10000] - Request timeout in milliseconds
    */
   constructor(config = {}) {
-    this.apiKey = config.apiKey || (typeof process !== 'undefined' ? process.env.FASTPAY_API_KEY : '');
+    this.apiKey = config.apiKey || (typeof process !== 'undefined' ? process.env.FASTPAY_API_KEY : '') || '';
     this.merchantId = config.merchantId || (typeof process !== 'undefined' ? process.env.FASTPAY_MERCHANT_ID : '') || '';
-    this.baseUrl = (config.baseUrl || (typeof process !== 'undefined' ? process.env.FASTPAY_API_URL : '') || 'http://localhost:5000/api/v1').replace(/\/+$/, '');
+    const rawBaseUrl = config.baseUrl || (typeof process !== 'undefined' ? process.env.FASTPAY_API_URL : '') || '';
     this.webhookSecret = config.webhookSecret || (typeof process !== 'undefined' ? process.env.FASTPAY_WEBHOOK_SECRET : '') || '';
     this.timeout = config.timeout || 10000;
 
     if (!this.apiKey) {
-      throw new Error('FastPay SDK Error: apiKey is required in constructor or FASTPAY_API_KEY environment variable.');
+      throw new Error('FastPay SDK Error: API key is required.');
     }
+
+    if (!this.merchantId) {
+      throw new Error('FastPay SDK Error: Merchant ID is required.');
+    }
+
+    if (!rawBaseUrl) {
+      throw new Error('FastPay SDK Error: API base URL is required.');
+    }
+
+    this.baseUrl = rawBaseUrl.trim().replace(/\/+$/, '');
   }
 
   /**
-   * Helper method to perform HTTP POST requests using native fetch / http
+   * Internal HTTP Client helper
    * @private
    */
   async _request(endpoint, method = 'GET', data = null) {
@@ -63,7 +73,6 @@ class FastPay {
           responseData = { message: text };
         }
       } else {
-        // Fallback for older Node versions using http/https
         const axios = require('axios');
         const response = await axios({
           url,
@@ -88,7 +97,6 @@ class FastPay {
       const error = new Error(msg);
       error.status = statusCode;
       error.code = responseData?.code || (statusCode === 401 ? 'UNAUTHORIZED' : (statusCode === 404 ? 'NOT_FOUND' : 'API_ERROR'));
-      error.details = responseData;
       throw error;
     }
 
@@ -109,29 +117,40 @@ class FastPay {
    * @param {string} [params.customerAddress] - Customer shipping address
    * @param {Object} [params.customFields] - Additional order metadata
    * @param {number} [params.expiresInMinutes=30] - Session lifetime in minutes
-   * @returns {Promise<Object>} { success: true, sessionId, checkoutUrl, expiresAt, amount, currency, orderId }
+   * @returns {Promise<Object>} { success: true, sessionId, checkoutUrl, expiresAt, amount, currency, orderId, status }
    */
   async createCheckout(params = {}) {
-    if (!params.orderId) {
-      throw new Error('FastPay SDK Error: orderId is required to create a checkout session.');
+    if (!params || typeof params !== 'object') {
+      throw new Error('FastPay SDK Error: Invalid parameters for createCheckout.');
     }
-    if (!params.amount || Number(params.amount) <= 0) {
-      throw new Error('FastPay SDK Error: valid amount (> 0) is required.');
+
+    if (!params.orderId || !String(params.orderId).trim()) {
+      throw new Error('FastPay SDK Error: orderId is required.');
     }
-    if (!params.returnUrl) {
-      throw new Error('FastPay SDK Error: returnUrl is required.');
+
+    const numAmount = Number(params.amount);
+    if (isNaN(numAmount) || numAmount <= 0) {
+      throw new Error('FastPay SDK Error: valid positive amount is required.');
+    }
+
+    if (!params.returnUrl || typeof params.returnUrl !== 'string' || !/^https?:\/\//i.test(params.returnUrl.trim())) {
+      throw new Error('FastPay SDK Error: valid returnUrl (HTTP/HTTPS) is required.');
+    }
+
+    if (params.cancelUrl && (typeof params.cancelUrl !== 'string' || !/^https?:\/\//i.test(params.cancelUrl.trim()))) {
+      throw new Error('FastPay SDK Error: valid cancelUrl (HTTP/HTTPS) is required.');
     }
 
     const payload = {
-      orderId: String(params.orderId),
-      amount: Number(params.amount),
-      currency: params.currency || 'BDT',
-      returnUrl: params.returnUrl,
-      cancelUrl: params.cancelUrl || '',
-      customerName: params.customerName || '',
-      customerPhone: params.customerPhone || '',
-      customerEmail: params.customerEmail || '',
-      customerAddress: params.customerAddress || '',
+      orderId: String(params.orderId).trim(),
+      amount: numAmount,
+      currency: (params.currency || 'BDT').toUpperCase(),
+      returnUrl: params.returnUrl.trim(),
+      cancelUrl: params.cancelUrl ? params.cancelUrl.trim() : '',
+      customerName: params.customerName ? String(params.customerName).trim() : '',
+      customerPhone: params.customerPhone ? String(params.customerPhone).trim() : '',
+      customerEmail: params.customerEmail ? String(params.customerEmail).trim() : '',
+      customerAddress: params.customerAddress ? String(params.customerAddress).trim() : '',
       customFields: params.customFields || {},
       expiresInMinutes: params.expiresInMinutes || 30,
     };
@@ -150,31 +169,32 @@ class FastPay {
   }
 
   /**
-   * 2. Verify payment by Transaction ID and/or Session ID
+   * 2. Verify payment by Transaction ID and Session ID
    * @param {Object} params
    * @param {string} params.transactionId - MFS TrxID (e.g. 9B7X2Y1Z)
-   * @param {string} [params.sessionId] - Fast Pay Checkout Session ID (e.g. cs_live_xxxxx)
+   * @param {string} params.sessionId - Fast Pay Checkout Session ID (e.g. cs_live_xxxxx)
    * @param {string} [params.provider] - MFS Provider (bkash, nagad, rocket, upay)
-   * @param {number} [params.amount] - Expected amount in BDT
    * @returns {Promise<Object>} { success: true, status: 'VERIFIED', transactionId, amount, provider }
    */
   async verifyPayment(params = {}) {
-    if (!params.transactionId && !params.sessionId) {
-      throw new Error('FastPay SDK Error: transactionId or sessionId is required to verify payment.');
+    if (!params || typeof params !== 'object') {
+      throw new Error('FastPay SDK Error: Invalid parameters for verifyPayment.');
     }
 
-    let endpoint = '/checkout/sessions/verify';
-    if (params.sessionId) {
-      endpoint = `/checkout/sessions/${params.sessionId}/verify-payment`;
+    if (!params.transactionId || !String(params.transactionId).trim()) {
+      throw new Error('FastPay SDK Error: transactionId is required.');
     }
 
+    if (!params.sessionId || !String(params.sessionId).trim()) {
+      throw new Error('FastPay SDK Error: sessionId is required.');
+    }
+
+    const endpoint = `/checkout/sessions/${params.sessionId.trim()}/verify-payment`;
     const payload = {
-      trxId: params.transactionId,
-      transactionId: params.transactionId,
-      sessionId: params.sessionId,
-      provider: params.provider || params.gateway,
-      gateway: params.gateway || params.provider,
-      amount: params.amount,
+      trxId: params.transactionId.trim(),
+      transactionId: params.transactionId.trim(),
+      sessionId: params.sessionId.trim(),
+      provider: params.provider ? String(params.provider).trim() : undefined,
     };
 
     const res = await this._request(endpoint, 'POST', payload);
@@ -194,14 +214,19 @@ class FastPay {
 
   /**
    * 3. Query current Checkout Session status
-   * @param {Object} params
-   * @param {string} params.sessionId - Fast Pay Checkout Session ID
-   * @returns {Promise<Object>} { success: true, status, sessionId, orderId, amount, payment }
+   * @param {string|Object} params - Session ID string or object { sessionId }
+   * @returns {Promise<Object>} { success: true, sessionId, orderId, status, amount, currency, expiresAt }
    */
-  async getPaymentStatus(params = {}) {
-    const sessionId = typeof params === 'string' ? params : params?.sessionId;
+  async getPaymentStatus(params) {
+    let sessionId = '';
+    if (typeof params === 'string') {
+      sessionId = params.trim();
+    } else if (params && typeof params === 'object' && params.sessionId) {
+      sessionId = String(params.sessionId).trim();
+    }
+
     if (!sessionId) {
-      throw new Error('FastPay SDK Error: sessionId is required to get payment status.');
+      throw new Error('FastPay SDK Error: sessionId is required.');
     }
 
     const res = await this._request(`/checkout/sessions/${sessionId}`, 'GET');
@@ -209,40 +234,78 @@ class FastPay {
       success: true,
       sessionId: res.sessionId,
       orderId: res.orderId,
+      status: res.status,
       amount: res.amount,
       currency: res.currency,
-      status: res.status,
-      transactionId: res.transactionId || res.payment?.transactionId || null,
       expiresAt: res.expiresAt,
-      payment: res.payment || null,
     };
   }
 
   /**
-   * 4. Static / instance method to verify HMAC SHA-256 webhook signatures
+   * 4. Static method to verify HMAC SHA-256 webhook signatures
    * Header format: X-FastPay-Signature: t=timestamp,v1=signature
-   * Signature calculation: HMAC-SHA256(secret, "${timestamp}.${payloadString}")
+   * Replay protection: Rejects requests older than toleranceInSeconds (default 300s = 5 minutes).
    *
-   * @param {string|Object} payload - Raw JSON payload string or parsed object
+   * @param {Buffer|string|Object} payload - Raw body Buffer, JSON string, or object
    * @param {string} signatureHeader - Value of X-FastPay-Signature header
-   * @param {string} [secret] - Webhook secret key
-   * @returns {boolean} True if signature is valid
+   * @param {string} secret - Webhook secret key
+   * @param {number} [toleranceInSeconds=300] - Timestamp replay window tolerance
+   * @returns {boolean} True if signature is valid and within replay window
    */
-  static verifyWebhookSignature(payload, signatureHeader, secret) {
-    if (!signatureHeader || typeof signatureHeader !== 'string' || !secret) {
+  static verifyWebhookSignature(payload, signatureHeader, secret, toleranceInSeconds = 300) {
+    if (!secret || typeof secret !== 'string') {
+      throw new Error('FastPay SDK Error: FASTPAY_WEBHOOK_SECRET is required for webhook verification.');
+    }
+
+    if (!signatureHeader || typeof signatureHeader !== 'string') {
       return false;
     }
 
-    const payloadString = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    let payloadString = '';
+    if (Buffer.isBuffer(payload)) {
+      payloadString = payload.toString('utf8');
+    } else if (typeof payload === 'string') {
+      payloadString = payload;
+    } else if (payload && typeof payload === 'object') {
+      payloadString = JSON.stringify(payload);
+    } else {
+      return false;
+    }
+
     const parts = {};
     signatureHeader.split(',').forEach((part) => {
-      const [key, val] = part.split('=');
-      if (key && val) parts[key.trim()] = val.trim();
+      const idx = part.indexOf('=');
+      if (idx !== -1) {
+        const k = part.substring(0, idx).trim();
+        const v = part.substring(idx + 1).trim();
+        parts[k] = v;
+      }
     });
 
     const timestamp = parts.t;
     const signature = parts.v1;
-    if (!timestamp || !signature) return false;
+
+    if (!timestamp || !signature) {
+      return false;
+    }
+
+    // Hex length check for sha256 digest
+    if (!/^[0-9a-fA-F]{64}$/.test(signature)) {
+      return false;
+    }
+
+    // Replay protection / stale timestamp check
+    const timestampNum = parseInt(timestamp, 10);
+    if (isNaN(timestampNum)) {
+      return false;
+    }
+
+    if (toleranceInSeconds && toleranceInSeconds > 0) {
+      const now = Math.floor(Date.now() / 1000);
+      if (Math.abs(now - timestampNum) > toleranceInSeconds) {
+        return false; // Stale timestamp / replay attack
+      }
+    }
 
     const signatureData = `${timestamp}.${payloadString}`;
     const expectedSig = crypto
@@ -263,8 +326,12 @@ class FastPay {
   /**
    * Instance helper for webhook verification using configured webhookSecret
    */
-  verifyWebhookSignature(payload, signatureHeader, secret = this.webhookSecret) {
-    return FastPay.verifyWebhookSignature(payload, signatureHeader, secret);
+  verifyWebhookSignature(payload, signatureHeader, secret = this.webhookSecret, toleranceInSeconds = 300) {
+    const sec = secret || this.webhookSecret;
+    if (!sec) {
+      throw new Error('FastPay SDK Error: FASTPAY_WEBHOOK_SECRET is required for webhook verification.');
+    }
+    return FastPay.verifyWebhookSignature(payload, signatureHeader, sec, toleranceInSeconds);
   }
 }
 
