@@ -13,20 +13,46 @@ const generateSignature = (payloadString, secret, timestamp) => {
     .digest('hex');
 };
 
-const verifySignature = (signatureHeader, payloadString, secret) => {
+const verifySignature = (signatureHeader, payloadString, secret, toleranceInSeconds = 300) => {
   if (!signatureHeader || typeof signatureHeader !== 'string' || !secret) return false;
+
+  let payloadStr = '';
+  if (Buffer.isBuffer(payloadString)) {
+    payloadStr = payloadString.toString('utf8');
+  } else if (typeof payloadString === 'string') {
+    payloadStr = payloadString;
+  } else if (payloadString && typeof payloadString === 'object') {
+    payloadStr = JSON.stringify(payloadString);
+  } else {
+    return false;
+  }
 
   const parts = {};
   signatureHeader.split(',').forEach((part) => {
-    const [key, val] = part.split('=');
-    if (key && val) parts[key.trim()] = val.trim();
+    const idx = part.indexOf('=');
+    if (idx !== -1) {
+      const k = part.substring(0, idx).trim();
+      const v = part.substring(idx + 1).trim();
+      parts[k] = v;
+    }
   });
 
   const timestamp = parts.t;
   const signature = parts.v1;
   if (!timestamp || !signature) return false;
+  if (!/^[0-9a-fA-F]{64}$/.test(signature)) return false;
 
-  const expectedSig = generateSignature(payloadString, secret, timestamp);
+  const timestampNum = parseInt(timestamp, 10);
+  if (isNaN(timestampNum)) return false;
+
+  if (toleranceInSeconds && toleranceInSeconds > 0) {
+    const now = Math.floor(Date.now() / 1000);
+    if (Math.abs(now - timestampNum) > toleranceInSeconds) {
+      return false; // Stale timestamp / replay
+    }
+  }
+
+  const expectedSig = generateSignature(payloadStr, secret, timestamp);
 
   try {
     const sigBuf = Buffer.from(signature, 'hex');
@@ -49,12 +75,25 @@ const sendWebhook = async ({ merchantId, brandId, payment, event = 'payment.veri
         targetUrl = brand.webhookUrl;
         secret = brand.webhookSecret || '';
       }
+      if (brand && !secret && brand.merchant) {
+        const merchant = await Merchant.findById(brand.merchant).select('+apiSecret');
+        if (merchant) {
+          secret = merchant.webhookSecret || merchant.apiSecret || merchant.apiKey || '';
+        }
+      }
     }
 
     if (!targetUrl && merchantId) {
       const merchant = await Merchant.findById(merchantId).select('+apiSecret');
       if (merchant && merchant.webhookUrl) {
         targetUrl = merchant.webhookUrl;
+        secret = merchant.webhookSecret || merchant.apiSecret || merchant.apiKey || '';
+      }
+    }
+
+    if (!secret && merchantId) {
+      const merchant = await Merchant.findById(merchantId).select('+apiSecret');
+      if (merchant) {
         secret = merchant.webhookSecret || merchant.apiSecret || merchant.apiKey || '';
       }
     }
@@ -78,9 +117,10 @@ const sendWebhook = async ({ merchantId, brandId, payment, event = 'payment.veri
       },
     };
 
-    const payloadString = JSON.stringify(payload);
+    // Serialize once into raw string so that signed payload matches transmitted body exactly
+    const rawBody = JSON.stringify(payload);
     const timestamp = Math.floor(Date.now() / 1000);
-    const signature = generateSignature(payloadString, secret, timestamp);
+    const signature = generateSignature(rawBody, secret, timestamp);
 
     const logEntry = await WebhookLog.create({
       merchant: merchantId,
@@ -93,26 +133,31 @@ const sendWebhook = async ({ merchantId, brandId, payment, event = 'payment.veri
       status: 'PENDING',
     });
 
+    const bodyHash = crypto.createHash('sha256').update(rawBody).digest('hex').substring(0, 16);
+    logger.info(`[Webhook Dispatch] Target: ${targetUrl} | Event: ${event} | Tx: ${payment.transactionId} | BodyHash: ${bodyHash} | Timestamp: ${timestamp}`);
+
     try {
-      const response = await axios.post(targetUrl, payload, {
+      const response = await axios.post(targetUrl, rawBody, {
         headers: {
           'Content-Type': 'application/json',
+          'X-FastPay-Signature': `t=${timestamp},v1=${signature}`,
           'X-FirstPay-Signature': `t=${timestamp},v1=${signature}`,
           'X-Gateway-Signature': `t=${timestamp},v1=${signature}`,
-          'User-Agent': 'FirstPay-Webhook-Engine/1.0',
+          'User-Agent': 'FastPay-Webhook-Engine/1.0',
         },
-        timeout: 5000,
+        timeout: 10000,
       });
 
       logEntry.responseStatus = response.status;
-      logEntry.responseBody = JSON.stringify(response.data || {}).substring(0, 1000);
+      logEntry.responseBody = typeof response.data === 'string' ? response.data.substring(0, 1000) : JSON.stringify(response.data || {}).substring(0, 1000);
       logEntry.status = response.status >= 200 && response.status < 300 ? 'SUCCESS' : 'FAILED';
       await logEntry.save();
 
       return logEntry;
     } catch (httpError) {
       logEntry.responseStatus = httpError.response ? httpError.response.status : 500;
-      logEntry.responseBody = (httpError.message || 'Connection failed').substring(0, 1000);
+      const respData = httpError.response?.data;
+      logEntry.responseBody = (typeof respData === 'string' ? respData : (respData ? JSON.stringify(respData) : (httpError.message || 'Connection failed'))).substring(0, 1000);
       logEntry.status = 'FAILED';
       logEntry.nextRetryAt = new Date(Date.now() + 5 * 60 * 1000); // retry in 5 mins
       await logEntry.save();
@@ -131,37 +176,51 @@ const retryWebhook = async (webhookLogId, merchantId) => {
     throw new Error('Webhook log not found');
   }
 
-  const merchant = await Merchant.findById(merchantId).select('+apiSecret');
-  const secret = merchant ? (merchant.webhookSecret || merchant.apiSecret || merchant.apiKey) : '';
+  let secret = '';
+  if (logEntry.brand) {
+    const brand = await Brand.findById(logEntry.brand);
+    if (brand && brand.webhookSecret) {
+      secret = brand.webhookSecret;
+    }
+  }
+
+  if (!secret) {
+    const merchant = await Merchant.findById(merchantId).select('+apiSecret');
+    secret = merchant ? (merchant.webhookSecret || merchant.apiSecret || merchant.apiKey) : '';
+  }
+
   if (!secret) {
     throw new Error('Webhook signing secret not configured');
   }
 
-  const payloadString = JSON.stringify(logEntry.payload);
+  const rawBody = JSON.stringify(logEntry.payload);
   const timestamp = Math.floor(Date.now() / 1000);
-  const signature = generateSignature(payloadString, secret, timestamp);
+  const signature = generateSignature(rawBody, secret, timestamp);
 
   logEntry.attempts += 1;
 
   try {
-    const response = await axios.post(logEntry.url, logEntry.payload, {
+    const response = await axios.post(logEntry.url, rawBody, {
       headers: {
         'Content-Type': 'application/json',
+        'X-FastPay-Signature': `t=${timestamp},v1=${signature}`,
         'X-FirstPay-Signature': `t=${timestamp},v1=${signature}`,
-        'User-Agent': 'FirstPay-Webhook-Engine/1.0',
+        'X-Gateway-Signature': `t=${timestamp},v1=${signature}`,
+        'User-Agent': 'FastPay-Webhook-Engine/1.0',
       },
-      timeout: 5000,
+      timeout: 10000,
     });
 
     logEntry.responseStatus = response.status;
-    logEntry.responseBody = JSON.stringify(response.data || {}).substring(0, 1000);
+    logEntry.responseBody = typeof response.data === 'string' ? response.data.substring(0, 1000) : JSON.stringify(response.data || {}).substring(0, 1000);
     logEntry.status = response.status >= 200 && response.status < 300 ? 'SUCCESS' : 'FAILED';
     await logEntry.save();
 
     return logEntry;
   } catch (httpError) {
     logEntry.responseStatus = httpError.response ? httpError.response.status : 500;
-    logEntry.responseBody = (httpError.message || 'Retry connection failed').substring(0, 1000);
+    const respData = httpError.response?.data;
+    logEntry.responseBody = (typeof respData === 'string' ? respData : (respData ? JSON.stringify(respData) : (httpError.message || 'Retry connection failed'))).substring(0, 1000);
     logEntry.status = 'FAILED';
     await logEntry.save();
 

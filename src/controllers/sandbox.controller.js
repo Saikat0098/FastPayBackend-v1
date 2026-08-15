@@ -9,6 +9,7 @@ const Payment = require('../models/Payment');
 const ActivationKey = require('../models/ActivationKey');
 const { parseSms } = require('../utils/smsParsers');
 const { emitPaymentReceived } = require('../socket/socketManager');
+const { generateSignature } = require('../services/webhook.service');
 
 // Helper to generate Bangladeshi MFS SMS formats
 const generateFakeSms = ({ provider = 'bKash', sender = '01712345678', amount = 500, transactionId, dateStr }) => {
@@ -129,25 +130,44 @@ const simulatePayment = asyncHandler(async (req, res) => {
   if (merchant.webhookUrl && merchant.webhookUrl.startsWith('http')) {
     const startTime = Date.now();
     try {
+      const secret = merchant.webhookSecret || merchant.apiSecret || merchant.apiKey || '';
+      const payload = {
+        event: 'payment.verified',
+        isTestData: true,
+        environment: 'SANDBOX',
+        data: {
+          id: payment._id,
+          transactionId: payment.transactionId,
+          provider: payment.provider,
+          gateway: payment.gateway || payment.provider,
+          amount: payment.amount,
+          sender: payment.sender,
+          status: payment.status,
+          receivedAt: payment.createdAt || new Date().toISOString(),
+          timestamp: payment.timestamp,
+        },
+      };
+
+      const rawBody = JSON.stringify(payload);
+      const timestamp = Math.floor(Date.now() / 1000);
+      const signature = secret ? generateSignature(rawBody, secret, timestamp) : '';
+
+      const headers = {
+        'Content-Type': 'application/json',
+        'User-Agent': 'FastPay-Webhook-Engine/1.0',
+        'X-AutoPayment-Signature': merchant.apiKey || 'sandbox_sig',
+      };
+
+      if (signature) {
+        headers['X-FastPay-Signature'] = `t=${timestamp},v1=${signature}`;
+        headers['X-FirstPay-Signature'] = `t=${timestamp},v1=${signature}`;
+        headers['X-Gateway-Signature'] = `t=${timestamp},v1=${signature}`;
+      }
+
       const response = await fetch(merchant.webhookUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-AutoPayment-Signature': merchant.apiKey || 'sandbox_sig',
-        },
-        body: JSON.stringify({
-          event: 'payment.success',
-          isTestData: true,
-          environment: 'SANDBOX',
-          data: {
-            transactionId: payment.transactionId,
-            provider: payment.provider,
-            amount: payment.amount,
-            sender: payment.sender,
-            status: payment.status,
-            timestamp: payment.timestamp,
-          },
-        }),
+        headers,
+        body: rawBody,
       });
       const latencyMs = Date.now() - startTime;
       const text = await response.text();
@@ -331,25 +351,54 @@ const getHealthCheck = asyncHandler(async (req, res) => {
 
 // 5. Webhook Tester
 const testWebhook = asyncHandler(async (req, res) => {
-  const { webhookUrl, payload } = req.body;
+  const { webhookUrl, payload, webhookSecret } = req.body;
 
-  if (!webhookUrl || !webhookUrl.startsWith('http')) {
+  const targetUrl = webhookUrl || (req.merchant ? req.merchant.webhookUrl : '');
+
+  if (!targetUrl || !targetUrl.startsWith('http')) {
     throw new ApiError(400, 'Valid webhookUrl starting with http:// or https:// is required');
   }
 
+  const secret = webhookSecret || (req.merchant ? (req.merchant.webhookSecret || req.merchant.apiKey) : '') || process.env.FASTPAY_WEBHOOK_SECRET || '';
+
   const testPayload = payload || {
-    event: 'webhook.test',
-    message: 'AutoPayment Gateway Webhook Test Event',
+    event: 'payment.verified',
+    message: 'FastPay Gateway Webhook Test Event',
     isTestData: true,
     timestamp: new Date().toISOString(),
+    data: {
+      id: `test_${Date.now()}`,
+      transactionId: `TRXTEST${Math.random().toString(36).substring(2, 8).toUpperCase()}`,
+      gateway: 'bKash',
+      provider: 'bKash',
+      amount: 500,
+      sender: '01700000000',
+      status: 'VERIFIED',
+      receivedAt: new Date().toISOString(),
+    },
   };
+
+  const rawBody = JSON.stringify(testPayload);
+  const timestamp = Math.floor(Date.now() / 1000);
+  const signature = secret ? generateSignature(rawBody, secret, timestamp) : '';
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'User-Agent': 'FastPay-Webhook-Engine/1.0',
+  };
+
+  if (signature) {
+    headers['X-FastPay-Signature'] = `t=${timestamp},v1=${signature}`;
+    headers['X-FirstPay-Signature'] = `t=${timestamp},v1=${signature}`;
+    headers['X-Gateway-Signature'] = `t=${timestamp},v1=${signature}`;
+  }
 
   const startTime = Date.now();
   try {
-    const response = await fetch(webhookUrl, {
+    const response = await fetch(targetUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': 'AutoPayment-Webhook-Tester/1.0' },
-      body: JSON.stringify(testPayload),
+      headers,
+      body: rawBody,
     });
     const latencyMs = Date.now() - startTime;
     const bodyText = await response.text();
