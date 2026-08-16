@@ -200,6 +200,228 @@ async function runWebhookTestSuite() {
     `Resolved fallback amount is ${resolvedUndefined}`
   );
 
+  // =========================================================================
+  // SINGLE-EVENT, IDEMPOTENCY & RETRY ATTEMPTS REGRESSION TESTS (STEP 10)
+  // =========================================================================
+
+  const WebhookLog = require('../models/WebhookLog');
+  const Merchant = require('../models/Merchant');
+  const Brand = require('../models/Brand');
+  const CheckoutSession = require('../models/CheckoutSession');
+  const mongoose = require('mongoose');
+
+  const merchantObjId = new mongoose.Types.ObjectId();
+  const paymentObjId = new mongoose.Types.ObjectId();
+  const dummyMerchant = {
+    _id: merchantObjId,
+    name: 'Test Merchant',
+    email: 'test@merchant.com',
+    webhookUrl: 'http://localhost:9876/api/fastpay/webhook',
+    webhookSecret: testSecret,
+    select: () => Promise.resolve(dummyMerchant),
+  };
+
+  // Mock DB collections for isolated fast unit testing
+  const mockWebhookLogs = new Map();
+  WebhookLog.findOne = (query) => {
+    for (const doc of mockWebhookLogs.values()) {
+      let matches = true;
+      if (query._id && doc._id.toString() !== query._id.toString()) matches = false;
+      if (query.merchant && doc.merchant.toString() !== query.merchant.toString()) matches = false;
+      if (query.payment && (!doc.payment || doc.payment.toString() !== query.payment.toString())) matches = false;
+      if (query.event && doc.event !== query.event) matches = false;
+      if (matches) {
+        return {
+          sort: () => Promise.resolve(doc),
+          then: (resolve) => resolve(doc),
+        };
+      }
+    }
+    return {
+      sort: () => Promise.resolve(null),
+      then: (resolve) => resolve(null),
+    };
+  };
+
+  WebhookLog.create = (data) => {
+    const doc = {
+      ...data,
+      _id: new mongoose.Types.ObjectId(),
+      deliveryAttempts: data.deliveryAttempts ? [...data.deliveryAttempts] : [],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      save: function () {
+        mockWebhookLogs.set(this._id.toString(), this);
+        return Promise.resolve(this);
+      },
+      markModified: function () {},
+    };
+    mockWebhookLogs.set(doc._id.toString(), doc);
+    return Promise.resolve(doc);
+  };
+
+  Merchant.findById = (id) => ({
+    select: () => Promise.resolve(dummyMerchant),
+    then: (resolve) => resolve(dummyMerchant),
+  });
+
+  Brand.findById = () => Promise.resolve(null);
+  CheckoutSession.findOne = () => ({
+    sort: () => Promise.resolve(null),
+    then: (resolve) => resolve(null),
+  });
+
+  // Start receiver server for dynamic dispatch & retry testing
+  let serverMode = '200'; // '200' | '404'
+  let dispatchCallCount = 0;
+
+  const testServer = http.createServer((req, res) => {
+    if (req.method === 'POST' && req.url === '/api/fastpay/webhook') {
+      dispatchCallCount++;
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        const sigHeader = req.headers['x-fastpay-signature'];
+        const isValid = verifySignature(sigHeader, raw, testSecret);
+
+        if (!isValid) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid signature' }));
+          return;
+        }
+
+        if (serverMode === '404') {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Order not found' }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ received: true, status: 'SUCCESS' }));
+        }
+      });
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+
+  await new Promise((resolve) => testServer.listen(9877, resolve));
+  dummyMerchant.webhookUrl = 'http://localhost:9877/api/fastpay/webhook';
+
+  try {
+    const testPayment = {
+      _id: paymentObjId,
+      transactionId: 'TXN_REG_999000',
+      gateway: 'bKash',
+      provider: 'bKash',
+      amount: 750,
+      sender: '01799887766',
+      status: 'VERIFIED',
+    };
+    const testSession = {
+      sessionId: 'cs_live_reg_999',
+      orderId: 'ORD_REG_999',
+      amount: 750,
+      currency: 'BDT',
+    };
+
+    // 11. TEST M: One payment.verified event creates one webhook event
+    serverMode = '200';
+    dispatchCallCount = 0;
+    const initialLog = await sendWebhook({
+      merchantId: merchantObjId,
+      payment: testPayment,
+      session: testSession,
+      event: 'payment.verified',
+    });
+
+    assert(
+      'TEST M: Single Webhook Event Created',
+      initialLog && initialLog.status === 'SUCCESS' && initialLog.attempts === 1 && Boolean(initialLog.eventId),
+      `EventID: ${initialLog?.eventId}, Attempts: ${initialLog?.attempts}`
+    );
+    assert('TEST M2: Delivery attempt #1 recorded in deliveryAttempts array',
+      initialLog?.deliveryAttempts?.length === 1 && initialLog.deliveryAttempts[0].attemptNumber === 1 && initialLog.deliveryAttempts[0].status === 'SUCCESS',
+      `deliveryAttempts count: ${initialLog?.deliveryAttempts?.length}`
+    );
+
+    // 12. TEST N: Duplicate payment.verified dispatch is safely idempotent (no second HTTP dispatch, same event returned)
+    const prevDispatchCount = dispatchCallCount;
+    const idempotentLog = await sendWebhook({
+      merchantId: merchantObjId,
+      payment: testPayment,
+      session: testSession,
+      event: 'payment.verified',
+    });
+
+    assert(
+      'TEST N: Duplicate Dispatch Idempotency Protection',
+      idempotentLog._id.toString() === initialLog._id.toString() && dispatchCallCount === prevDispatchCount,
+      'Duplicate call returned existing successful log without re-dispatching HTTP request'
+    );
+
+    // 13. TEST O: 404 failure handling & delivery attempt recording
+    const failedPaymentId = new mongoose.Types.ObjectId();
+    const failedPayment = {
+      _id: failedPaymentId,
+      transactionId: 'TXN_404_TEST',
+      gateway: 'Nagad',
+      amount: 1200,
+      status: 'COMPLETED',
+    };
+
+    serverMode = '404';
+    const failedLog = await sendWebhook({
+      merchantId: merchantObjId,
+      payment: failedPayment,
+      session: null,
+      event: 'payment.verified',
+    });
+
+    assert(
+      'TEST O1: 404 Response Recorded as FAILED',
+      failedLog && failedLog.status === 'FAILED' && failedLog.responseStatus === 404,
+      `Status: ${failedLog?.status}, HTTP: ${failedLog?.responseStatus}`
+    );
+    assert(
+      'TEST O2: Failed Attempt Recorded in deliveryAttempts History',
+      failedLog?.deliveryAttempts?.length === 1 && failedLog.deliveryAttempts[0].responseStatus === 404 && failedLog.deliveryAttempts[0].status === 'FAILED',
+      `Attempts length: ${failedLog?.deliveryAttempts?.length}`
+    );
+    assert(
+      'TEST O3: Retry Next Scheduled Date Set',
+      failedLog?.nextRetryAt instanceof Date && failedLog.nextRetryAt.getTime() > Date.now(),
+      `nextRetryAt: ${failedLog?.nextRetryAt}`
+    );
+
+    // 14. TEST P: Retry of Failed Event Updates SAME WebhookLog (No Orphan Log Created)
+    serverMode = '200';
+    const originalEventId = failedLog.eventId;
+    const originalLogId = failedLog._id.toString();
+
+    const retriedLog = await retryWebhook(failedLog._id, merchantObjId);
+
+    assert(
+      'TEST P1: Retry Preserves Same Event ID & Log Record',
+      retriedLog._id.toString() === originalLogId && retriedLog.eventId === originalEventId,
+      `Log ID: ${retriedLog._id}, Event ID: ${retriedLog.eventId}`
+    );
+    assert(
+      'TEST P2: Retry Increments Attempts and Succeeded HTTP 200',
+      retriedLog.attempts === 2 && retriedLog.status === 'SUCCESS' && retriedLog.responseStatus === 200,
+      `Attempts: ${retriedLog.attempts}, Status: ${retriedLog.status}, HTTP: ${retriedLog.responseStatus}`
+    );
+    assert(
+      'TEST P3: Both Attempt #1 (404) and Attempt #2 (200) Tracked Under Single Event',
+      retriedLog.deliveryAttempts.length === 2 &&
+      retriedLog.deliveryAttempts[0].responseStatus === 404 &&
+      retriedLog.deliveryAttempts[1].responseStatus === 200,
+      `Attempt #1: ${retriedLog.deliveryAttempts[0]?.responseStatus}, Attempt #2: ${retriedLog.deliveryAttempts[1]?.responseStatus}`
+    );
+  } finally {
+    await new Promise((resolve) => testServer.close(resolve));
+  }
+
   console.log('\n========================================');
   console.log(` SUMMARY: ${passed} PASSED, ${failed} FAILED`);
   console.log('========================================\n');
@@ -213,3 +435,4 @@ runWebhookTestSuite().catch((err) => {
   console.error('Test Suite Fatal Error:', err);
   process.exit(1);
 });
+

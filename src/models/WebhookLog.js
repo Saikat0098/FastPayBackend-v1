@@ -2,6 +2,10 @@ const mongoose = require('mongoose');
 
 const webhookLogSchema = new mongoose.Schema(
   {
+    eventId: {
+      type: String,
+      index: true,
+    },
     merchant: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Merchant',
@@ -17,6 +21,7 @@ const webhookLogSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Payment',
       default: null,
+      index: true,
     },
     url: {
       type: String,
@@ -41,6 +46,15 @@ const webhookLogSchema = new mongoose.Schema(
       type: Number,
       default: 1,
     },
+    deliveryAttempts: [
+      {
+        attemptNumber: { type: Number, default: 1 },
+        dispatchedAt: { type: Date, default: Date.now },
+        responseStatus: { type: Number, default: 0 },
+        responseBody: { type: String, default: '' },
+        status: { type: String, enum: ['SUCCESS', 'FAILED', 'PENDING'], default: 'PENDING' },
+      },
+    ],
     status: {
       type: String,
       enum: ['SUCCESS', 'FAILED', 'PENDING'],
@@ -56,5 +70,6 @@ const webhookLogSchema = new mongoose.Schema(
 );
 
 webhookLogSchema.index({ merchant: 1, createdAt: -1 });
+webhookLogSchema.index({ merchant: 1, event: 1, payment: 1 });
 
 module.exports = mongoose.model('WebhookLog', webhookLogSchema);

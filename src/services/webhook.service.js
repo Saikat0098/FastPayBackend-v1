@@ -64,7 +64,7 @@ const verifySignature = (signatureHeader, payloadString, secret, toleranceInSeco
   }
 };
 
-const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'payment.verified' }) => {
+const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'payment.verified', eventId = null }) => {
   try {
     let targetUrl = '';
     let secret = '';
@@ -117,8 +117,27 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
       } catch (_) {}
     }
 
+    // Check for existing webhook log to enforce idempotency
+    let logEntry = null;
+    if (payment && payment._id) {
+      logEntry = await WebhookLog.findOne({
+        merchant: merchantId,
+        payment: payment._id,
+        event,
+      }).sort({ createdAt: -1 });
+    }
+
+    // If previously delivered successfully, return existing record (Idempotent Webhook Delivery)
+    if (logEntry && logEntry.status === 'SUCCESS') {
+      logger.info(`[Webhook Engine] Idempotent hit: Event '${event}' for payment ${payment.transactionId} already succeeded (Event ID: ${logEntry.eventId || logEntry._id})`);
+      return logEntry;
+    }
+
+    const assignedEventId = logEntry?.eventId || eventId || `evt_${crypto.randomBytes(12).toString('hex')}`;
+
     const payload = {
       event,
+      eventId: assignedEventId,
       timestamp: new Date().toISOString(),
       data: {
         id: payment._id,
@@ -143,19 +162,31 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
     const timestamp = Math.floor(Date.now() / 1000);
     const signature = generateSignature(rawBody, secret, timestamp);
 
-    const logEntry = await WebhookLog.create({
-      merchant: merchantId,
-      brand: brandId || null,
-      payment: payment._id,
-      url: targetUrl,
-      event,
-      payload,
-      attempts: 1,
-      status: 'PENDING',
-    });
+    let currentAttempt = 1;
+    if (logEntry) {
+      // Re-use existing log entry for retry/re-dispatch
+      logEntry.attempts += 1;
+      currentAttempt = logEntry.attempts;
+      logEntry.url = targetUrl;
+      logEntry.payload = payload;
+      logEntry.status = 'PENDING';
+    } else {
+      logEntry = await WebhookLog.create({
+        eventId: assignedEventId,
+        merchant: merchantId,
+        brand: brandId || null,
+        payment: payment._id,
+        url: targetUrl,
+        event,
+        payload,
+        attempts: 1,
+        deliveryAttempts: [],
+        status: 'PENDING',
+      });
+    }
 
     const bodyHash = crypto.createHash('sha256').update(rawBody).digest('hex').substring(0, 16);
-    logger.info(`[Webhook Dispatch] [ID:${logEntry._id}] Method: POST | Target: ${targetUrl} | Event: ${event} | Tx: ${payment.transactionId} | BodyHash: ${bodyHash} | Timestamp: ${timestamp}`);
+    logger.info(`[Webhook Dispatch] [ID:${logEntry._id}] [EventID:${assignedEventId}] Attempt:${currentAttempt} | Method: POST | Target: ${targetUrl} | Event: ${event} | Tx: ${payment.transactionId} | BodyHash: ${bodyHash} | Timestamp: ${timestamp}`);
 
     try {
       const response = await axios.post(targetUrl, rawBody, {
@@ -169,22 +200,44 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
         timeout: 10000,
       });
 
+      const respBodyStr = typeof response.data === 'string' ? response.data.substring(0, 1000) : JSON.stringify(response.data || {}).substring(0, 1000);
+      const isSuccess = response.status >= 200 && response.status < 300;
+
       logEntry.responseStatus = response.status;
-      logEntry.responseBody = typeof response.data === 'string' ? response.data.substring(0, 1000) : JSON.stringify(response.data || {}).substring(0, 1000);
-      logEntry.status = response.status >= 200 && response.status < 300 ? 'SUCCESS' : 'FAILED';
+      logEntry.responseBody = respBodyStr;
+      logEntry.status = isSuccess ? 'SUCCESS' : 'FAILED';
+      if (!logEntry.deliveryAttempts) logEntry.deliveryAttempts = [];
+      logEntry.deliveryAttempts.push({
+        attemptNumber: currentAttempt,
+        dispatchedAt: new Date(),
+        responseStatus: response.status,
+        responseBody: respBodyStr,
+        status: isSuccess ? 'SUCCESS' : 'FAILED',
+      });
       await logEntry.save();
 
-      logger.info(`[Webhook Response] [ID:${logEntry._id}] Method: POST | Target: ${targetUrl} | Status: ${response.status} | Body: ${logEntry.responseBody}`);
+      logger.info(`[Webhook Response] [ID:${logEntry._id}] [EventID:${assignedEventId}] Attempt:${currentAttempt} | Status: ${response.status} | Body: ${respBodyStr}`);
       return logEntry;
     } catch (httpError) {
-      logEntry.responseStatus = httpError.response ? httpError.response.status : 500;
+      const statusErr = httpError.response ? httpError.response.status : 500;
       const respData = httpError.response?.data;
-      logEntry.responseBody = (typeof respData === 'string' ? respData : (respData ? JSON.stringify(respData) : (httpError.message || 'Connection failed'))).substring(0, 1000);
+      const respBodyStr = (typeof respData === 'string' ? respData : (respData ? JSON.stringify(respData) : (httpError.message || 'Connection failed'))).substring(0, 1000);
+
+      logEntry.responseStatus = statusErr;
+      logEntry.responseBody = respBodyStr;
       logEntry.status = 'FAILED';
       logEntry.nextRetryAt = new Date(Date.now() + 5 * 60 * 1000); // retry in 5 mins
+      if (!logEntry.deliveryAttempts) logEntry.deliveryAttempts = [];
+      logEntry.deliveryAttempts.push({
+        attemptNumber: currentAttempt,
+        dispatchedAt: new Date(),
+        responseStatus: statusErr,
+        responseBody: respBodyStr,
+        status: 'FAILED',
+      });
       await logEntry.save();
 
-      logger.warn(`[Webhook Response Failed] [ID:${logEntry._id}] Method: POST | Target: ${targetUrl} | Status: ${logEntry.responseStatus} | Body: ${logEntry.responseBody}`);
+      logger.warn(`[Webhook Response Failed] [ID:${logEntry._id}] [EventID:${assignedEventId}] Attempt:${currentAttempt} | Status: ${statusErr} | Body: ${respBodyStr}`);
       return logEntry;
     }
   } catch (error) {
@@ -250,8 +303,10 @@ const retryWebhook = async (webhookLogId, merchantId) => {
   const signature = generateSignature(rawBody, secret, timestamp);
 
   logEntry.attempts += 1;
+  const currentAttempt = logEntry.attempts;
   const bodyHash = crypto.createHash('sha256').update(rawBody).digest('hex').substring(0, 16);
-  logger.info(`[Webhook Retry] [ID:${logEntry._id}] Method: POST | Target: ${logEntry.url} | Attempt: ${logEntry.attempts} | BodyHash: ${bodyHash} | Timestamp: ${timestamp}`);
+  const assignedEventId = logEntry.eventId || logEntry._id;
+  logger.info(`[Webhook Retry] [ID:${logEntry._id}] [EventID:${assignedEventId}] Attempt:${currentAttempt} | Target: ${logEntry.url} | BodyHash: ${bodyHash} | Timestamp: ${timestamp}`);
 
   try {
     const response = await axios.post(logEntry.url, rawBody, {
@@ -265,21 +320,43 @@ const retryWebhook = async (webhookLogId, merchantId) => {
       timeout: 10000,
     });
 
+    const respBodyStr = typeof response.data === 'string' ? response.data.substring(0, 1000) : JSON.stringify(response.data || {}).substring(0, 1000);
+    const isSuccess = response.status >= 200 && response.status < 300;
+
     logEntry.responseStatus = response.status;
-    logEntry.responseBody = typeof response.data === 'string' ? response.data.substring(0, 1000) : JSON.stringify(response.data || {}).substring(0, 1000);
-    logEntry.status = response.status >= 200 && response.status < 300 ? 'SUCCESS' : 'FAILED';
+    logEntry.responseBody = respBodyStr;
+    logEntry.status = isSuccess ? 'SUCCESS' : 'FAILED';
+    if (!logEntry.deliveryAttempts) logEntry.deliveryAttempts = [];
+    logEntry.deliveryAttempts.push({
+      attemptNumber: currentAttempt,
+      dispatchedAt: new Date(),
+      responseStatus: response.status,
+      responseBody: respBodyStr,
+      status: isSuccess ? 'SUCCESS' : 'FAILED',
+    });
     await logEntry.save();
 
-    logger.info(`[Webhook Retry Response] [ID:${logEntry._id}] Method: POST | Target: ${logEntry.url} | Status: ${response.status} | Body: ${logEntry.responseBody}`);
+    logger.info(`[Webhook Retry Response] [ID:${logEntry._id}] [EventID:${assignedEventId}] Status: ${response.status} | Body: ${respBodyStr}`);
     return logEntry;
   } catch (httpError) {
-    logEntry.responseStatus = httpError.response ? httpError.response.status : 500;
+    const statusErr = httpError.response ? httpError.response.status : 500;
     const respData = httpError.response?.data;
-    logEntry.responseBody = (typeof respData === 'string' ? respData : (respData ? JSON.stringify(respData) : (httpError.message || 'Retry connection failed'))).substring(0, 1000);
+    const respBodyStr = (typeof respData === 'string' ? respData : (respData ? JSON.stringify(respData) : (httpError.message || 'Retry connection failed'))).substring(0, 1000);
+
+    logEntry.responseStatus = statusErr;
+    logEntry.responseBody = respBodyStr;
     logEntry.status = 'FAILED';
+    if (!logEntry.deliveryAttempts) logEntry.deliveryAttempts = [];
+    logEntry.deliveryAttempts.push({
+      attemptNumber: currentAttempt,
+      dispatchedAt: new Date(),
+      responseStatus: statusErr,
+      responseBody: respBodyStr,
+      status: 'FAILED',
+    });
     await logEntry.save();
 
-    logger.warn(`[Webhook Retry Failed] [ID:${logEntry._id}] Method: POST | Target: ${logEntry.url} | Status: ${logEntry.responseStatus} | Body: ${logEntry.responseBody}`);
+    logger.warn(`[Webhook Retry Failed] [ID:${logEntry._id}] [EventID:${assignedEventId}] Status: ${statusErr} | Body: ${respBodyStr}`);
     return logEntry;
   }
 };

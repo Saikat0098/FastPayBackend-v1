@@ -7,7 +7,6 @@ const Merchant = require('../models/Merchant');
 const PaymentRetry = require('../models/PaymentRetry');
 const { parseSms } = require('../utils/smsParsers');
 const { emitPaymentCreated, emitPaymentUpdated } = require('../socket/socketManager');
-const { sendWebhook } = require('./webhook.service');
 const { recordCustomerPayment } = require('./customer.service');
 const ApiError = require('../utils/apiError');
 const mongoose = require('mongoose');
@@ -195,15 +194,8 @@ const processTransactionSync = async ({
 
   emitPaymentCreated(resolvedMerchantId ? resolvedMerchantId.toString() : null, eventPayload);
 
-  // 6. Trigger Webhook dispatch & Customer record updates asynchronously
+  // 6. Record Customer payment details asynchronously
   if (resolvedMerchantId) {
-    sendWebhook({
-      merchantId: resolvedMerchantId,
-      brandId: payment.brand || null,
-      payment,
-      event: 'payment.verified',
-    }).catch(() => {});
-
     recordCustomerPayment({
       merchantId: resolvedMerchantId,
       brandId: payment.brand || null,
