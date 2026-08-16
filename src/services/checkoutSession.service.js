@@ -240,6 +240,7 @@ const verifySessionPayment = async ({
       merchantId: mId,
       brandId: session && session.brand ? (session.brand._id || session.brand) : null,
       payment,
+      session,
       event: 'payment.verified',
     }).catch(() => {});
   }

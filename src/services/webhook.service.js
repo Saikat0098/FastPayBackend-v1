@@ -64,7 +64,7 @@ const verifySignature = (signatureHeader, payloadString, secret, toleranceInSeco
   }
 };
 
-const sendWebhook = async ({ merchantId, brandId, payment, event = 'payment.verified' }) => {
+const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'payment.verified' }) => {
   try {
     let targetUrl = '';
     let secret = '';
@@ -103,16 +103,37 @@ const sendWebhook = async ({ merchantId, brandId, payment, event = 'payment.veri
       return null;
     }
 
+    // Auto-resolve session if not passed
+    let sessionData = session;
+    if (!sessionData && payment) {
+      try {
+        const CheckoutSession = require('../models/CheckoutSession');
+        sessionData = await CheckoutSession.findOne({
+          $or: [
+            ...(payment._id ? [{ payment: payment._id }] : []),
+            ...(payment.transactionId ? [{ transactionId: payment.transactionId }] : []),
+          ],
+        }).sort({ createdAt: -1 });
+      } catch (_) {}
+    }
+
     const payload = {
       event,
       timestamp: new Date().toISOString(),
       data: {
         id: payment._id,
+        sessionId: sessionData?.sessionId || payment.sessionId || undefined,
+        orderId: sessionData?.orderId || payment.orderId || undefined,
         transactionId: payment.transactionId,
         gateway: payment.gateway || payment.provider,
-        amount: payment.amount,
+        amount: sessionData?.amount ?? payment.amount,
+        currency: sessionData?.currency || payment.currency || 'BDT',
         sender: payment.sender,
         status: payment.status || payment.paymentStatus,
+        customerName: sessionData?.customerName || payment.customerName || payment.senderName || undefined,
+        customerPhone: sessionData?.customerPhone || payment.customerPhone || payment.sender || undefined,
+        customerEmail: sessionData?.customerEmail || payment.customerEmail || undefined,
+        metadata: sessionData?.customFields || payment.customFields || {},
         receivedAt: payment.receivedAt || payment.createdAt,
       },
     };
@@ -134,7 +155,7 @@ const sendWebhook = async ({ merchantId, brandId, payment, event = 'payment.veri
     });
 
     const bodyHash = crypto.createHash('sha256').update(rawBody).digest('hex').substring(0, 16);
-    logger.info(`[Webhook Dispatch] Target: ${targetUrl} | Event: ${event} | Tx: ${payment.transactionId} | BodyHash: ${bodyHash} | Timestamp: ${timestamp}`);
+    logger.info(`[Webhook Dispatch] [ID:${logEntry._id}] Method: POST | Target: ${targetUrl} | Event: ${event} | Tx: ${payment.transactionId} | BodyHash: ${bodyHash} | Timestamp: ${timestamp}`);
 
     try {
       const response = await axios.post(targetUrl, rawBody, {
@@ -153,6 +174,7 @@ const sendWebhook = async ({ merchantId, brandId, payment, event = 'payment.veri
       logEntry.status = response.status >= 200 && response.status < 300 ? 'SUCCESS' : 'FAILED';
       await logEntry.save();
 
+      logger.info(`[Webhook Response] [ID:${logEntry._id}] Method: POST | Target: ${targetUrl} | Status: ${response.status} | Body: ${logEntry.responseBody}`);
       return logEntry;
     } catch (httpError) {
       logEntry.responseStatus = httpError.response ? httpError.response.status : 500;
@@ -162,6 +184,7 @@ const sendWebhook = async ({ merchantId, brandId, payment, event = 'payment.veri
       logEntry.nextRetryAt = new Date(Date.now() + 5 * 60 * 1000); // retry in 5 mins
       await logEntry.save();
 
+      logger.warn(`[Webhook Response Failed] [ID:${logEntry._id}] Method: POST | Target: ${targetUrl} | Status: ${logEntry.responseStatus} | Body: ${logEntry.responseBody}`);
       return logEntry;
     }
   } catch (error) {
@@ -193,11 +216,42 @@ const retryWebhook = async (webhookLogId, merchantId) => {
     throw new Error('Webhook signing secret not configured');
   }
 
+  // Self-heal payload if session exists
+  if (logEntry.payload && logEntry.payload.data) {
+    try {
+      const CheckoutSession = require('../models/CheckoutSession');
+      const paymentId = logEntry.payment || logEntry.payload.data.id;
+      const trxId = logEntry.payload.data.transactionId;
+      const session = await CheckoutSession.findOne({
+        $or: [
+          ...(paymentId ? [{ payment: paymentId }] : []),
+          ...(trxId ? [{ transactionId: trxId }] : []),
+        ],
+      }).sort({ createdAt: -1 });
+
+      if (session) {
+        logEntry.payload.data.sessionId = session.sessionId;
+        logEntry.payload.data.orderId = session.orderId;
+        if (session.amount !== undefined && session.amount !== null) {
+          logEntry.payload.data.amount = session.amount;
+        }
+        if (session.currency) logEntry.payload.data.currency = session.currency;
+        if (session.customerName) logEntry.payload.data.customerName = session.customerName;
+        if (session.customerPhone) logEntry.payload.data.customerPhone = session.customerPhone;
+        if (session.customerEmail) logEntry.payload.data.customerEmail = session.customerEmail;
+        if (session.customFields) logEntry.payload.data.metadata = session.customFields;
+        logEntry.markModified('payload');
+      }
+    } catch (_) {}
+  }
+
   const rawBody = JSON.stringify(logEntry.payload);
   const timestamp = Math.floor(Date.now() / 1000);
   const signature = generateSignature(rawBody, secret, timestamp);
 
   logEntry.attempts += 1;
+  const bodyHash = crypto.createHash('sha256').update(rawBody).digest('hex').substring(0, 16);
+  logger.info(`[Webhook Retry] [ID:${logEntry._id}] Method: POST | Target: ${logEntry.url} | Attempt: ${logEntry.attempts} | BodyHash: ${bodyHash} | Timestamp: ${timestamp}`);
 
   try {
     const response = await axios.post(logEntry.url, rawBody, {
@@ -216,6 +270,7 @@ const retryWebhook = async (webhookLogId, merchantId) => {
     logEntry.status = response.status >= 200 && response.status < 300 ? 'SUCCESS' : 'FAILED';
     await logEntry.save();
 
+    logger.info(`[Webhook Retry Response] [ID:${logEntry._id}] Method: POST | Target: ${logEntry.url} | Status: ${response.status} | Body: ${logEntry.responseBody}`);
     return logEntry;
   } catch (httpError) {
     logEntry.responseStatus = httpError.response ? httpError.response.status : 500;
@@ -224,6 +279,7 @@ const retryWebhook = async (webhookLogId, merchantId) => {
     logEntry.status = 'FAILED';
     await logEntry.save();
 
+    logger.warn(`[Webhook Retry Failed] [ID:${logEntry._id}] Method: POST | Target: ${logEntry.url} | Status: ${logEntry.responseStatus} | Body: ${logEntry.responseBody}`);
     return logEntry;
   }
 };

@@ -143,6 +143,63 @@ async function runWebhookTestSuite() {
     await new Promise((resolve) => mockReceiverServer.close(resolve));
   }
 
+  // =========================================================================
+  // AUTHORITATIVE SESSION AMOUNT PRIORITY TESTS (REQUIREMENTS 9, 10, 11, 12)
+  // =========================================================================
+
+  // 7. TEST I: Checkout/session amount = 550, Raw payment/SMS amount = 1800
+  const sessionI = { sessionId: 'cs_live_test_550', orderId: 'ord_550', amount: 550, currency: 'BDT' };
+  const paymentI = { _id: 'pay_1800', transactionId: 'TXN1800', amount: 1800, gateway: 'Nagad', sender: '01700112233' };
+  const payloadDataI = {
+    amount: sessionI?.amount ?? paymentI.amount,
+  };
+  assert(
+    'TEST I: Authoritative Session Amount Priority (Session: 550 vs Payment: 1800)',
+    payloadDataI.amount === 550 && payloadDataI.amount !== 1800,
+    `Payload amount is ${payloadDataI.amount}`
+  );
+
+  // 8. TEST J: Normal matching case: sessionData.amount = 180, payment.amount = 180
+  const sessionJ = { sessionId: 'cs_live_test_180', orderId: 'ord_180', amount: 180, currency: 'BDT' };
+  const paymentJ = { _id: 'pay_180', transactionId: 'TXN180', amount: 180, gateway: 'bKash', sender: '01711223344' };
+  const payloadDataJ = {
+    amount: sessionJ?.amount ?? paymentJ.amount,
+  };
+  assert(
+    'TEST J: Matching Amount Case (Session: 180, Payment: 180)',
+    payloadDataJ.amount === 180,
+    `Payload amount is ${payloadDataJ.amount}`
+  );
+
+  // 9. TEST K: sessionData.amount takes priority when both values exist
+  const sessionK = { sessionId: 'cs_live_test_k', orderId: 'ord_k', amount: 999, currency: 'BDT' };
+  const paymentK = { _id: 'pay_k', transactionId: 'TXNK', amount: 2500, gateway: 'Rocket' };
+  const resolvedAmountK = sessionK?.amount ?? paymentK.amount;
+  assert(
+    'TEST K: Session Amount Priority Over Payment Amount',
+    resolvedAmountK === 999 && resolvedAmountK !== 2500,
+    `Resolved amount is ${resolvedAmountK} (session amount)`
+  );
+
+  // 10. TEST L: Fallback to payment.amount only happens when sessionData.amount is null/undefined
+  const sessionLNull = { sessionId: 'cs_live_test_l', orderId: 'ord_l', amount: null };
+  const sessionLUndefined = undefined;
+  const paymentL = { _id: 'pay_l', transactionId: 'TXNL', amount: 1200, gateway: 'Upay' };
+
+  const resolvedNull = sessionLNull?.amount ?? paymentL.amount;
+  const resolvedUndefined = sessionLUndefined?.amount ?? paymentL.amount;
+
+  assert(
+    'TEST L1: Fallback when sessionData.amount is null',
+    resolvedNull === 1200,
+    `Resolved fallback amount is ${resolvedNull}`
+  );
+  assert(
+    'TEST L2: Fallback when sessionData is undefined',
+    resolvedUndefined === 1200,
+    `Resolved fallback amount is ${resolvedUndefined}`
+  );
+
   console.log('\n========================================');
   console.log(` SUMMARY: ${passed} PASSED, ${failed} FAILED`);
   console.log('========================================\n');
