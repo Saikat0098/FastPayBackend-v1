@@ -231,7 +231,9 @@ const processTransactionSync = async ({
   }
 
   // 3. Prevent duplicate Transaction IDs & Handle Multi-Evidence Correlation
-  const existing = await Payment.findOne({ transactionId: txId });
+  const existing = await Payment.findOne({
+    transactionId: { $regex: new RegExp(`^${txId}$`, 'i') },
+  });
   if (existing) {
     const isUnverifiedState =
       existing.verificationState === 'SMS_ONLY' ||
@@ -248,8 +250,11 @@ const processTransactionSync = async ({
 
     // A. Upgrade unverified/SMS-only record with incoming notification or correlated evidence
     if (isUnverifiedState && isIncomingVerifiedEvidence && !isSuspicious) {
-      const amountMatches = Math.abs(existing.amount - parsedAmount) < 0.01;
-      const providerMatches = (existing.provider || existing.gateway || '').toLowerCase() === selectedGateway.toLowerCase();
+      const amountMatches = parsedAmount > 0 ? Math.abs(existing.amount - parsedAmount) < 0.01 : true;
+      const providerMatches =
+        !selectedGateway ||
+        selectedGateway === 'Other' ||
+        (existing.provider || existing.gateway || '').toLowerCase() === selectedGateway.toLowerCase();
 
       if (amountMatches && providerMatches && isPackageAllowed) {
         existing.source = 'CORRELATED';
@@ -318,8 +323,11 @@ const processTransactionSync = async ({
 
     // B. Upgrade NOTIFICATION_ONLY record when matching SMS evidence arrives second
     if (existing.verificationState === 'NOTIFICATION_ONLY' && (finalSource === 'SMS' || finalState === 'SMS_ONLY' || isCorrelated)) {
-      const amountMatches = Math.abs(existing.amount - parsedAmount) < 0.01;
-      const providerMatches = (existing.provider || existing.gateway || '').toLowerCase() === selectedGateway.toLowerCase();
+      const amountMatches = parsedAmount > 0 ? Math.abs(existing.amount - parsedAmount) < 0.01 : true;
+      const providerMatches =
+        !selectedGateway ||
+        selectedGateway === 'Other' ||
+        (existing.provider || existing.gateway || '').toLowerCase() === selectedGateway.toLowerCase();
       if (amountMatches && providerMatches) {
         existing.source = 'CORRELATED';
         existing.verificationState = 'CORRELATED_MATCH';
