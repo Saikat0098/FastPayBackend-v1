@@ -233,12 +233,21 @@ const processTransactionSync = async ({
   // 3. Prevent duplicate Transaction IDs & Handle Multi-Evidence Correlation
   const existing = await Payment.findOne({ transactionId: txId });
   if (existing) {
-    // Check if we can correlate/upgrade existing SMS_ONLY with incoming NOTIFICATION evidence
-    if (
-      existing.verificationState === 'SMS_ONLY' &&
-      (finalState === 'NOTIFICATION_ONLY' || finalState === 'CORRELATED_MATCH') &&
-      !isSuspicious
-    ) {
+    const isUnverifiedState =
+      existing.verificationState === 'SMS_ONLY' ||
+      existing.verificationState === 'PENDING_VERIFICATION' ||
+      existing.status === 'PENDING_VERIFICATION' ||
+      existing.status === 'PENDING';
+
+    const isIncomingVerifiedEvidence =
+      finalState === 'NOTIFICATION_ONLY' ||
+      finalState === 'CORRELATED_MATCH' ||
+      finalSource === 'NOTIFICATION' ||
+      finalSource === 'CORRELATED' ||
+      isCorrelated;
+
+    // A. Upgrade unverified/SMS-only record with incoming notification or correlated evidence
+    if (isUnverifiedState && isIncomingVerifiedEvidence && !isSuspicious) {
       const amountMatches = Math.abs(existing.amount - parsedAmount) < 0.01;
       const providerMatches = (existing.provider || existing.gateway || '').toLowerCase() === selectedGateway.toLowerCase();
 
@@ -252,6 +261,8 @@ const processTransactionSync = async ({
         existing.isCorrelated = true;
         existing.evidenceUpdatedAt = new Date();
         existing.verificationReason = 'Correlated with official notification evidence';
+        if (devDoc && !existing.device) existing.device = devDoc._id;
+        if (resolvedMerchantId && !existing.merchant) existing.merchant = resolvedMerchantId;
         await existing.save();
 
         emitPaymentUpdated(existing.merchant, {
@@ -300,6 +311,44 @@ const processTransactionSync = async ({
           status: 'REJECTED',
           verificationState: 'MISMATCH_SUSPICIOUS',
           message: 'Conflicting evidence mismatch for transaction',
+          payment: existing,
+        };
+      }
+    }
+
+    // B. Upgrade NOTIFICATION_ONLY record when matching SMS evidence arrives second
+    if (existing.verificationState === 'NOTIFICATION_ONLY' && (finalSource === 'SMS' || finalState === 'SMS_ONLY' || isCorrelated)) {
+      const amountMatches = Math.abs(existing.amount - parsedAmount) < 0.01;
+      const providerMatches = (existing.provider || existing.gateway || '').toLowerCase() === selectedGateway.toLowerCase();
+      if (amountMatches && providerMatches) {
+        existing.source = 'CORRELATED';
+        existing.verificationState = 'CORRELATED_MATCH';
+        existing.status = 'COMPLETED';
+        existing.paymentStatus = 'COMPLETED';
+        existing.isCorrelated = true;
+        existing.evidenceUpdatedAt = new Date();
+        if (selectedSms) {
+          existing.sms = selectedSms;
+          existing.rawSms = selectedSms;
+          existing.rawBody = selectedSms;
+        }
+        existing.verificationReason = 'Correlated with SMS evidence';
+        await existing.save();
+
+        emitPaymentUpdated(existing.merchant, {
+          _id: existing._id,
+          transactionId: existing.transactionId,
+          status: existing.status,
+          verificationState: existing.verificationState,
+        });
+
+        logger.info(`[Payment Correlation] Upgraded ${existing.transactionId} from NOTIFICATION_ONLY to CORRELATED_MATCH`);
+        return {
+          success: true,
+          transactionId: existing.transactionId,
+          status: existing.status,
+          verificationState: existing.verificationState,
+          message: 'Evidence correlated with existing notification',
           payment: existing,
         };
       }
@@ -611,7 +660,7 @@ const verifyCustomerCheckoutPayment = async ({
     query.merchant = merchantId;
   }
 
-  const payment = await Payment.findOne(query);
+  const payment = await Payment.findOne(query).sort({ updatedAt: -1, createdAt: -1 });
   if (!payment) {
     throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
   }
@@ -631,25 +680,32 @@ const verifyCustomerCheckoutPayment = async ({
 
   // 4. Strict Evidence Security & State Validation
   // FAKE SMS PROTECTION: SMS-only evidence cannot automatically fulfill checkouts
-  if (
-    payment.verificationState === 'SMS_ONLY' ||
-    payment.status === 'PENDING_VERIFICATION' ||
-    payment.status === 'PENDING'
-  ) {
-    throw new ApiError(400, 'Transaction ID is pending verification. SMS-only evidence cannot be automatically verified.');
-  }
+  const isVerifiedEvidence =
+    payment.verificationState === 'CORRELATED_MATCH' ||
+    payment.verificationState === 'NOTIFICATION_ONLY' ||
+    payment.verificationState === 'VERIFIED';
 
-  if (
-    payment.verificationState === 'MISMATCH_SUSPICIOUS' ||
-    payment.status === 'REJECTED' ||
-    payment.isSuspicious
-  ) {
-    throw new ApiError(400, 'Transaction ID flagged as suspicious evidence and cannot be verified.');
+  if (!isVerifiedEvidence) {
+    if (
+      payment.verificationState === 'SMS_ONLY' ||
+      payment.status === 'PENDING_VERIFICATION' ||
+      payment.status === 'PENDING'
+    ) {
+      throw new ApiError(400, 'Transaction ID is pending verification. SMS-only evidence cannot be automatically verified.');
+    }
+
+    if (
+      payment.verificationState === 'MISMATCH_SUSPICIOUS' ||
+      payment.status === 'REJECTED' ||
+      payment.isSuspicious
+    ) {
+      throw new ApiError(400, 'Transaction ID flagged as suspicious evidence and cannot be verified.');
+    }
   }
 
   // 5. Payment completed/successful status check
-  const validStatuses = ['COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'VERIFIED'];
-  if (!validStatuses.includes((payment.status || '').toUpperCase())) {
+  const validStatuses = ['COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'VERIFIED', 'PENDING_VERIFICATION'];
+  if (!validStatuses.includes((payment.status || '').toUpperCase()) && !isVerifiedEvidence) {
     throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
   }
 

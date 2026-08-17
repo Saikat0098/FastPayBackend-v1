@@ -7,7 +7,17 @@ const Device = require('../models/Device');
 
 const verifyToken = asyncHandler(async (req, res, next) => {
   const authHeader = req.headers.authorization || req.headers.Authorization;
-  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : req.cookies?.accessToken;
+  let token = null;
+  if (authHeader) {
+    const rawFirst = authHeader.toString().split(',')[0].trim();
+    if (rawFirst.startsWith('Bearer ')) {
+      token = rawFirst.slice(7).trim();
+    } else {
+      token = rawFirst;
+    }
+  } else {
+    token = req.cookies?.accessToken;
+  }
 
   if (!token) {
     throw new ApiError(401, 'Access Token required');
