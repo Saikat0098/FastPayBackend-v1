@@ -84,6 +84,10 @@ async function runSubscriptionTests() {
       provider: 'bKash',
       amount: 50, // Starter plan is 100
       status: 'COMPLETED',
+      paymentStatus: 'COMPLETED',
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bkash.customerapp',
       sender: '01711112222',
     });
 
@@ -113,6 +117,10 @@ async function runSubscriptionTests() {
       provider: 'Nagad',
       amount: 100,
       status: 'COMPLETED',
+      paymentStatus: 'COMPLETED',
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.konasl.nagad',
       sender: '01811112222',
     });
 
@@ -142,6 +150,10 @@ async function runSubscriptionTests() {
       provider: 'bKash',
       amount: 100, // Matches starter plan monthly price 100
       status: 'COMPLETED',
+      paymentStatus: 'COMPLETED',
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bkash.customerapp',
       sender: '01711112222',
     });
 

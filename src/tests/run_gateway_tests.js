@@ -307,6 +307,9 @@ async function runGatewayTests() {
       sender: '01700000099',
       status: 'COMPLETED',
       paymentStatus: 'COMPLETED',
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bkash.customerapp',
     });
 
     // TEST 18: Existing transaction verification still works

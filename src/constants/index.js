@@ -48,9 +48,32 @@ module.exports = {
     VERIFIED: 'VERIFIED'
   },
   PROVIDER_PACKAGES: {
-    BKASH: ['com.bKash.customerapp', 'com.bkash.businessapp'],
-    NAGAD: ['com.konasl.nagad'],
-    ROCKET: ['com.dbbl.mfast.chargela'],
-    UPAY: ['bd.com.upay.customer']
+    BKASH: [
+      'com.bkash.customerapp',
+      'com.bKash.customerapp',
+      'com.bkash.businessapp',
+      'com.bKash.businessapp',
+      'com.bkash.merchant',
+      'com.bKash.merchant',
+      'com.bkash.agent',
+      'com.bKash.agent'
+    ],
+    NAGAD: [
+      'com.konasl.nagad',
+      'com.konasl.nagad.customer',
+      'com.konasl.nagad.merchant',
+      'com.konasl.nagad.agent'
+    ],
+    ROCKET: [
+      'com.dbbl.mfast.chargela',
+      'com.dbbl.rocket',
+      'com.dbbl.mfast',
+      'com.nexuspay'
+    ],
+    UPAY: [
+      'bd.com.upay.customer',
+      'bd.com.upay.agent',
+      'bd.com.upay.merchant'
+    ]
   }
 };

@@ -380,14 +380,56 @@ async function runSecurityTestSuite() {
       transactionId: notifTrx,
       source: 'NOTIFICATION',
       verificationState: 'NOTIFICATION_ONLY',
-      packageName: 'com.bKash.customerapp',
+      packageName: 'com.bkash.customerapp', // Lowercase real Android package
       notificationTitle: 'Payment Received',
     });
     recordResult(
       7,
-      'NOTIFICATION_ONLY with Valid Package Accepted as Evidence',
+      'NOTIFICATION_ONLY with Real Android Lowercase bKash Package Accepted',
       notifRes?.status === 'COMPLETED' && notifRes?.verificationState === 'NOTIFICATION_ONLY',
       `Status: ${notifRes?.status}, State: ${notifRes?.verificationState}`
+    );
+
+    // 7b. NOTIFICATION_ONLY with bKash Business/Merchant App
+    const notifBizTrx = `NOTIF_BIZ_${testSuffix}`;
+    const notifBizRes = await paymentService.processTransactionSync({
+      merchantId: merchantIdA,
+      gateway: 'bKash',
+      provider: 'bKash',
+      amount: 1200,
+      sender: '01811223344',
+      transactionId: notifBizTrx,
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bkash.businessapp',
+      notificationTitle: 'Payment Received',
+    });
+    recordResult(
+      '7b',
+      'NOTIFICATION_ONLY with bKash Business Package Accepted',
+      notifBizRes?.status === 'COMPLETED' && notifBizRes?.verificationState === 'NOTIFICATION_ONLY',
+      `Status: ${notifBizRes?.status}, State: ${notifBizRes?.verificationState}`
+    );
+
+    // 7c. NOTIFICATION_ONLY with Nagad Official App
+    const notifNagadTrx = `NOTIF_NAGAD_${testSuffix}`;
+    const notifNagadRes = await paymentService.processTransactionSync({
+      merchantId: merchantIdA,
+      gateway: 'Nagad',
+      provider: 'Nagad',
+      amount: 800,
+      sender: '01911223344',
+      transactionId: notifNagadTrx,
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.konasl.nagad',
+      notificationTitle: 'Payment Received',
+    });
+    recordResult(
+      '7c',
+      'NOTIFICATION_ONLY with Nagad Package Accepted',
+      notifNagadRes?.status === 'COMPLETED' && notifNagadRes?.verificationState === 'NOTIFICATION_ONLY',
+      `Status: ${notifNagadRes?.status}, State: ${notifNagadRes?.verificationState}`
     );
 
     // 8. Fake/Spoofed Package Name Rejected as MISMATCH_SUSPICIOUS
@@ -421,7 +463,7 @@ async function runSecurityTestSuite() {
       transactionId: fakeProvTrx,
       source: 'NOTIFICATION',
       verificationState: 'NOTIFICATION_ONLY',
-      packageName: 'com.bKash.customerapp',
+      packageName: 'com.bkash.customerapp',
     });
     recordResult(
       9,

@@ -19,18 +19,19 @@ const validateProviderPackage = (provider, packageName) => {
   let allowed = [];
 
   if (provClean.includes('BKASH')) {
-    allowed = PROVIDER_PACKAGES.BKASH;
+    allowed = PROVIDER_PACKAGES.BKASH || [];
   } else if (provClean.includes('NAGAD')) {
-    allowed = PROVIDER_PACKAGES.NAGAD;
+    allowed = PROVIDER_PACKAGES.NAGAD || [];
   } else if (provClean.includes('ROCKET')) {
-    allowed = PROVIDER_PACKAGES.ROCKET;
+    allowed = PROVIDER_PACKAGES.ROCKET || [];
   } else if (provClean.includes('UPAY')) {
-    allowed = PROVIDER_PACKAGES.UPAY;
+    allowed = PROVIDER_PACKAGES.UPAY || [];
   } else {
     return false;
   }
 
-  return allowed.includes(packageName.trim());
+  const cleanInputPkg = packageName.toString().trim().toLowerCase();
+  return allowed.some((pkg) => pkg.toString().trim().toLowerCase() === cleanInputPkg);
 };
 
 const verifyDeviceNotBlocked = async ({ deviceId, activationKey, reqDevice }) => {

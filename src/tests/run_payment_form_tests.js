@@ -187,6 +187,10 @@ async function runPaymentFormTests() {
       amount: 250,
       sender: '01700009999',
       status: 'COMPLETED',
+      paymentStatus: 'COMPLETED',
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bkash.customerapp',
     });
 
     // TEST 7: Correct amount reaches verification
@@ -229,6 +233,10 @@ async function runPaymentFormTests() {
       transactionId: mismatchTxId,
       amount: 100, // form expects 250
       status: 'COMPLETED',
+      paymentStatus: 'COMPLETED',
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bkash.customerapp',
     });
 
     // TEST 9: Amount mismatch rejected
@@ -254,6 +262,10 @@ async function runPaymentFormTests() {
       transactionId: nagadTxId,
       amount: 250,
       status: 'COMPLETED',
+      paymentStatus: 'COMPLETED',
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.konasl.nagad',
     });
 
     // TEST 10: Provider mismatch rejected
@@ -293,6 +305,10 @@ async function runPaymentFormTests() {
       transactionId: freshTxId,
       amount: 250,
       status: 'COMPLETED',
+      paymentStatus: 'COMPLETED',
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bkash.customerapp',
     });
 
     let successSubmissionId = null;
@@ -386,6 +402,10 @@ async function runPaymentFormTests() {
       transactionId: tamperTxId,
       amount: 1, // customer paid 1 Taka in DB
       status: 'COMPLETED',
+      paymentStatus: 'COMPLETED',
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bkash.customerapp',
     });
 
     try {
