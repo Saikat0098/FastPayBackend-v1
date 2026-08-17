@@ -525,6 +525,71 @@ async function runSecurityTestSuite() {
       `Status: ${upgradedRes?.status}, State: ${upgradedRes?.verificationState}`
     );
 
+    // 11b. Multi-Evidence Correlation Upgrade (Notification first followed by matching SMS later)
+    const notifFirstTrx = `NOTIFFIRST_${testSuffix}`;
+    await paymentService.processTransactionSync({
+      merchantId: merchantIdA,
+      gateway: 'bKash',
+      provider: 'bKash',
+      amount: 450,
+      sender: '01711223344',
+      transactionId: notifFirstTrx,
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bkash.customerapp',
+    });
+    const notifFirstUpgraded = await paymentService.processTransactionSync({
+      merchantId: merchantIdA,
+      gateway: 'bKash',
+      provider: 'bKash',
+      amount: 450,
+      sender: '01711223344',
+      transactionId: notifFirstTrx,
+      source: 'SMS',
+      verificationState: 'SMS_ONLY',
+      sms: 'You have received Tk 450.00 from 01711223344. TrxID ' + notifFirstTrx,
+    });
+    recordResult(
+      '11b',
+      'Evidence Upgrade from NOTIFICATION_ONLY to CORRELATED_MATCH (SMS second)',
+      notifFirstUpgraded?.status === 'COMPLETED' && notifFirstUpgraded?.verificationState === 'CORRELATED_MATCH',
+      `Status: ${notifFirstUpgraded?.status}, State: ${notifFirstUpgraded?.verificationState}`
+    );
+
+    // 11c. Correlation of Official Notification WITHOUT TxID to Recent Unverified SMS
+    const noTxIdSmsTrx = `NOTXID_${testSuffix}`;
+    await paymentService.processTransactionSync({
+      merchantId: merchantIdA,
+      gateway: 'bKash',
+      provider: 'bKash',
+      amount: 350,
+      sender: '01711223344',
+      transactionId: noTxIdSmsTrx,
+      source: 'SMS',
+      verificationState: 'SMS_ONLY',
+      sms: 'You have received Tk 350.00 from 01711223344. TrxID ' + noTxIdSmsTrx,
+    });
+    const noTxIdNotifRes = await paymentService.processTransactionSync({
+      merchantId: merchantIdA,
+      gateway: 'bKash',
+      provider: 'bKash',
+      amount: 350,
+      sender: '01711223344',
+      transactionId: '', // Blank TxID in notification
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bkash.customerapp',
+      notificationTitle: 'Payment Received',
+    });
+    recordResult(
+      '11c',
+      'Notification without TxID correlates with recent unverified SMS by amount & provider',
+      noTxIdNotifRes?.status === 'COMPLETED' &&
+        noTxIdNotifRes?.verificationState === 'CORRELATED_MATCH' &&
+        noTxIdNotifRes?.transactionId === noTxIdSmsTrx,
+      `TxID: ${noTxIdNotifRes?.transactionId}, Status: ${noTxIdNotifRes?.status}, State: ${noTxIdNotifRes?.verificationState}`
+    );
+
     // 12. Multi-Evidence Correlation Conflict / Mismatched Amount Flags Suspicious
     const conflictTrx = `CONFLICT_${testSuffix}`;
     await paymentService.processTransactionSync({

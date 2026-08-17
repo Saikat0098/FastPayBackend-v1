@@ -106,11 +106,7 @@ const processTransactionSync = async ({
   notificationTitle,
   isCorrelated,
 }) => {
-  const txId = transactionId ? transactionId.trim() : '';
-
-  if (!txId) {
-    throw new ApiError(400, 'Transaction ID is required');
-  }
+  const cleanTxId = transactionId ? transactionId.trim() : '';
 
   // 1. Validate Activation Key (if provided)
   let keyDoc = null;
@@ -185,6 +181,28 @@ const processTransactionSync = async ({
     }
   }
 
+  // Find existing transaction (by TxID, or if TxID is blank and official notification, find recent unverified SMS for same provider & amount)
+  let existing = null;
+  if (cleanTxId) {
+    existing = await Payment.findOne({
+      transactionId: { $regex: new RegExp(`^${cleanTxId}$`, 'i') },
+    });
+  } else if (isNotificationSource && isPackageAllowed && parsedAmount > 0) {
+    const query = {
+      provider: selectedGateway,
+      amount: parsedAmount,
+      verificationState: { $in: ['SMS_ONLY', 'PENDING_VERIFICATION'] },
+      createdAt: { $gte: new Date(Date.now() - 15 * 60 * 1000) },
+    };
+    if (resolvedMerchantId) query.merchant = resolvedMerchantId;
+    existing = await Payment.findOne(query).sort({ createdAt: -1 });
+  }
+
+  const txId = cleanTxId || existing?.transactionId || '';
+  if (!txId) {
+    throw new ApiError(400, 'Transaction ID is required');
+  }
+
   // Server Authority Evidence Classification
   let finalSource = (source || (isNotificationSource ? 'NOTIFICATION' : 'SMS')).toUpperCase();
   let finalState = (verificationState || (isNotificationSource ? 'NOTIFICATION_ONLY' : 'SMS_ONLY')).toUpperCase();
@@ -230,10 +248,7 @@ const processTransactionSync = async ({
     verificationReason = 'SMS evidence only - pending verification';
   }
 
-  // 3. Prevent duplicate Transaction IDs & Handle Multi-Evidence Correlation
-  const existing = await Payment.findOne({
-    transactionId: { $regex: new RegExp(`^${txId}$`, 'i') },
-  });
+  // 3. Handle Multi-Evidence Correlation & Duplicate Prevention
   if (existing) {
     const isUnverifiedState =
       existing.verificationState === 'SMS_ONLY' ||
