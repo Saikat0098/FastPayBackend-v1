@@ -67,6 +67,16 @@ async function runDeveloperIntegrationTests() {
         status: 'active',
       });
 
+      const MerchantGateway = require('../models/MerchantGateway');
+      await MerchantGateway.create({
+        merchant: merchantIdA,
+        name: 'bKash Merchant',
+        provider: 'bKash',
+        accountNumber: '01711111111',
+        accountType: 'PERSONAL',
+        isActive: true,
+      });
+
       merchantB = await Merchant.create({
         _id: merchantIdB,
         name: `Developer Merchant B ${testSuffix}`,
@@ -347,6 +357,9 @@ async function runDeveloperIntegrationTests() {
       gateway: 'bKash',
       provider: 'bKash',
       sender: '01711111111',
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bKash.customerapp',
       status: 'COMPLETED',
       paymentStatus: 'COMPLETED',
       isUsed: false,
@@ -436,8 +449,15 @@ async function runDeveloperIntegrationTests() {
     console.error('Fatal test runner error:', err);
   } finally {
     if (isDbConnected) {
-      if (merchantA) await Merchant.deleteOne({ _id: merchantA._id }).catch(() => {});
-      if (merchantB) await Merchant.deleteOne({ _id: merchantB._id }).catch(() => {});
+      const MerchantGateway = require('../models/MerchantGateway');
+      if (merchantA) {
+        await MerchantGateway.deleteMany({ merchant: merchantA._id }).catch(() => {});
+        await Merchant.deleteOne({ _id: merchantA._id }).catch(() => {});
+      }
+      if (merchantB) {
+        await MerchantGateway.deleteMany({ merchant: merchantB._id }).catch(() => {});
+        await Merchant.deleteOne({ _id: merchantB._id }).catch(() => {});
+      }
       await CheckoutSession.deleteMany({ orderId: { $regex: testSuffix.toString() } }).catch(() => {});
       await Payment.deleteMany({ transactionId: { $regex: testSuffix.toString() } }).catch(() => {});
       await mongoose.disconnect().catch(() => {});

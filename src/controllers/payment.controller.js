@@ -21,6 +21,11 @@ const syncPayment = asyncHandler(async (req, res) => {
     accountNumber,
     providerTimeStr,
     paymentStatus,
+    source,
+    verificationState,
+    packageName,
+    notificationTitle,
+    isCorrelated,
   } = req.body;
 
   const result = await paymentService.processTransactionSync({
@@ -40,6 +45,11 @@ const syncPayment = asyncHandler(async (req, res) => {
     accountNumber,
     providerTimeStr,
     paymentStatus,
+    source,
+    verificationState,
+    packageName,
+    notificationTitle,
+    isCorrelated,
   });
 
   return res.status(200).json({
@@ -47,6 +57,7 @@ const syncPayment = asyncHandler(async (req, res) => {
     message: result.message,
     transactionId: result.transactionId,
     status: result.status,
+    verificationState: result.verificationState,
     payment: result.payment,
   });
 });

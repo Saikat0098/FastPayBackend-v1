@@ -211,6 +211,11 @@ const androidSyncPayment = asyncHandler(async (req, res) => {
     providerTimeStr,
     paymentStatus,
     merchantId,
+    source,
+    verificationState,
+    packageName,
+    notificationTitle,
+    isCorrelated,
   } = req.body;
 
   const resolvedDeviceId = deviceId || req.device?._id || req.device?.androidId;
@@ -233,6 +238,11 @@ const androidSyncPayment = asyncHandler(async (req, res) => {
     receivedAt,
     providerTimeStr,
     paymentStatus,
+    source,
+    verificationState,
+    packageName,
+    notificationTitle,
+    isCorrelated,
   });
 
   return res.status(200).json({
@@ -240,6 +250,7 @@ const androidSyncPayment = asyncHandler(async (req, res) => {
     message: result.message,
     transactionId: result.transactionId,
     status: result.status,
+    verificationState: result.verificationState,
     payment: result.payment,
   });
 });

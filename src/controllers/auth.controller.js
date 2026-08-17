@@ -51,10 +51,24 @@ const getProfile = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, req.user, 'User profile retrieved');
 });
 
+const updateProfile = asyncHandler(async (req, res) => {
+  const userId = req.user?.id || req.merchant?._id || req.admin?._id;
+  const result = await authService.updateProfile(userId, req.body);
+  return ApiResponse.success(res, result, 'Profile updated successfully');
+});
+
+const changePassword = asyncHandler(async (req, res) => {
+  const userId = req.user?.id || req.merchant?._id || req.admin?._id;
+  const result = await authService.changePassword(userId, req.body);
+  return ApiResponse.success(res, result, 'Password changed successfully');
+});
+
 module.exports = {
   registerUser,
   registerMerchant,
   loginMerchant,
   loginAdmin,
   getProfile,
+  updateProfile,
+  changePassword,
 };

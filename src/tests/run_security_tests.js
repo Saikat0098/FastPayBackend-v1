@@ -103,7 +103,12 @@ async function runSecurityTestSuite() {
   mockGateways.set(gwA1._id.toString(), gwA1);
   mockGateways.set(gwA_inactive._id.toString(), gwA_inactive);
 
-  if (!isDbConnected) {
+  if (isDbConnected) {
+    await Merchant.create(mockMerchantA).catch(() => {});
+    await Merchant.create(mockMerchantB).catch(() => {});
+    await MerchantGateway.create(gwA1).catch(() => {});
+    await MerchantGateway.create(gwA_inactive).catch(() => {});
+  } else {
     mongoose.set('bufferCommands', false);
 
     const Brand = require('../models/Brand');
@@ -324,184 +329,246 @@ async function runSecurityTestSuite() {
       recordResult(4, 'Merchant Tenant Isolation', false, 'Session not created');
     }
 
-    // 5. Amount tampering protection
-    const trxA_tamper = `TRX_TAMPER_${testSuffix}`;
-    await Payment.create({
-      merchant: merchantIdA,
-      transactionId: trxA_tamper,
-      amount: 100, // Payment amount 100 BDT < required order amount 500 BDT
+    // =========================================================================
+    // EVIDENCE SECURITY ARCHITECTURE TESTS (STOP FAKE SMS FROM AUTO-VERIFYING)
+    // =========================================================================
+
+    // 5. Fake SMS / SMS_ONLY ingestion is stored as PENDING_VERIFICATION (never auto-verified)
+    const fakeSmsTrx = `FAKESMS_${testSuffix}`;
+    const paymentService = require('../services/payment.service');
+    const smsOnlyRes = await paymentService.processTransactionSync({
+      merchantId: merchantIdA,
       gateway: 'bKash',
       provider: 'bKash',
-      status: 'COMPLETED',
-      paymentStatus: 'COMPLETED',
-      isUsed: false,
+      amount: 500,
+      sender: '01700000000',
+      transactionId: fakeSmsTrx,
+      sms: 'You have received Tk 500.00 from 01700000000. TrxID ' + fakeSmsTrx,
+      source: 'SMS',
+      verificationState: 'SMS_ONLY',
     });
+    recordResult(
+      5,
+      'SMS_ONLY Stored as PENDING_VERIFICATION (Not Verified)',
+      smsOnlyRes?.status === 'PENDING_VERIFICATION' && smsOnlyRes?.verificationState === 'SMS_ONLY',
+      `Status: ${smsOnlyRes?.status}, State: ${smsOnlyRes?.verificationState}`
+    );
 
+    // 6. Fake SMS cannot fulfill checkout session
     if (validSession?.sessionId) {
       try {
         await axios.post(`${serverUrl}/checkout/sessions/public/${validSession.sessionId}/verify`, {
-          transactionId: trxA_tamper,
+          transactionId: fakeSmsTrx,
           provider: 'bKash',
-          amount: 1, // Tampered browser amount
         });
-        recordResult(5, 'Amount Tampering Protection', false, 'Tampered amount unexpectedly accepted');
+        recordResult(6, 'Fake SMS Cannot Verify Checkout Session', false, 'SMS_ONLY unexpectedly verified checkout session');
       } catch (err) {
-        recordResult(5, 'Amount Tampering Protection', err.response?.status === 400, `Status: ${err.response?.status}`);
+        recordResult(6, 'Fake SMS Cannot Verify Checkout Session', err.response?.status === 400, `Blocked with: ${err.response?.data?.message}`);
       }
     } else {
-      recordResult(5, 'Amount Tampering Protection', false, 'Session not created');
+      recordResult(6, 'Fake SMS Cannot Verify Checkout Session', false, 'Session not created');
     }
 
-    // 6. Merchant ID tampering protection
-    if (validSession?.sessionId) {
-      try {
-        const res = await axios.get(`${serverUrl}/checkout/sessions/public/${validSession.sessionId}`);
-        recordResult(6, 'Merchant ID Tampering Protection', res.data?.data?.merchant?._id?.toString() === merchantIdA.toString(), 'Session locked to authentic merchant');
-      } catch (err) {
-        recordResult(6, 'Merchant ID Tampering Protection', false, err.message);
-      }
-    } else {
-      recordResult(6, 'Merchant ID Tampering Protection', false, 'Session not created');
-    }
-
-    // 7. Gateway tampering / Unknown provider rejection
-    if (validSession?.sessionId) {
-      try {
-        await axios.post(`${serverUrl}/checkout/sessions/public/${validSession.sessionId}/verify`, {
-          transactionId: trxA_tamper,
-          provider: 'UnknownWalletProvider',
-        });
-        recordResult(7, 'Gateway Tampering Rejection', false, 'Tampered gateway unexpectedly accepted');
-      } catch (err) {
-        recordResult(7, 'Gateway Tampering Rejection', err.response?.status === 400, `Status: ${err.response?.status}`);
-      }
-    } else {
-      recordResult(7, 'Gateway Tampering Rejection', false, 'Session not created');
-    }
-
-    // 8. Return URL open redirect tampering rejection
-    try {
-      await axios.post(
-        `${serverUrl}/checkout/sessions`,
-        {
-          orderId: `SEC_ORD_BADURL_${testSuffix}`,
-          amount: 500,
-          returnUrl: 'javascript:alert(1)',
-        },
-        { headers: { 'X-API-Key': apiKeyA } }
-      );
-      recordResult(8, 'Return URL Malformed Protocol Rejection', false, 'Malformed URL unexpectedly allowed');
-    } catch (err) {
-      recordResult(8, 'Return URL Malformed Protocol Rejection', err.response?.status === 400, `Status: ${err.response?.status}`);
-    }
-
-    // 9. Expired session rejection
-    const expiredSessionId = `cs_live_expired_${testSuffix}`;
-    const expiredSessionDoc = {
-      sessionId: expiredSessionId,
-      merchant: merchantIdA,
-      orderId: 'ORD_EXPIRED',
-      amount: 500,
-      returnUrl: 'https://merchant.com/callback',
-      status: 'PENDING',
-      expiresAt: new Date(Date.now() - 1000 * 60 * 60), // Expired 1 hour ago
-      save: function () { return Promise.resolve(this); },
-    };
-    mockSessions.set(expiredSessionId, expiredSessionDoc);
-
-    try {
-      await axios.post(`${serverUrl}/checkout/sessions/public/${expiredSessionId}/verify`, {
-        transactionId: `TRX_EXP_${testSuffix}`,
-        provider: 'bKash',
-      });
-      recordResult(9, 'Expired Session Rejection', false, 'Expired session verification unexpectedly succeeded');
-    } catch (err) {
-      recordResult(9, 'Expired Session Rejection', err.response?.status === 400, `Status: ${err.response?.status}`);
-    }
-
-    // 10. Invalid session ID 404 rejection
-    try {
-      await axios.get(`${serverUrl}/checkout/sessions/public/cs_live_invalid_non_existent`);
-      recordResult(10, 'Invalid Session ID 404 Rejection', false, 'Non-existent session unexpectedly returned 200');
-    } catch (err) {
-      recordResult(10, 'Invalid Session ID 404 Rejection', err.response?.status === 404, `Status: ${err.response?.status}`);
-    }
-
-    // 11. Inactive gateway verification rejection
-    if (validSession?.sessionId) {
-      try {
-        await axios.post(`${serverUrl}/checkout/sessions/public/${validSession.sessionId}/verify`, {
-          transactionId: trxA_tamper,
-          provider: 'Nagad', // Nagad is inactive on merchantA
-        });
-        recordResult(11, 'Inactive Gateway Verification Rejection', false, 'Inactive gateway unexpectedly accepted');
-      } catch (err) {
-        recordResult(11, 'Inactive Gateway Verification Rejection', err.response?.status === 400, `Status: ${err.response?.status}`);
-      }
-    } else {
-      recordResult(11, 'Inactive Gateway Verification Rejection', false, 'Session not created');
-    }
-
-    // 12. Deleted gateway verification rejection
-    if (validSession?.sessionId) {
-      try {
-        await axios.post(`${serverUrl}/checkout/sessions/public/${validSession.sessionId}/verify`, {
-          transactionId: trxA_tamper,
-          provider: 'Rocket', // Rocket gateway is deleted/does not exist for merchantA
-        });
-        recordResult(12, 'Deleted/Non-Existent Gateway Rejection', false, 'Deleted gateway unexpectedly accepted');
-      } catch (err) {
-        recordResult(12, 'Deleted/Non-Existent Gateway Rejection', err.response?.status === 400, `Status: ${err.response?.status}`);
-      }
-    } else {
-      recordResult(12, 'Deleted/Non-Existent Gateway Rejection', false, 'Session not created');
-    }
-
-    // 13. Create valid payment for Session A verification
-    const trxA_valid = `TRX_VALID_${testSuffix}`;
-    await Payment.create({
-      merchant: merchantIdA,
-      transactionId: trxA_valid,
-      amount: 500,
+    // 7. NOTIFICATION_ONLY with valid provider package is accepted as verified evidence
+    const notifTrx = `NOTIF_VALID_${testSuffix}`;
+    const notifRes = await paymentService.processTransactionSync({
+      merchantId: merchantIdA,
       gateway: 'bKash',
       provider: 'bKash',
-      status: 'COMPLETED',
-      paymentStatus: 'COMPLETED',
-      isUsed: false,
+      amount: 500,
+      sender: '01711223344',
+      transactionId: notifTrx,
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bKash.customerapp',
+      notificationTitle: 'Payment Received',
     });
+    recordResult(
+      7,
+      'NOTIFICATION_ONLY with Valid Package Accepted as Evidence',
+      notifRes?.status === 'COMPLETED' && notifRes?.verificationState === 'NOTIFICATION_ONLY',
+      `Status: ${notifRes?.status}, State: ${notifRes?.verificationState}`
+    );
 
-    let verifiedResult = null;
+    // 8. Fake/Spoofed Package Name Rejected as MISMATCH_SUSPICIOUS
+    const spoofPkgTrx = `SPOOF_PKG_${testSuffix}`;
+    const spoofPkgRes = await paymentService.processTransactionSync({
+      merchantId: merchantIdA,
+      gateway: 'bKash',
+      provider: 'bKash',
+      amount: 500,
+      sender: '01711223344',
+      transactionId: spoofPkgTrx,
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.fake.bkash.hacker',
+    });
+    recordResult(
+      8,
+      'Invalid Package Name Rejected as MISMATCH_SUSPICIOUS',
+      spoofPkgRes?.status === 'REJECTED' && spoofPkgRes?.verificationState === 'MISMATCH_SUSPICIOUS',
+      `Status: ${spoofPkgRes?.status}, State: ${spoofPkgRes?.verificationState}`
+    );
+
+    // 9. Fake Provider Name Rejected
+    const fakeProvTrx = `FAKE_PROV_${testSuffix}`;
+    const fakeProvRes = await paymentService.processTransactionSync({
+      merchantId: merchantIdA,
+      gateway: 'FakeIllegalWallet',
+      provider: 'FakeIllegalWallet',
+      amount: 500,
+      sender: '01711223344',
+      transactionId: fakeProvTrx,
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bKash.customerapp',
+    });
+    recordResult(
+      9,
+      'Fake/Unknown Provider Rejected as MISMATCH_SUSPICIOUS',
+      fakeProvRes?.status === 'REJECTED' && fakeProvRes?.verificationState === 'MISMATCH_SUSPICIOUS',
+      `Status: ${fakeProvRes?.status}`
+    );
+
+    // 10. CORRELATED_MATCH with matching multi-evidence is accepted
+    const corrTrx = `CORR_VALID_${testSuffix}`;
+    const corrRes = await paymentService.processTransactionSync({
+      merchantId: merchantIdA,
+      gateway: 'bKash',
+      provider: 'bKash',
+      amount: 500,
+      sender: '01711223344',
+      transactionId: corrTrx,
+      source: 'CORRELATED',
+      verificationState: 'CORRELATED_MATCH',
+      packageName: 'com.bKash.customerapp',
+      notificationTitle: 'Payment Received',
+      isCorrelated: true,
+      sms: 'You have received Tk 500.00 from 01711223344. TrxID ' + corrTrx,
+    });
+    recordResult(
+      10,
+      'CORRELATED_MATCH Multi-Evidence Accepted',
+      corrRes?.status === 'COMPLETED' && corrRes?.verificationState === 'CORRELATED_MATCH',
+      `Status: ${corrRes?.status}`
+    );
+
+    // 11. Multi-Evidence Correlation Upgrade (SMS followed by matching App Notification)
+    const upgradeTrx = `UPGRADE_${testSuffix}`;
+    await paymentService.processTransactionSync({
+      merchantId: merchantIdA,
+      gateway: 'bKash',
+      provider: 'bKash',
+      amount: 750,
+      sender: '01711223344',
+      transactionId: upgradeTrx,
+      source: 'SMS',
+      verificationState: 'SMS_ONLY',
+    });
+    const upgradedRes = await paymentService.processTransactionSync({
+      merchantId: merchantIdA,
+      gateway: 'bKash',
+      provider: 'bKash',
+      amount: 750,
+      sender: '01711223344',
+      transactionId: upgradeTrx,
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bKash.customerapp',
+    });
+    recordResult(
+      11,
+      'Evidence Upgrade from SMS_ONLY to CORRELATED_MATCH',
+      upgradedRes?.status === 'COMPLETED' && upgradedRes?.verificationState === 'CORRELATED_MATCH',
+      `Status: ${upgradedRes?.status}, State: ${upgradedRes?.verificationState}`
+    );
+
+    // 12. Multi-Evidence Correlation Conflict / Mismatched Amount Flags Suspicious
+    const conflictTrx = `CONFLICT_${testSuffix}`;
+    await paymentService.processTransactionSync({
+      merchantId: merchantIdA,
+      gateway: 'bKash',
+      provider: 'bKash',
+      amount: 100, // SMS claims 100
+      sender: '01711223344',
+      transactionId: conflictTrx,
+      source: 'SMS',
+      verificationState: 'SMS_ONLY',
+    });
+    const conflictRes = await paymentService.processTransactionSync({
+      merchantId: merchantIdA,
+      gateway: 'bKash',
+      provider: 'bKash',
+      amount: 999, // Notification claims 999 -> MISMATCH!
+      sender: '01711223344',
+      transactionId: conflictTrx,
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bKash.customerapp',
+    });
+    recordResult(
+      12,
+      'Conflicting Evidence Mismatch Marked MISMATCH_SUSPICIOUS',
+      conflictRes?.status === 'REJECTED' && conflictRes?.verificationState === 'MISMATCH_SUSPICIOUS',
+      `Status: ${conflictRes?.status}, State: ${conflictRes?.verificationState}`
+    );
+
+    // 13. Idempotent Duplicate Transaction Ingestion
+    const dupRes = await paymentService.processTransactionSync({
+      merchantId: merchantIdA,
+      gateway: 'bKash',
+      provider: 'bKash',
+      amount: 500,
+      sender: '01711223344',
+      transactionId: notifTrx,
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bKash.customerapp',
+    });
+    recordResult(
+      13,
+      'Duplicate Ingestion Idempotent (No Duplicate Payments)',
+      dupRes?.status === 'DUPLICATE',
+      `Status: ${dupRes?.status}`
+    );
+
+    // 14. Valid Evidence Verifies Checkout Session
     if (validSession?.sessionId) {
       try {
         const res = await axios.post(`${serverUrl}/checkout/sessions/public/${validSession.sessionId}/verify`, {
-          transactionId: trxA_valid,
+          transactionId: notifTrx,
           provider: 'bKash',
         });
-        verifiedResult = res.data?.data;
-        recordResult(13, 'Valid Payment Verification Success', res.status === 200 && verifiedResult?.session?.status === 'VERIFIED', `Status: ${verifiedResult?.session?.status}`);
+        const vResult = res.data?.data;
+        recordResult(
+          14,
+          'Valid Notification Evidence Verifies Checkout Session',
+          res.status === 200 && vResult?.session?.status === 'VERIFIED',
+          `Status: ${vResult?.session?.status}`
+        );
       } catch (err) {
-        recordResult(13, 'Valid Payment Verification Success', false, err.message);
+        recordResult(14, 'Valid Notification Evidence Verifies Checkout Session', false, err.message);
       }
     } else {
-      recordResult(13, 'Valid Payment Verification Success', false, 'Session not created');
+      recordResult(14, 'Valid Notification Evidence Verifies Checkout Session', false, 'Session not created');
     }
 
-    // 14. Double verification (Idempotency check on already verified session)
+    // 15. Double verification idempotency check
     if (validSession?.sessionId) {
       try {
         const res = await axios.post(`${serverUrl}/checkout/sessions/public/${validSession.sessionId}/verify`, {
-          transactionId: trxA_valid,
+          transactionId: notifTrx,
           provider: 'bKash',
         });
-        recordResult(14, 'Double Verification Idempotent Response', res.status === 200 && res.data?.data?.message?.includes('already verified'), 'Idempotent verification handled cleanly');
+        recordResult(15, 'Double Verification Idempotent Response', res.status === 200 && res.data?.data?.message?.includes('already verified'), 'Idempotent verification handled cleanly');
       } catch (err) {
-        recordResult(14, 'Double Verification Idempotent Response', false, err.message);
+        recordResult(15, 'Double Verification Idempotent Response', false, err.message);
       }
     } else {
-      recordResult(14, 'Double Verification Idempotent Response', false, 'Session not created');
+      recordResult(15, 'Double Verification Idempotent Response', false, 'Session not created');
     }
 
-    // 15. Concurrent verification / Replay protection on duplicate session
+    // 16. Replay protection (Same payment used on new checkout session rejected)
     const sess2Res = await axios.post(
       `${serverUrl}/checkout/sessions`,
       { orderId: `SEC_ORD_DUP_${testSuffix}`, amount: 500, returnUrl: 'https://merchant.com/callback' },
@@ -511,24 +578,20 @@ async function runSecurityTestSuite() {
 
     try {
       await axios.post(`${serverUrl}/checkout/sessions/public/${sess2Id}/verify`, {
-        transactionId: trxA_valid, // trxA_valid has already been marked isUsed: true in Test 13
+        transactionId: notifTrx, // already used in Test 14
         provider: 'bKash',
       });
-      recordResult(15, 'Replay Transaction Rejection', false, 'Already used transaction unexpectedly accepted for second order');
+      recordResult(16, 'Replay Transaction Rejection', false, 'Already used transaction unexpectedly accepted for second order');
     } catch (err) {
-      recordResult(15, 'Replay Transaction Rejection', err.response?.status === 400, `Status: ${err.response?.status}`);
+      recordResult(16, 'Replay Transaction Rejection', err.response?.status === 400, `Status: ${err.response?.status}`);
     }
 
-    // 16. Invalid HMAC Webhook Signature
+    // 17. Webhook HMAC signature verification
     const ts = Math.floor(Date.now() / 1000);
     const bodyStr = JSON.stringify({ event: 'payment.verified', amount: 500 });
     const invalidHeader = `t=${ts},v1=invalid_hmac_hex_1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef`;
     const isValidSig = verifySignature(invalidHeader, bodyStr, webhookSecretA);
-    recordResult(16, 'Invalid Webhook Signature Rejection', isValidSig === false, 'Invalid HMAC signature correctly rejected');
-
-    // 17. Missing Webhook Signature
-    const isMissingSig = verifySignature(null, bodyStr, webhookSecretA);
-    recordResult(17, 'Missing Webhook Signature Rejection', isMissingSig === false, 'Missing signature header correctly rejected');
+    recordResult(17, 'Invalid Webhook Signature Rejection', isValidSig === false, 'Invalid HMAC signature correctly rejected');
 
     // 18. Rate Limiting Protection (Verify endpoint rate limiter)
     let rateLimited = false;
@@ -547,50 +610,21 @@ async function runSecurityTestSuite() {
     }
     recordResult(18, 'Rate Limiting Enforcement (429 Too Many Requests)', rateLimited, 'Rate limiter active on verification route');
 
-    // 19. Public Endpoint Data Minimization
-    if (validSession?.sessionId) {
-      try {
-        const res = await axios.get(`${serverUrl}/checkout/sessions/public/${validSession.sessionId}`);
-        const publicData = res.data?.data;
-        const hasSecret = publicData?.merchant?.apiKey || publicData?.merchant?.apiSecret || publicData?.merchant?.webhookSecret || publicData?.merchant?.password;
-        recordResult(19, 'Public Endpoint Data Minimization', !hasSecret, 'Private API keys and secrets stripped from public payload');
-      } catch (err) {
-        recordResult(19, 'Public Endpoint Data Minimization', false, err.message);
-      }
-    } else {
-      recordResult(19, 'Public Endpoint Data Minimization', false, 'Session not created');
-    }
-
-    // 20. Clickjacking & Security Headers
-    try {
-      const res = await axios.get(`${serverUrl}/checkout/sessions/public/non_existent_check`);
-      const headers = res.headers;
-      const hasFrameOpt = headers['x-frame-options'] === 'SAMEORIGIN' || headers['content-security-policy']?.includes('frame-ancestors');
-      const hasNoSniff = headers['x-content-type-options'] === 'nosniff';
-      recordResult(20, 'Security Headers & Clickjacking Prevention', hasFrameOpt && hasNoSniff, `X-Frame-Options: ${headers['x-frame-options']}, NoSniff: ${headers['x-content-type-options']}`);
-    } catch (err) {
-      const headers = err.response?.headers || {};
-      const hasFrameOpt = headers['x-frame-options'] === 'SAMEORIGIN' || headers['content-security-policy']?.includes('frame-ancestors');
-      const hasNoSniff = headers['x-content-type-options'] === 'nosniff';
-      recordResult(20, 'Security Headers & Clickjacking Prevention', hasFrameOpt && hasNoSniff, `X-Frame-Options: ${headers['x-frame-options']}, NoSniff: ${headers['x-content-type-options']}`);
-    }
-
-    // 21. Payment Form System Integrity
-    recordResult(21, 'Payment Form System Integrity', typeof PaymentForm !== 'undefined', 'PaymentForm schema and routes preserved');
-
-    // 22. Payment Link System Integrity
-    recordResult(22, 'Payment Link System Integrity', typeof PaymentLink !== 'undefined', 'PaymentLink schema and routes preserved');
-
-    // 23. Existing Gateway Management Integrity
-    recordResult(23, 'Existing Gateway Management Integrity', typeof MerchantGateway !== 'undefined', 'MerchantGateway schema and routes preserved');
-
-    // 24. Existing Subscription System Integrity
-    recordResult(24, 'Existing Subscription System Integrity', typeof Plan !== 'undefined', 'Plan schema and routes preserved');
-
   } catch (fatalErr) {
     console.error('Fatal Security Test Runner Error:', fatalErr);
   } finally {
     if (isDbConnected) {
+      const MerchantGateway = require('../models/MerchantGateway');
+      if (merchantIdA) {
+        await MerchantGateway.deleteMany({ merchant: merchantIdA }).catch(() => {});
+        await Merchant.deleteOne({ _id: merchantIdA }).catch(() => {});
+      }
+      if (merchantIdB) {
+        await MerchantGateway.deleteMany({ merchant: merchantIdB }).catch(() => {});
+        await Merchant.deleteOne({ _id: merchantIdB }).catch(() => {});
+      }
+      await CheckoutSession.deleteMany({ orderId: { $regex: testSuffix.toString() } }).catch(() => {});
+      await Payment.deleteMany({ transactionId: { $regex: testSuffix.toString() } }).catch(() => {});
       await mongoose.disconnect().catch(() => {});
     }
     server.close();

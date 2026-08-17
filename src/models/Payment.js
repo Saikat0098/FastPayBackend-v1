@@ -81,12 +81,59 @@ const paymentSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['PENDING', 'COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'FAILED', 'CANCELLED', 'DUPLICATE', 'PARSED', 'SYNCED', 'VERIFIED', 'REJECTED'],
-      default: 'COMPLETED',
+      enum: ['PENDING', 'PENDING_VERIFICATION', 'COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'FAILED', 'CANCELLED', 'DUPLICATE', 'PARSED', 'SYNCED', 'VERIFIED', 'REJECTED', 'SUSPICIOUS', 'USED', 'CLAIMED'],
+      default: 'PENDING_VERIFICATION',
+      index: true,
     },
     paymentStatus: {
       type: String,
-      default: 'COMPLETED',
+      default: 'PENDING_VERIFICATION',
+    },
+    source: {
+      type: String,
+      enum: ['NOTIFICATION', 'SMS', 'CORRELATED', 'MANUAL', 'API', 'OTHER'],
+      default: 'SMS',
+      index: true,
+    },
+    verificationState: {
+      type: String,
+      enum: ['NOTIFICATION_ONLY', 'SMS_ONLY', 'CORRELATED_MATCH', 'MISMATCH_SUSPICIOUS', 'PENDING_VERIFICATION', 'UNVERIFIED', 'VERIFIED'],
+      default: 'SMS_ONLY',
+      index: true,
+    },
+    packageName: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    notificationTitle: {
+      type: String,
+      default: '',
+    },
+    isCorrelated: {
+      type: Boolean,
+      default: false,
+    },
+    evidenceReceivedAt: {
+      type: Date,
+      default: Date.now,
+    },
+    evidenceUpdatedAt: {
+      type: Date,
+      default: Date.now,
+    },
+    securityFlags: {
+      type: [String],
+      default: [],
+    },
+    verificationReason: {
+      type: String,
+      default: '',
+    },
+    isSuspicious: {
+      type: Boolean,
+      default: false,
+      index: true,
     },
     syncStatus: {
       type: String,
@@ -137,6 +184,7 @@ const paymentSchema = new mongoose.Schema(
 );
 
 paymentSchema.index({ transactionId: 1 }, { unique: true });
+paymentSchema.index({ provider: 1, transactionId: 1 });
 paymentSchema.index({ merchant: 1, createdAt: -1 });
 paymentSchema.index({ provider: 1 });
 paymentSchema.index({ gateway: 1 });

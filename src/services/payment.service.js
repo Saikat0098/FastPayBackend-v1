@@ -8,8 +8,30 @@ const PaymentRetry = require('../models/PaymentRetry');
 const { parseSms } = require('../utils/smsParsers');
 const { emitPaymentCreated, emitPaymentUpdated } = require('../socket/socketManager');
 const { recordCustomerPayment } = require('./customer.service');
+const { PROVIDER_PACKAGES, EVIDENCE_SOURCE, VERIFICATION_STATE } = require('../constants');
 const ApiError = require('../utils/apiError');
+const logger = require('../config/logger');
 const mongoose = require('mongoose');
+
+const validateProviderPackage = (provider, packageName) => {
+  if (!provider || !packageName) return false;
+  const provClean = provider.toString().toUpperCase().replace(/[\s_-]+/g, '');
+  let allowed = [];
+
+  if (provClean.includes('BKASH')) {
+    allowed = PROVIDER_PACKAGES.BKASH;
+  } else if (provClean.includes('NAGAD')) {
+    allowed = PROVIDER_PACKAGES.NAGAD;
+  } else if (provClean.includes('ROCKET')) {
+    allowed = PROVIDER_PACKAGES.ROCKET;
+  } else if (provClean.includes('UPAY')) {
+    allowed = PROVIDER_PACKAGES.UPAY;
+  } else {
+    return false;
+  }
+
+  return allowed.includes(packageName.trim());
+};
 
 const verifyDeviceNotBlocked = async ({ deviceId, activationKey, reqDevice }) => {
   let devDoc = reqDevice || null;
@@ -77,6 +99,11 @@ const processTransactionSync = async ({
   accountNumber,
   providerTimeStr,
   paymentStatus,
+  source,
+  verificationState,
+  packageName,
+  notificationTitle,
+  isCorrelated,
 }) => {
   const txId = transactionId ? transactionId.trim() : '';
 
@@ -119,25 +146,172 @@ const processTransactionSync = async ({
     if (defaultMerchant) resolvedMerchantId = defaultMerchant._id;
   }
 
-  // 3. Prevent duplicate Transaction IDs
+  const rawProvider = gateway || provider || 'bKash';
+  const selectedSms = sms || rawSms || rawBody || '';
+  const dateVal = receivedAt ? new Date(receivedAt) : (timestamp ? new Date(timestamp) : new Date());
+  const cleanPkg = (packageName || '').trim();
+  const cleanTitle = (notificationTitle || '').trim();
+  const parsedAmount = parseFloat(amount) || 0;
+
+  // Server-Side Evidence & Provider Validation
+  const validProviders = ['bKash', 'Nagad', 'Rocket', 'Upay', 'Bank Transfer', 'Bank', 'Other'];
+  const matchedProvider = validProviders.find(
+    (p) => p.toLowerCase() === rawProvider.toString().toLowerCase().trim()
+  );
+  const isRecognizedProvider = Boolean(matchedProvider);
+  const selectedGateway = matchedProvider || 'Other';
+
+  const securityFlags = [];
+  let isSuspicious = false;
+
+  if (!isRecognizedProvider) {
+    securityFlags.push('UNKNOWN_PROVIDER');
+    isSuspicious = true;
+  }
+
+  // Package Allowlist Verification
+  const isNotificationSource =
+    source === 'NOTIFICATION' ||
+    verificationState === 'NOTIFICATION_ONLY' ||
+    Boolean(cleanPkg);
+
+  let isPackageAllowed = true;
+  if (isNotificationSource) {
+    isPackageAllowed = validateProviderPackage(selectedGateway, cleanPkg);
+    if (!isPackageAllowed) {
+      securityFlags.push('INVALID_PACKAGE_NAME');
+      isSuspicious = true;
+    }
+  }
+
+  // Server Authority Evidence Classification
+  let finalSource = (source || (isNotificationSource ? 'NOTIFICATION' : 'SMS')).toUpperCase();
+  let finalState = (verificationState || (isNotificationSource ? 'NOTIFICATION_ONLY' : 'SMS_ONLY')).toUpperCase();
+  let finalStatus = 'PENDING_VERIFICATION';
+  let verificationReason = '';
+
+  if (isSuspicious || finalState === 'MISMATCH_SUSPICIOUS') {
+    finalState = 'MISMATCH_SUSPICIOUS';
+    finalStatus = 'REJECTED';
+    isSuspicious = true;
+    verificationReason = securityFlags.length > 0
+      ? `Suspicious evidence flags: ${securityFlags.join(', ')}`
+      : 'Conflicting evidence or invalid package detected';
+  } else if (finalState === 'CORRELATED_MATCH' || isCorrelated) {
+    if (isPackageAllowed) {
+      finalSource = 'CORRELATED';
+      finalState = 'CORRELATED_MATCH';
+      finalStatus = 'COMPLETED';
+      verificationReason = 'Server verified multi-channel correlation (Notification + SMS)';
+    } else {
+      finalState = 'MISMATCH_SUSPICIOUS';
+      finalStatus = 'REJECTED';
+      isSuspicious = true;
+      verificationReason = 'Invalid provider package in correlated evidence';
+    }
+  } else if (finalState === 'NOTIFICATION_ONLY' || finalSource === 'NOTIFICATION') {
+    if (isPackageAllowed) {
+      finalSource = 'NOTIFICATION';
+      finalState = 'NOTIFICATION_ONLY';
+      finalStatus = 'COMPLETED';
+      verificationReason = 'Validated official provider app notification';
+    } else {
+      finalState = 'MISMATCH_SUSPICIOUS';
+      finalStatus = 'REJECTED';
+      isSuspicious = true;
+      verificationReason = 'Invalid package name for claimed provider';
+    }
+  } else {
+    // SMS_ONLY: Default unverified state (PREVENTS FAKE SMS ATTACK)
+    finalSource = 'SMS';
+    finalState = 'SMS_ONLY';
+    finalStatus = 'PENDING_VERIFICATION';
+    verificationReason = 'SMS evidence only - pending verification';
+  }
+
+  // 3. Prevent duplicate Transaction IDs & Handle Multi-Evidence Correlation
   const existing = await Payment.findOne({ transactionId: txId });
   if (existing) {
+    // Check if we can correlate/upgrade existing SMS_ONLY with incoming NOTIFICATION evidence
+    if (
+      existing.verificationState === 'SMS_ONLY' &&
+      (finalState === 'NOTIFICATION_ONLY' || finalState === 'CORRELATED_MATCH') &&
+      !isSuspicious
+    ) {
+      const amountMatches = Math.abs(existing.amount - parsedAmount) < 0.01;
+      const providerMatches = (existing.provider || existing.gateway || '').toLowerCase() === selectedGateway.toLowerCase();
+
+      if (amountMatches && providerMatches && isPackageAllowed) {
+        existing.source = 'CORRELATED';
+        existing.verificationState = 'CORRELATED_MATCH';
+        existing.status = 'COMPLETED';
+        existing.paymentStatus = 'COMPLETED';
+        existing.packageName = cleanPkg || existing.packageName;
+        existing.notificationTitle = cleanTitle || existing.notificationTitle;
+        existing.isCorrelated = true;
+        existing.evidenceUpdatedAt = new Date();
+        existing.verificationReason = 'Correlated with official notification evidence';
+        await existing.save();
+
+        emitPaymentUpdated(existing.merchant, {
+          _id: existing._id,
+          id: existing._id,
+          gateway: existing.gateway,
+          provider: existing.provider,
+          transactionId: existing.transactionId,
+          amount: existing.amount,
+          sender: existing.sender,
+          status: existing.status,
+          verificationState: existing.verificationState,
+          updatedAt: existing.updatedAt,
+        });
+
+        logger.info(`[Payment Correlation] Upgraded ${existing.transactionId} to CORRELATED_MATCH`);
+        return {
+          success: true,
+          transactionId: existing.transactionId,
+          status: existing.status,
+          verificationState: existing.verificationState,
+          message: 'Evidence correlated with existing transaction',
+          payment: existing,
+        };
+      } else {
+        // Conflicting evidence detected!
+        existing.verificationState = 'MISMATCH_SUSPICIOUS';
+        existing.isSuspicious = true;
+        existing.securityFlags.push('EVIDENCE_AMOUNT_OR_PROVIDER_MISMATCH');
+        existing.status = 'REJECTED';
+        existing.paymentStatus = 'REJECTED';
+        existing.verificationReason = 'Mismatched amount or provider between notification and SMS';
+        await existing.save();
+
+        emitPaymentUpdated(existing.merchant, {
+          _id: existing._id,
+          transactionId: existing.transactionId,
+          status: existing.status,
+          verificationState: existing.verificationState,
+        });
+
+        logger.warn(`[Payment Mismatch Alert] TxID: ${txId} flagged as MISMATCH_SUSPICIOUS`);
+        return {
+          success: false,
+          transactionId: existing.transactionId,
+          status: 'REJECTED',
+          verificationState: 'MISMATCH_SUSPICIOUS',
+          message: 'Conflicting evidence mismatch for transaction',
+          payment: existing,
+        };
+      }
+    }
+
     return {
       success: true,
       transactionId: existing.transactionId,
       status: 'DUPLICATE',
+      verificationState: existing.verificationState,
       message: 'Transaction already recorded',
       payment: existing,
     };
-  }
-
-  const selectedGateway = gateway || provider || 'bKash';
-  const selectedSms = sms || rawSms || rawBody || '';
-  const dateVal = receivedAt ? new Date(receivedAt) : (timestamp ? new Date(timestamp) : new Date());
-
-  let normalizedStatus = (paymentStatus || 'COMPLETED').toUpperCase();
-  if (normalizedStatus === 'SUCCESS' || normalizedStatus === 'SUCCESSFUL') {
-    normalizedStatus = 'COMPLETED';
   }
 
   // 4. Save into MongoDB
@@ -149,15 +323,25 @@ const processTransactionSync = async ({
     gateway: selectedGateway,
     provider: selectedGateway,
     transactionId: txId,
-    amount: parseFloat(amount) || 0,
+    amount: parsedAmount,
     sender: sender || 'Customer',
     accountNumber: accountNumber || '',
     sms: selectedSms,
     rawSms: selectedSms,
     rawBody: selectedSms,
     providerTimeStr: providerTimeStr || '',
-    status: normalizedStatus,
-    paymentStatus: normalizedStatus,
+    source: finalSource,
+    verificationState: finalState,
+    packageName: cleanPkg,
+    notificationTitle: cleanTitle,
+    isCorrelated: isCorrelated || finalState === 'CORRELATED_MATCH',
+    securityFlags,
+    verificationReason,
+    isSuspicious: !!isSuspicious,
+    evidenceReceivedAt: dateVal,
+    evidenceUpdatedAt: dateVal,
+    status: finalStatus,
+    paymentStatus: finalStatus,
     syncStatus: 'SYNCED',
     receivedAt: dateVal,
     timestamp: dateVal,
@@ -186,6 +370,10 @@ const processTransactionSync = async ({
     sms: payment.sms,
     deviceId: payment.deviceId,
     activationKey: payment.activationKey,
+    source: payment.source,
+    verificationState: payment.verificationState,
+    packageName: payment.packageName,
+    isCorrelated: payment.isCorrelated,
     status: payment.status,
     receivedAt: payment.receivedAt,
     timestamp: payment.timestamp,
@@ -210,11 +398,11 @@ const processTransactionSync = async ({
     success: true,
     transactionId: payment.transactionId,
     status: payment.status,
+    verificationState: payment.verificationState,
     message: 'Transaction synced successfully',
     payment,
   };
 };
-
 
 const processBatchSync = async ({ deviceId, merchantId, transactions }) => {
   if (deviceId) {
@@ -234,15 +422,22 @@ const processBatchSync = async ({ deviceId, merchantId, transactions }) => {
         deviceId,
         merchantId,
         provider: item.provider,
+        gateway: item.gateway || item.provider,
         amount: item.amount,
         sender: item.sender,
         transactionId: item.transactionId,
         accountNumber: item.accountNumber,
         timestamp: item.timestamp,
+        receivedAt: item.receivedAt,
         providerTimeStr: item.providerTimeStr,
         paymentStatus: item.paymentStatus,
         rawBody: item.rawBody,
         rawSms: item.rawSms,
+        source: item.source,
+        verificationState: item.verificationState,
+        packageName: item.packageName,
+        notificationTitle: item.notificationTitle,
+        isCorrelated: item.isCorrelated,
       });
       if (res.success) syncedCount++;
       else failedCount++;
@@ -292,6 +487,8 @@ const processIncomingSms = async ({ deviceId, merchantId, rawSms, senderNumber, 
     transactionId: parsed.transactionId,
     accountNumber: receiverNumber || '',
     rawSms,
+    source: 'SMS',
+    verificationState: 'SMS_ONLY',
   });
 };
 
@@ -365,6 +562,9 @@ const verifyOrUpdatePaymentStatus = async ({ paymentId, trxId, merchantId, statu
   const normStatus = status.toUpperCase();
   payment.status = normStatus;
   payment.paymentStatus = normStatus;
+  if (normStatus === 'VERIFIED') {
+    payment.verificationState = 'VERIFIED';
+  }
   await payment.save();
 
   const eventPayload = {
@@ -376,6 +576,7 @@ const verifyOrUpdatePaymentStatus = async ({ paymentId, trxId, merchantId, statu
     amount: payment.amount,
     sender: payment.sender,
     status: payment.status,
+    verificationState: payment.verificationState,
     createdAt: payment.createdAt,
     updatedAt: payment.updatedAt,
   };
@@ -427,20 +628,38 @@ const verifyCustomerCheckoutPayment = async ({
     }
   }
 
-  // 4. Payment completed/successful
-  const validStatuses = ['COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'VERIFIED', 'PARSED', 'SYNCED'];
+  // 4. Strict Evidence Security & State Validation
+  // FAKE SMS PROTECTION: SMS-only evidence cannot automatically fulfill checkouts
+  if (
+    payment.verificationState === 'SMS_ONLY' ||
+    payment.status === 'PENDING_VERIFICATION' ||
+    payment.status === 'PENDING'
+  ) {
+    throw new ApiError(400, 'Transaction ID is pending verification. SMS-only evidence cannot be automatically verified.');
+  }
+
+  if (
+    payment.verificationState === 'MISMATCH_SUSPICIOUS' ||
+    payment.status === 'REJECTED' ||
+    payment.isSuspicious
+  ) {
+    throw new ApiError(400, 'Transaction ID flagged as suspicious evidence and cannot be verified.');
+  }
+
+  // 5. Payment completed/successful status check
+  const validStatuses = ['COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'VERIFIED'];
   if (!validStatuses.includes((payment.status || '').toUpperCase())) {
     throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
   }
 
-  // 5. Correct amount
+  // 6. Correct amount matching (authoritative)
   if (amount && Number(amount) > 0) {
     if (payment.amount < Number(amount)) {
       throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
     }
   }
 
-  // 6. Transaction has not already been used
+  // 7. Transaction has not already been used
   if (payment.isUsed || payment.status === 'USED' || payment.status === 'CLAIMED') {
     throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
   }
@@ -451,11 +670,13 @@ const verifyCustomerCheckoutPayment = async ({
       _id: payment._id,
       isUsed: { $ne: true },
       status: { $nin: ['USED', 'CLAIMED'] },
+      verificationState: { $nin: ['SMS_ONLY', 'MISMATCH_SUSPICIOUS', 'PENDING_VERIFICATION'] },
     },
     {
       $set: {
         status: 'VERIFIED',
         paymentStatus: 'VERIFIED',
+        verificationState: 'VERIFIED',
         isUsed: true,
         usedAt: new Date(),
         ...(customerName ? { customerName } : {}),
@@ -473,6 +694,7 @@ const verifyCustomerCheckoutPayment = async ({
     _id: claimedPayment._id,
     transactionId: claimedPayment.transactionId,
     status: claimedPayment.status,
+    verificationState: claimedPayment.verificationState,
     amount: claimedPayment.amount,
   });
 

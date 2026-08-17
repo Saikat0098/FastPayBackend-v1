@@ -92,6 +92,9 @@ async function runTests() {
       amount: 500,
       sender: '01700000001',
       transactionId: `TXA1_${testSuffix}`,
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bKash.customerapp',
       paymentStatus: 'COMPLETED',
     });
 
@@ -102,6 +105,9 @@ async function runTests() {
       amount: 500,
       sender: '01700000002',
       transactionId: `TXA2_${testSuffix}`,
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.konasl.nagad',
       paymentStatus: 'COMPLETED',
     });
 
@@ -112,6 +118,9 @@ async function runTests() {
       amount: 1000,
       sender: '01800000001',
       transactionId: `TXB1_${testSuffix}`,
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.bKash.customerapp',
       paymentStatus: 'COMPLETED',
     });
 
@@ -122,6 +131,9 @@ async function runTests() {
       amount: 1000,
       sender: '01800000002',
       transactionId: `TXB2_${testSuffix}`,
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'com.dbbl.mfast.chargela',
       paymentStatus: 'COMPLETED',
     });
 
@@ -132,6 +144,9 @@ async function runTests() {
       amount: 1000,
       sender: '01800000003',
       transactionId: `TXB3_${testSuffix}`,
+      source: 'NOTIFICATION',
+      verificationState: 'NOTIFICATION_ONLY',
+      packageName: 'bd.com.upay.customer',
       paymentStatus: 'COMPLETED',
     });
 

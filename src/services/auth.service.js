@@ -241,9 +241,115 @@ const loginAdmin = async ({ email, password, ipAddress = '', userAgent = '' }) =
   };
 };
 
+const updateProfile = async (userId, { name, phone }) => {
+  if (!userId) {
+    throw new ApiError(401, 'User context missing');
+  }
+
+  // 1. Try User model
+  let user = await User.findById(userId);
+  if (user) {
+    if (name) user.name = name.trim();
+    if (phone !== undefined) user.phone = phone.trim();
+    await user.save();
+
+    // If user has linked Merchant, keep name in sync
+    if (user.merchant) {
+      await Merchant.findByIdAndUpdate(user.merchant, {
+        ...(name ? { name: name.trim() } : {}),
+      });
+    }
+
+    const userObj = user.toObject();
+    delete userObj.password;
+    return userObj;
+  }
+
+  // 2. Try Merchant model (if direct merchant)
+  let merchant = await Merchant.findById(userId);
+  if (merchant) {
+    if (name) merchant.name = name.trim();
+    await merchant.save();
+    const mObj = merchant.toObject();
+    delete mObj.password;
+    delete mObj.apiSecret;
+    return mObj;
+  }
+
+  // 3. Try Admin model
+  let admin = await Admin.findById(userId);
+  if (admin) {
+    if (name) admin.name = name.trim();
+    await admin.save();
+    const aObj = admin.toObject();
+    delete aObj.password;
+    return aObj;
+  }
+
+  throw new ApiError(404, 'User account not found');
+};
+
+const changePassword = async (userId, { currentPassword, newPassword, confirmPassword }) => {
+  if (!userId) {
+    throw new ApiError(401, 'User context missing');
+  }
+
+  if (!currentPassword) {
+    throw new ApiError(400, 'Current password is required');
+  }
+
+  if (!newPassword || newPassword.length < 6) {
+    throw new ApiError(400, 'New password must be at least 6 characters long');
+  }
+
+  if (newPassword !== confirmPassword) {
+    throw new ApiError(400, 'New password and confirm password do not match');
+  }
+
+  // 1. Try User model
+  const user = await User.findById(userId).select('+password');
+  if (user) {
+    const isMatch = await user.comparePassword(currentPassword);
+    if (!isMatch) {
+      throw new ApiError(400, 'Current password is incorrect');
+    }
+    user.password = newPassword;
+    await user.save();
+    return { success: true, message: 'Password updated successfully' };
+  }
+
+  // 2. Try Merchant model
+  const merchant = await Merchant.findById(userId).select('+password');
+  if (merchant) {
+    const isMatch = await merchant.comparePassword(currentPassword);
+    if (!isMatch) {
+      throw new ApiError(400, 'Current password is incorrect');
+    }
+    merchant.password = newPassword;
+    await merchant.save();
+    return { success: true, message: 'Password updated successfully' };
+  }
+
+  // 3. Try Admin model
+  const admin = await Admin.findById(userId).select('+password');
+  if (admin) {
+    const isMatch = await admin.comparePassword(currentPassword);
+    if (!isMatch) {
+      throw new ApiError(400, 'Current password is incorrect');
+    }
+    admin.password = newPassword;
+    await admin.save();
+    return { success: true, message: 'Password updated successfully' };
+  }
+
+  throw new ApiError(404, 'User account not found');
+};
+
 module.exports = {
   registerUser,
   registerMerchant,
   loginMerchant,
   loginAdmin,
+  updateProfile,
+  changePassword,
 };

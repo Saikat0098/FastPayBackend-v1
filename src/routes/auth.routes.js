@@ -12,5 +12,7 @@ router.post('/register-merchant', verifyToken, authorizeRoles('admin', 'superadm
 router.post('/login', authLimiter, authController.loginMerchant);
 router.post('/admin/login', authLimiter, authController.loginAdmin);
 router.get('/me', verifyToken, authController.getProfile);
+router.put('/profile', verifyToken, authController.updateProfile);
+router.put('/change-password', verifyToken, authController.changePassword);
 
 module.exports = router;
