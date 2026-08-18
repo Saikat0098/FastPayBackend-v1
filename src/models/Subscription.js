@@ -67,12 +67,47 @@ const subscriptionSchema = new mongoose.Schema(
     },
     maxDevices: {
       type: Number,
-      default: 5,
+      default: 1,
     },
     integrationLimit: {
       type: Number,
       default: 1,
     },
+    webhookEnabled: {
+      type: Boolean,
+      default: false,
+    },
+    hierarchyRank: {
+      type: Number,
+      default: 1,
+    },
+    upgradeHistory: [
+      {
+        fromPlan: String,
+        toPlan: String,
+        fromRank: Number,
+        toRank: Number,
+        priceDifference: Number,
+        transactionId: String,
+        upgradedAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
+    renewalHistory: [
+      {
+        plan: String,
+        amount: Number,
+        billingCycle: String,
+        transactionId: String,
+        renewedAt: {
+          type: Date,
+          default: Date.now,
+        },
+        newExpireDate: Date,
+      },
+    ],
   },
   {
     timestamps: true,
@@ -85,4 +120,5 @@ subscriptionSchema.index({ transactionId: 1 });
 subscriptionSchema.index({ expireDate: 1 });
 
 module.exports = mongoose.model('Subscription', subscriptionSchema);
+
 

@@ -11,6 +11,7 @@ const Merchant = require('../models/Merchant');
 const Device = require('../models/Device');
 const Payment = require('../models/Payment');
 const ActivationKey = require('../models/ActivationKey');
+const Subscription = require('../models/Subscription');
 const { generateAccessToken } = require('../config/jwt');
 const paymentService = require('../services/payment.service');
 const analyticsService = require('../services/analytics.service');
@@ -63,6 +64,32 @@ async function runTests() {
 
     const tokenA = generateAccessToken({ id: merchantA._id, merchantId: merchantA._id, role: 'MERCHANT' });
     const tokenB = generateAccessToken({ id: merchantB._id, merchantId: merchantB._id, role: 'MERCHANT' });
+
+    // Setup Active Subscriptions for test merchants
+    const expireDate = new Date();
+    expireDate.setDate(expireDate.getDate() + 30);
+    await Subscription.create([
+      {
+        merchant: merchantA._id,
+        plan: 'enterprise',
+        planName: 'Enterprise',
+        maxDevices: 10,
+        integrationLimit: 10,
+        webhookEnabled: true,
+        status: 'active',
+        expireDate,
+      },
+      {
+        merchant: merchantB._id,
+        plan: 'enterprise',
+        planName: 'Enterprise',
+        maxDevices: 10,
+        integrationLimit: 10,
+        webhookEnabled: true,
+        status: 'active',
+        expireDate,
+      },
+    ]);
 
     // Setup Activation Keys & Devices
     const keyA = await activationService.createActivationKey({ merchantId: merchantA._id, durationDays: 30 });

@@ -17,8 +17,6 @@ const generateKey = asyncHandler(async (req, res) => {
 
   const key = await activationService.createActivationKey({
     merchantId: targetMerchant,
-    durationDays: req.body.durationDays || 30,
-    plan: req.body.plan || 'pro',
   });
 
   return ApiResponse.success(res, key, 'Activation key generated successfully', 201);

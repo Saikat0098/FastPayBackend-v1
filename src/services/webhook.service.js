@@ -69,6 +69,16 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
     let targetUrl = '';
     let secret = '';
 
+    const effectiveMerchantId = merchantId || (brandId ? (await Brand.findById(brandId))?.merchant : null);
+    if (effectiveMerchantId) {
+      const entitlementService = require('./entitlement.service');
+      const canWebhook = await entitlementService.canMerchantUseWebhook(effectiveMerchantId);
+      if (!canWebhook) {
+        logger.info(`[Webhook Engine] Merchant ${effectiveMerchantId} does not have Webhooks included in their subscription plan (Starter or expired). Webhook delivery bypassed.`);
+        return null;
+      }
+    }
+
     if (brandId) {
       const brand = await Brand.findById(brandId);
       if (brand && brand.webhookUrl) {

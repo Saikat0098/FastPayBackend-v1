@@ -222,6 +222,8 @@ const createPlan = asyncHandler(async (req, res) => {
     yearlyDiscountPercent: discount,
     integrationLimit: Number(integrationLimit) || 1,
     maxDevices: Number(maxDevices) || 1,
+    webhookEnabled: webhookEnabled !== undefined ? Boolean(webhookEnabled) : cleanName !== 'starter',
+    hierarchyRank: hierarchyRank ? Number(hierarchyRank) : (cleanName === 'starter' ? 1 : cleanName === 'pro' ? 2 : cleanName === 'business' ? 3 : cleanName === 'agency' ? 4 : 5),
     features: Array.isArray(features) ? features : (typeof features === 'string' ? features.split(',').map(f => f.trim()).filter(Boolean) : []),
     isPopular: Boolean(isPopular),
     isActive: isActive !== undefined ? Boolean(isActive) : true,

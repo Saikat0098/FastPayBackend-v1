@@ -12,6 +12,7 @@ const CheckoutSession = require('../models/CheckoutSession');
 const PaymentForm = require('../models/PaymentForm');
 const PaymentLink = require('../models/PaymentLink');
 const Plan = require('../models/Plan');
+const Subscription = require('../models/Subscription');
 
 const { generateSignature, verifySignature } = require('../services/webhook.service');
 const axios = require('axios');
@@ -108,6 +109,31 @@ async function runSecurityTestSuite() {
     await Merchant.create(mockMerchantB).catch(() => {});
     await MerchantGateway.create(gwA1).catch(() => {});
     await MerchantGateway.create(gwA_inactive).catch(() => {});
+
+    const expireDate = new Date();
+    expireDate.setDate(expireDate.getDate() + 30);
+    await Subscription.create([
+      {
+        merchant: merchantIdA,
+        plan: 'enterprise',
+        planName: 'Enterprise',
+        maxDevices: 10,
+        integrationLimit: 10,
+        webhookEnabled: true,
+        status: 'active',
+        expireDate,
+      },
+      {
+        merchant: merchantIdB,
+        plan: 'enterprise',
+        planName: 'Enterprise',
+        maxDevices: 10,
+        integrationLimit: 10,
+        webhookEnabled: true,
+        status: 'active',
+        expireDate,
+      },
+    ]).catch(() => {});
   } else {
     mongoose.set('bufferCommands', false);
 

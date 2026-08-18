@@ -50,6 +50,14 @@ const planSchema = new mongoose.Schema(
       type: Number,
       default: 500,
     },
+    webhookEnabled: {
+      type: Boolean,
+      default: false,
+    },
+    hierarchyRank: {
+      type: Number,
+      default: 1,
+    },
     features: [
       {
         type: String,

@@ -3,6 +3,9 @@ const ApiError = require('../utils/apiError');
 const crypto = require('crypto');
 
 const createBrand = async ({ merchantId, name, websiteUrl, logo, paymentSettings }) => {
+  const entitlementService = require('./entitlement.service');
+  await entitlementService.checkWebsiteLimit(merchantId);
+
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, '') || `brand-${Date.now()}`;
   
   const existing = await Brand.findOne({ merchant: merchantId, slug });

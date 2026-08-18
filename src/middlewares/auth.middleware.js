@@ -152,6 +152,17 @@ const verifyApiKey = asyncHandler(async (req, res, next) => {
     req.brand = brand;
     req.merchant = brand.merchant;
     req.merchantId = brand.merchant?._id || brand.merchant;
+
+    const entitlementService = require('../services/entitlement.service');
+    const entitlements = await entitlementService.getMerchantEntitlements(req.merchantId);
+    if (!entitlements.isActive) {
+      const err = new ApiError(403, 'Your FastPay merchant subscription has expired or is inactive. Please renew your subscription to perform API operations.', [], '', {
+        code: 'SUBSCRIPTION_EXPIRED',
+        userMessage: 'Merchant subscription is expired. Please renew to continue using the API.',
+      });
+      throw err;
+    }
+    req.entitlements = entitlements;
     return next();
   }
 
@@ -160,6 +171,17 @@ const verifyApiKey = asyncHandler(async (req, res, next) => {
   if (merchant) {
     req.merchant = merchant;
     req.merchantId = merchant._id;
+
+    const entitlementService = require('../services/entitlement.service');
+    const entitlements = await entitlementService.getMerchantEntitlements(req.merchantId);
+    if (!entitlements.isActive) {
+      const err = new ApiError(403, 'Your FastPay merchant subscription has expired or is inactive. Please renew your subscription to perform API operations.', [], '', {
+        code: 'SUBSCRIPTION_EXPIRED',
+        userMessage: 'Merchant subscription is expired. Please renew to continue using the API.',
+      });
+      throw err;
+    }
+    req.entitlements = entitlements;
     return next();
   }
 

@@ -86,6 +86,32 @@ async function runDeveloperIntegrationTests() {
         apiSecret: apiSecretB,
         status: 'active',
       });
+
+      const Subscription = require('../models/Subscription');
+      const expireDate = new Date();
+      expireDate.setDate(expireDate.getDate() + 30);
+      await Subscription.create([
+        {
+          merchant: merchantIdA,
+          plan: 'enterprise',
+          planName: 'Enterprise',
+          maxDevices: 10,
+          integrationLimit: 10,
+          webhookEnabled: true,
+          status: 'active',
+          expireDate,
+        },
+        {
+          merchant: merchantIdB,
+          plan: 'enterprise',
+          planName: 'Enterprise',
+          maxDevices: 10,
+          integrationLimit: 10,
+          webhookEnabled: true,
+          status: 'active',
+          expireDate,
+        },
+      ]);
     } else {
       mongoose.set('bufferCommands', false);
 

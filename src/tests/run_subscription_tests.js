@@ -25,17 +25,17 @@ async function runSubscriptionTests() {
     await mongoose.connect(mongoUri);
     console.log('✅ Connected to MongoDB\n');
 
-    // Seed 9 Official Plans
+    // Seed 5 Official Plans
     const plans = await subscriptionService.getPublicPlans();
     console.log(`TEST 1: getPublicPlans returns ${plans.length} active plans -> ✅ PASS`);
 
-    // Verify 9 Plans Pricing
+    // Verify 5 Plans Pricing
     const starter = plans.find((p) => p.name === 'starter');
     const pro = plans.find((p) => p.name === 'pro');
-    const mega = plans.find((p) => p.name === 'mega');
+    const enterprise = plans.find((p) => p.name === 'enterprise');
 
-    if (starter?.priceMonthly === 100 && pro?.priceMonthly === 150 && mega?.priceMonthly === 2000) {
-      console.log(`TEST 2: MongoDB plan prices correctly populated (Starter: ৳100, Pro: ৳150, Mega: ৳2000) -> ✅ PASS`);
+    if (starter?.priceMonthly === 100 && pro?.priceMonthly === 150 && enterprise?.priceMonthly === 300) {
+      console.log(`TEST 2: MongoDB plan prices correctly populated (Starter: ৳100, Pro: ৳150, Enterprise: ৳300) -> ✅ PASS`);
     } else {
       throw new Error(`TEST 2 FAILED: Incorrect pricing values found! Starter: ${starter?.priceMonthly}, Pro: ${pro?.priceMonthly}`);
     }

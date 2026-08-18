@@ -4,6 +4,7 @@ const activationController = require('../controllers/activation.controller');
 const androidController = require('../controllers/android.controller');
 const { verifyToken, authorizeRoles } = require('../middlewares/auth.middleware');
 const { enforceTenant } = require('../middlewares/tenant.middleware');
+const { requireActiveSubscription, requireDeviceLimit } = require('../middlewares/entitlement.middleware');
 
 // Public route for Android app activation
 router.post('/activate', androidController.androidActivate);
@@ -12,9 +13,9 @@ router.post('/activate', androidController.androidActivate);
 router.use(verifyToken);
 router.use(enforceTenant);
 
-router.post('/generate', authorizeRoles('admin', 'superadmin', 'merchant'), activationController.generateKey);
-router.post('/keys', authorizeRoles('admin', 'superadmin', 'merchant'), activationController.generateKey);
-router.post('/', authorizeRoles('admin', 'superadmin', 'merchant'), activationController.generateKey);
+router.post('/generate', authorizeRoles('admin', 'superadmin', 'merchant'), requireActiveSubscription, requireDeviceLimit, activationController.generateKey);
+router.post('/keys', authorizeRoles('admin', 'superadmin', 'merchant'), requireActiveSubscription, requireDeviceLimit, activationController.generateKey);
+router.post('/', authorizeRoles('admin', 'superadmin', 'merchant'), requireActiveSubscription, requireDeviceLimit, activationController.generateKey);
 
 router.get('/list', authorizeRoles('admin', 'superadmin', 'merchant'), activationController.listKeys);
 router.get('/keys', authorizeRoles('admin', 'superadmin', 'merchant'), activationController.listKeys);
@@ -25,4 +26,5 @@ router.patch('/keys/:id/deactivate', authorizeRoles('admin', 'superadmin', 'merc
 router.patch('/:id/deactivate', authorizeRoles('admin', 'superadmin', 'merchant'), activationController.resetKey);
 
 module.exports = router;
+
 

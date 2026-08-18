@@ -104,9 +104,105 @@ const getPublicSettings = asyncHandler(async (req, res) => {
   }, 'Public support settings');
 });
 
+const getEntitlements = asyncHandler(async (req, res) => {
+  const entitlementService = require('../services/entitlement.service');
+  const merchantId = req.merchantId || req.merchant?._id || req.user?.merchant || req.query.merchantId;
+  if (!merchantId) {
+    return ApiResponse.success(res, {
+      hasSubscription: false,
+      isActive: false,
+      isExpired: false,
+      status: 'none',
+      plan: 'none',
+      planName: 'No Plan',
+      limits: { devices: 0, websites: 0 },
+      usage: { devices: 0, websites: 0 },
+      features: { webhook: false, paymentVerification: false, checkout: false, paymentLinks: false, apiAccess: false },
+    }, 'Default entitlements');
+  }
+
+  const entitlements = await entitlementService.getMerchantEntitlements(merchantId);
+  return ApiResponse.success(res, entitlements, 'Merchant entitlements retrieved');
+});
+
+const getSubscriptionCheckoutSession = asyncHandler(async (req, res) => {
+  const { planName } = req.params;
+  const { cycle = 'monthly' } = req.query;
+
+  const Plan = require('../models/Plan');
+  const PaymentMethod = require('../models/PaymentMethod');
+
+  const plan = await Plan.findOne({
+    $or: [
+      { name: (planName || 'starter').toLowerCase() },
+      { title: { $regex: new RegExp(`^${planName || 'starter'}$`, 'i') } },
+    ],
+    isActive: true,
+  });
+
+  if (!plan) {
+    return ApiResponse.error(res, 'Requested plan not found or inactive', 404);
+  }
+
+  const isYearly = cycle === 'yearly';
+  const amount = isYearly ? plan.priceYearly : (plan.priceMonthly || plan.priceBDT);
+
+  const paymentMethods = await PaymentMethod.find({ isActive: true }).sort({ displayOrder: 1 });
+
+  return ApiResponse.success(res, {
+    orderId: `SUB-${plan.name.toUpperCase()}-${Date.now().toString().slice(-6)}`,
+    amount,
+    currency: 'BDT',
+    plan: plan.name,
+    planTitle: plan.title,
+    billingCycle: isYearly ? 'yearly' : 'monthly',
+    maxDevices: plan.maxDevices,
+    integrationLimit: plan.integrationLimit,
+    webhookEnabled: plan.webhookEnabled,
+    features: plan.features,
+    gateways: paymentMethods,
+    merchant: {
+      name: 'FastPay Official',
+      brandName: 'FastPay Platform Subscription',
+    },
+  }, 'Subscription checkout session retrieved');
+});
+
+const getUpgradeQuote = asyncHandler(async (req, res) => {
+  const entitlementService = require('../services/entitlement.service');
+  const merchantId = req.merchantId || req.merchant?._id || req.user?.merchant;
+  const { targetPlan } = req.query;
+
+  if (!targetPlan) {
+    return ApiResponse.error(res, 'targetPlan is required', 400);
+  }
+
+  const quote = await entitlementService.calculateUpgradeQuote(merchantId, targetPlan);
+  return ApiResponse.success(res, quote, 'Upgrade quote calculated');
+});
+
+const upgradeSubscription = asyncHandler(async (req, res) => {
+  const entitlementService = require('../services/entitlement.service');
+  const merchantId = req.merchantId || req.merchant?._id || req.user?.merchant;
+  const { targetPlan, transactionId, paymentMethod } = req.body;
+
+  const result = await entitlementService.upgradeMerchantSubscription({
+    merchantId,
+    targetPlanIdOrName: targetPlan,
+    transactionId,
+    paymentMethod,
+  });
+
+  return ApiResponse.success(res, result, result.message);
+});
+
 module.exports = {
   getPlans,
   getMySubscription,
+  getEntitlements,
+  getSubscriptionCheckoutSession,
+  getUpgradeQuote,
+  upgradeSubscription,
   applySubscription,
   getMyApplication,
   getAdminApplications,
@@ -116,3 +212,4 @@ module.exports = {
   getAllSubscriptions,
   getPublicSettings,
 };
+

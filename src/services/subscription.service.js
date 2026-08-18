@@ -32,8 +32,10 @@ const createSubscription = async ({
   amount = 0,
   paymentMethod = 'bKash',
   transactionId = '',
-  maxDevices = 1,
-  integrationLimit = 1,
+  maxDevices,
+  integrationLimit,
+  webhookEnabled,
+  hierarchyRank,
 }) => {
   const startDate = new Date();
   const expireDate = new Date();
@@ -43,6 +45,23 @@ const createSubscription = async ({
   } else {
     expireDate.setDate(expireDate.getDate() + durationDays);
   }
+
+  // Resolve plan document if maxDevices or webhookEnabled not passed directly
+  let planDoc = null;
+  if (planId || plan) {
+    const isMongoId = planId && mongoose.Types.ObjectId.isValid(planId);
+    planDoc = await Plan.findOne({
+      $or: [
+        ...(isMongoId ? [{ _id: planId }] : []),
+        { name: (plan || '').toLowerCase() },
+      ],
+    });
+  }
+
+  const resolvedMaxDevices = maxDevices !== undefined ? maxDevices : (planDoc?.maxDevices || 1);
+  const resolvedIntegrationLimit = integrationLimit !== undefined ? integrationLimit : (planDoc?.integrationLimit || 1);
+  const resolvedWebhookEnabled = webhookEnabled !== undefined ? webhookEnabled : Boolean(planDoc?.webhookEnabled || false);
+  const resolvedHierarchyRank = hierarchyRank !== undefined ? hierarchyRank : (planDoc?.hierarchyRank || (plan === 'starter' ? 1 : 2));
 
   const subQuery = {};
   if (merchantId) subQuery.merchant = merchantId;
@@ -55,9 +74,9 @@ const createSubscription = async ({
   const subscription = await Subscription.create({
     user: userId || null,
     merchant: merchantId,
-    planId: planId || null,
-    plan,
-    planName: planName || plan,
+    planId: planId || planDoc?._id || null,
+    plan: planDoc?.name || plan,
+    planName: planName || planDoc?.title || plan,
     billingCycle,
     durationDays,
     startDate,
@@ -67,8 +86,10 @@ const createSubscription = async ({
     amount: amount || price,
     paymentMethod,
     transactionId,
-    maxDevices,
-    integrationLimit,
+    maxDevices: resolvedMaxDevices,
+    integrationLimit: resolvedIntegrationLimit,
+    webhookEnabled: resolvedWebhookEnabled,
+    hierarchyRank: resolvedHierarchyRank,
   });
 
   return subscription;

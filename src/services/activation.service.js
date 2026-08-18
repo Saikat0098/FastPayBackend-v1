@@ -8,19 +8,30 @@ const generateKeyString = () => {
   return `SUB-${seg()}-${seg()}-${seg()}`;
 };
 
-const createActivationKey = async ({ merchantId, durationDays = 30, plan = 'pro' }) => {
+const createActivationKey = async ({ merchantId }) => {
+  const entitlementService = require('./entitlement.service');
+  const entitlements = await entitlementService.getMerchantEntitlements(merchantId);
+
+  if (!entitlements.isActive || entitlements.isExpired) {
+    const err = new ApiError(403, 'Your subscription is expired or inactive. Please activate or renew your subscription to generate activation keys.');
+    err.code = 'SUBSCRIPTION_EXPIRED';
+    throw err;
+  }
+
+  await entitlementService.checkDeviceLimit(merchantId);
+
   let keyString = generateKeyString();
   while (await ActivationKey.findOne({ key: keyString })) {
     keyString = generateKeyString();
   }
 
-  const expireDate = new Date();
-  expireDate.setDate(expireDate.getDate() + durationDays);
+  // Key expiration is strictly derived from the merchant's subscription expireDate
+  const expireDate = entitlements.expireDate ? new Date(entitlements.expireDate) : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
   const key = await ActivationKey.create({
     key: keyString,
     merchant: merchantId,
-    plan,
+    plan: entitlements.plan || 'pro',
     expireDate,
   });
 
@@ -107,7 +118,14 @@ const activateDeviceWithKey = async ({
     }
   }
 
-  // 5. If device was previously bound to another key, reset that old key
+  // 5. Device Limit Check for New Activations
+  const isNewDeviceForMerchant = !device || device.merchant.toString() !== keyDoc.merchant.toString() || device.status === 'INACTIVE';
+  if (isNewDeviceForMerchant) {
+    const entitlementService = require('./entitlement.service');
+    await entitlementService.checkDeviceLimit(keyDoc.merchant);
+  }
+
+  // 6. If device was previously bound to another key, reset that old key
   if (device && device.activationKey && device.activationKey.toString() !== keyDoc._id.toString()) {
     await ActivationKey.findByIdAndUpdate(device.activationKey, {
       isUsed: false,
