@@ -1,94 +1,112 @@
+const resolveProviderFromSender = (senderAddress = '') => {
+  const clean = senderAddress.trim().toLowerCase().replace(/[\s_-]+/g, '');
+  if (!clean || clean === 'unknown') return null;
+
+  // Reject standard phone numbers (e.g. 017..., +88017..., 88017...)
+  if (/^(\+?88)?01[3-9][0-9]{8}$/.test(clean)) {
+    return null;
+  }
+
+  if (clean.includes('bkash') || clean.includes('16247')) return 'bKash';
+  if (clean.includes('nagad') || clean.includes('16167')) return 'Nagad';
+  if (clean.includes('rocket') || clean.includes('16216') || clean.includes('dbbl')) return 'Rocket';
+  if (clean.includes('upay') || clean.includes('16268')) return 'Upay';
+
+  return null;
+};
+
 const parseSms = (smsBody, senderAddress = '') => {
   if (!smsBody) {
     return { provider: 'Unknown', amount: 0, transactionId: '', sender: '', isPayment: false };
   }
 
-  const text = smsBody.trim();
-  const addressUpper = (senderAddress || '').toUpperCase();
+  // Strict sender allowlisting: reject numeric senders & unknown addresses
+  const provider = resolveProviderFromSender(senderAddress);
+  if (!provider) {
+    return { provider: 'Unknown', amount: 0, transactionId: '', sender: '', isPayment: false };
+  }
+
+  // Bengali numerals normalization
+  const bengaliDigits = ['০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯'];
+  let normalizedBody = smsBody;
+  bengaliDigits.forEach((digit, i) => {
+    normalizedBody = normalizedBody.split(digit).join(i.toString());
+  });
+
+  const text = normalizedBody.trim();
 
   // 1. bKash Parser
-  if (addressUpper.includes('BKASH') || text.toLowerCase().includes('bkash')) {
-    const txMatch = text.match(/TrxID\s+([A-Z0-9]+)/i) || text.match(/TxnID\s+([A-Z0-9]+)/i);
-    const amountMatch = text.match(/(?:Tk|BDT)\s*([0-9,]+(?:\.[0-9]{1,2})?)/i);
-    const senderMatch = text.match(/from\s+([0-9+]+)/i) || text.match(/sender\s+([0-9+]+)/i);
+  if (provider === 'bKash') {
+    const txMatch = text.match(/(?:TrxID|Trx Id|TxnID|TxID|Transaction ID|আইডি)\s*:?\s*([A-Z0-9_\-]{6,35})/i);
+    const amountMatch = text.match(/(?:Tk|BDT|Tk\.|BDT\.|৳|Amount:?\s*(?:Tk|BDT|৳)?)\s*([0-9,]+(?:\.[0-9]{1,2})?)/i)
+      || text.match(/([0-9,]+(?:\.[0-9]{1,2})?)\s*(?:Tk|BDT|৳|টাকা)/i);
+    const senderMatch = text.match(/(?:from|by|হতে|থেকে)\s+([0-9+]+)/i) || text.match(/sender\s+([0-9+]+)/i);
     const refMatch = text.match(/Ref\s+([^.]+)/i);
 
     return {
       provider: 'bKash',
       transactionId: txMatch ? txMatch[1].trim() : '',
       amount: amountMatch ? parseFloat(amountMatch[1].replace(/,/g, '')) : 0,
-      sender: senderMatch ? senderMatch[1].trim() : 'bKash User',
+      sender: senderMatch ? senderMatch[1].trim() : 'bKash Customer',
       reference: refMatch ? refMatch[1].trim() : '',
-      isPayment: !!(txMatch && amountMatch)
+      isPayment: !!(txMatch && amountMatch && parseFloat(amountMatch[1].replace(/,/g, '')) > 0)
     };
   }
 
   // 2. Nagad Parser
-  if (addressUpper.includes('NAGAD') || text.toLowerCase().includes('nagad')) {
-    const txMatch = text.match(/TxnID:\s*([A-Z0-9]+)/i) || text.match(/TxnID\s*([A-Z0-9]+)/i);
-    const amountMatch = text.match(/(?:Amount|Tk)\s*:?\s*(?:Tk|BDT)?\s*([0-9,]+(?:\.[0-9]{1,2})?)/i);
-    const senderMatch = text.match(/From:\s*([0-9+]+)/i) || text.match(/From\s+([0-9+]+)/i);
+  if (provider === 'Nagad') {
+    const txMatch = text.match(/(?:TxnID|TxnId|Txn ID|TxID|TrxID|Transaction ID|আইডি)\s*:?\s*([A-Z0-9_\-]{6,35})/i);
+    const amountMatch = text.match(/(?:Tk|BDT|Tk\.|BDT\.|৳|Amount:?\s*(?:Tk|BDT|৳)?)\s*([0-9,]+(?:\.[0-9]{1,2})?)/i)
+      || text.match(/([0-9,]+(?:\.[0-9]{1,2})?)\s*(?:Tk|BDT|৳|টাকা)/i);
+    const senderMatch = text.match(/(?:From|by|হতে|থেকে)\s*:?\s*([0-9+]+)/i);
     const refMatch = text.match(/Ref:\s*([^.]+)/i);
 
     return {
       provider: 'Nagad',
       transactionId: txMatch ? txMatch[1].trim() : '',
       amount: amountMatch ? parseFloat(amountMatch[1].replace(/,/g, '')) : 0,
-      sender: senderMatch ? senderMatch[1].trim() : 'Nagad User',
+      sender: senderMatch ? senderMatch[1].trim() : 'Nagad Customer',
       reference: refMatch ? refMatch[1].trim() : '',
-      isPayment: !!(txMatch && amountMatch)
+      isPayment: !!(txMatch && amountMatch && parseFloat(amountMatch[1].replace(/,/g, '')) > 0)
     };
   }
 
   // 3. Rocket Parser
-  if (addressUpper.includes('ROCKET') || addressUpper.includes('16216') || text.toLowerCase().includes('rocket')) {
-    const txMatch = text.match(/TxnID:\s*([A-Z0-9]+)/i) || text.match(/Txn:\s*([A-Z0-9]+)/i);
-    const amountMatch = text.match(/(?:Tk|BDT)\s*([0-9,]+(?:\.[0-9]{1,2})?)/i);
-    const senderMatch = text.match(/from\s+([0-9+]+)/i);
+  if (provider === 'Rocket') {
+    const txMatch = text.match(/(?:TxnId|TxnID|TxID|TrxID|Txn\s*No|Transaction ID|আইডি)\s*:?\s*([A-Z0-9_\-]{6,35})/i);
+    const amountMatch = text.match(/(?:Tk|BDT|Tk\.|BDT\.|৳|Amount:?\s*(?:Tk|BDT|৳)?)\s*([0-9,]+(?:\.[0-9]{1,2})?)/i)
+      || text.match(/([0-9,]+(?:\.[0-9]{1,2})?)\s*(?:Tk|BDT|৳|টাকা)/i);
+    const senderMatch = text.match(/(?:from|by)\s+([0-9+]+)/i);
 
     return {
       provider: 'Rocket',
       transactionId: txMatch ? txMatch[1].trim() : '',
       amount: amountMatch ? parseFloat(amountMatch[1].replace(/,/g, '')) : 0,
-      sender: senderMatch ? senderMatch[1].trim() : 'Rocket User',
+      sender: senderMatch ? senderMatch[1].trim() : 'Rocket Customer',
       reference: '',
-      isPayment: !!(txMatch && amountMatch)
+      isPayment: !!(txMatch && amountMatch && parseFloat(amountMatch[1].replace(/,/g, '')) > 0)
     };
   }
 
   // 4. Upay Parser
-  if (addressUpper.includes('UPAY') || text.toLowerCase().includes('upay')) {
-    const txMatch = text.match(/TrxID:\s*([A-Z0-9]+)/i) || text.match(/TrxID\s*([A-Z0-9]+)/i);
-    const amountMatch = text.match(/(?:Tk|BDT)\s*([0-9,]+(?:\.[0-9]{1,2})?)/i);
-    const senderMatch = text.match(/from\s+([0-9+]+)/i);
+  if (provider === 'Upay') {
+    const txMatch = text.match(/(?:TrxID|TxnID|TxID|Transaction ID|আইডি)\s*:?\s*([A-Z0-9_\-]{6,35})/i);
+    const amountMatch = text.match(/(?:Amount:?\s*(?:Tk|BDT|৳)?|Tk|BDT|Tk\.|BDT\.|৳)\s*([0-9,]+(?:\.[0-9]{1,2})?)/i)
+      || text.match(/([0-9,]+(?:\.[0-9]{1,2})?)\s*(?:Tk|BDT|৳|টাকা)/i);
+    const senderMatch = text.match(/(?:from|by)\s+([0-9+]+)/i);
 
     return {
       provider: 'Upay',
       transactionId: txMatch ? txMatch[1].trim() : '',
       amount: amountMatch ? parseFloat(amountMatch[1].replace(/,/g, '')) : 0,
-      sender: senderMatch ? senderMatch[1].trim() : 'Upay User',
+      sender: senderMatch ? senderMatch[1].trim() : 'Upay Customer',
       reference: '',
-      isPayment: !!(txMatch && amountMatch)
-    };
-  }
-
-  // 5. Generic Bank / Payment SMS Parser
-  const genericTx = text.match(/(?:TxnID|TrxID|Ref|Ref No|CR\/|TRN)\s*:?\s*([A-Z0-9]+)/i);
-  const genericAmount = text.match(/(?:Tk|BDT|USD|\$)\s*([0-9,]+(?:\.[0-9]{1,2})?)/i) || text.match(/credited with\s*([0-9,]+(?:\.[0-9]{1,2})?)/i);
-
-  if (genericTx && genericAmount) {
-    return {
-      provider: addressUpper || 'Bank Transfer',
-      transactionId: genericTx[1].trim(),
-      amount: parseFloat(genericAmount[1].replace(/,/g, '')),
-      sender: 'Bank Customer',
-      reference: '',
-      isPayment: true
+      isPayment: !!(txMatch && amountMatch && parseFloat(amountMatch[1].replace(/,/g, '')) > 0)
     };
   }
 
   return {
-    provider: addressUpper || 'Unknown',
+    provider: 'Unknown',
     transactionId: '',
     amount: 0,
     sender: 'Unknown',

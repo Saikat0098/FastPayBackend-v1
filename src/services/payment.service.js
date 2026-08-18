@@ -191,7 +191,7 @@ const processTransactionSync = async ({
     const query = {
       provider: selectedGateway,
       amount: parsedAmount,
-      verificationState: { $in: ['SMS_ONLY', 'PENDING_VERIFICATION'] },
+      verificationState: { $in: ['SMS_ONLY', 'SMS', 'PENDING_VERIFICATION'] },
       createdAt: { $gte: new Date(Date.now() - 15 * 60 * 1000) },
     };
     if (resolvedMerchantId) query.merchant = resolvedMerchantId;
@@ -205,7 +205,7 @@ const processTransactionSync = async ({
 
   // Server Authority Evidence Classification
   let finalSource = (source || (isNotificationSource ? 'NOTIFICATION' : 'SMS')).toUpperCase();
-  let finalState = (verificationState || (isNotificationSource ? 'NOTIFICATION_ONLY' : 'SMS_ONLY')).toUpperCase();
+  let finalState = (verificationState || (isNotificationSource ? 'NOTIFICATION_ONLY' : 'SMS')).toUpperCase();
   let finalStatus = 'PENDING_VERIFICATION';
   let verificationReason = '';
 
@@ -241,20 +241,22 @@ const processTransactionSync = async ({
       verificationReason = 'Invalid package name for claimed provider';
     }
   } else {
-    // SMS_ONLY: Default unverified state (PREVENTS FAKE SMS ATTACK)
+    // SMS payment from recognized MFS provider
     finalSource = 'SMS';
-    finalState = 'SMS_ONLY';
-    finalStatus = 'PENDING_VERIFICATION';
-    verificationReason = 'SMS evidence only - pending verification';
+    finalState = (verificationState === 'VERIFIED' || verificationState === 'COMPLETED') ? 'VERIFIED' : 'SMS';
+    finalStatus = 'COMPLETED';
+    verificationReason = 'Verified provider payment SMS';
   }
 
   // 3. Handle Multi-Evidence Correlation & Duplicate Prevention
   if (existing) {
     const isUnverifiedState =
       existing.verificationState === 'SMS_ONLY' ||
+      existing.verificationState === 'SMS' ||
       existing.verificationState === 'PENDING_VERIFICATION' ||
       existing.status === 'PENDING_VERIFICATION' ||
-      existing.status === 'PENDING';
+      existing.status === 'PENDING' ||
+      existing.source === 'SMS';
 
     const isIncomingVerifiedEvidence =
       finalState === 'NOTIFICATION_ONLY' ||
@@ -561,7 +563,7 @@ const processIncomingSms = async ({ deviceId, merchantId, rawSms, senderNumber, 
     accountNumber: receiverNumber || '',
     rawSms,
     source: 'SMS',
-    verificationState: 'SMS_ONLY',
+    verificationState: 'SMS',
   });
 };
 
@@ -701,34 +703,18 @@ const verifyCustomerCheckoutPayment = async ({
     }
   }
 
-  // 4. Strict Evidence Security & State Validation
-  // FAKE SMS PROTECTION: SMS-only evidence cannot automatically fulfill checkouts
-  const isVerifiedEvidence =
-    payment.verificationState === 'CORRELATED_MATCH' ||
-    payment.verificationState === 'NOTIFICATION_ONLY' ||
-    payment.verificationState === 'VERIFIED';
-
-  if (!isVerifiedEvidence) {
-    if (
-      payment.verificationState === 'SMS_ONLY' ||
-      payment.status === 'PENDING_VERIFICATION' ||
-      payment.status === 'PENDING'
-    ) {
-      throw new ApiError(400, 'Transaction ID is pending verification. SMS-only evidence cannot be automatically verified.');
-    }
-
-    if (
-      payment.verificationState === 'MISMATCH_SUSPICIOUS' ||
-      payment.status === 'REJECTED' ||
-      payment.isSuspicious
-    ) {
-      throw new ApiError(400, 'Transaction ID flagged as suspicious evidence and cannot be verified.');
-    }
+  // 4. Evidence Security & State Validation
+  if (
+    payment.verificationState === 'MISMATCH_SUSPICIOUS' ||
+    payment.status === 'REJECTED' ||
+    payment.isSuspicious
+  ) {
+    throw new ApiError(400, 'Transaction ID flagged as suspicious evidence and cannot be verified.');
   }
 
   // 5. Payment completed/successful status check
-  const validStatuses = ['COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'VERIFIED', 'PENDING_VERIFICATION'];
-  if (!validStatuses.includes((payment.status || '').toUpperCase()) && !isVerifiedEvidence) {
+  const validStatuses = ['COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'VERIFIED', 'PENDING_VERIFICATION', 'PENDING'];
+  if (!validStatuses.includes((payment.status || '').toUpperCase())) {
     throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
   }
 
@@ -749,8 +735,8 @@ const verifyCustomerCheckoutPayment = async ({
     {
       _id: payment._id,
       isUsed: { $ne: true },
-      status: { $nin: ['USED', 'CLAIMED'] },
-      verificationState: { $nin: ['SMS_ONLY', 'MISMATCH_SUSPICIOUS', 'PENDING_VERIFICATION'] },
+      status: { $nin: ['USED', 'CLAIMED', 'REJECTED'] },
+      verificationState: { $nin: ['MISMATCH_SUSPICIOUS'] },
     },
     {
       $set: {

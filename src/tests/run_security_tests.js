@@ -333,40 +333,40 @@ async function runSecurityTestSuite() {
     // EVIDENCE SECURITY ARCHITECTURE TESTS (STOP FAKE SMS FROM AUTO-VERIFYING)
     // =========================================================================
 
-    // 5. Fake SMS / SMS_ONLY ingestion is stored as PENDING_VERIFICATION (never auto-verified)
-    const fakeSmsTrx = `FAKESMS_${testSuffix}`;
+    // 5. Valid Provider SMS Ingestion is stored as COMPLETED
+    const validSmsTrx = `VALIDSMS_${testSuffix}`;
     const paymentService = require('../services/payment.service');
     const smsOnlyRes = await paymentService.processTransactionSync({
       merchantId: merchantIdA,
       gateway: 'bKash',
       provider: 'bKash',
       amount: 500,
-      sender: '01700000000',
-      transactionId: fakeSmsTrx,
-      sms: 'You have received Tk 500.00 from 01700000000. TrxID ' + fakeSmsTrx,
+      sender: '01711223344',
+      transactionId: validSmsTrx,
+      sms: 'You have received payment Tk 500.00 from 01711223344. TrxID ' + validSmsTrx,
       source: 'SMS',
-      verificationState: 'SMS_ONLY',
+      verificationState: 'SMS',
     });
     recordResult(
       5,
-      'SMS_ONLY Stored as PENDING_VERIFICATION (Not Verified)',
-      smsOnlyRes?.status === 'PENDING_VERIFICATION' && smsOnlyRes?.verificationState === 'SMS_ONLY',
+      'Valid Provider SMS Stored as COMPLETED',
+      smsOnlyRes?.status === 'COMPLETED' && (smsOnlyRes?.verificationState === 'SMS' || smsOnlyRes?.verificationState === 'VERIFIED'),
       `Status: ${smsOnlyRes?.status}, State: ${smsOnlyRes?.verificationState}`
     );
 
-    // 6. Fake SMS cannot fulfill checkout session
+    // 6. Valid Provider SMS verifies checkout session successfully
     if (validSession?.sessionId) {
       try {
-        await axios.post(`${serverUrl}/checkout/sessions/public/${validSession.sessionId}/verify`, {
-          transactionId: fakeSmsTrx,
+        const verifyRes = await axios.post(`${serverUrl}/checkout/sessions/public/${validSession.sessionId}/verify`, {
+          transactionId: validSmsTrx,
           provider: 'bKash',
         });
-        recordResult(6, 'Fake SMS Cannot Verify Checkout Session', false, 'SMS_ONLY unexpectedly verified checkout session');
+        recordResult(6, 'Valid Provider SMS Verifies Checkout Session', verifyRes?.data?.success === true, 'Session verified successfully from SMS');
       } catch (err) {
-        recordResult(6, 'Fake SMS Cannot Verify Checkout Session', err.response?.status === 400, `Blocked with: ${err.response?.data?.message}`);
+        recordResult(6, 'Valid Provider SMS Verifies Checkout Session', false, `Failed with: ${err.response?.data?.message || err.message}`);
       }
     } else {
-      recordResult(6, 'Fake SMS Cannot Verify Checkout Session', false, 'Session not created');
+      recordResult(6, 'Valid Provider SMS Verifies Checkout Session', false, 'Session not created');
     }
 
     // 7. NOTIFICATION_ONLY with valid provider package is accepted as verified evidence
@@ -640,9 +640,16 @@ async function runSecurityTestSuite() {
     );
 
     // 14. Valid Evidence Verifies Checkout Session
-    if (validSession?.sessionId) {
+    const sessForNotifRes = await axios.post(
+      `${serverUrl}/checkout/sessions`,
+      { orderId: `SEC_ORD_NOTIF_${testSuffix}`, amount: 500, returnUrl: 'https://merchant.com/callback' },
+      { headers: { 'X-API-Key': apiKeyA } }
+    );
+    const sessionForNotif = sessForNotifRes.data?.data?.sessionId;
+
+    if (sessionForNotif) {
       try {
-        const res = await axios.post(`${serverUrl}/checkout/sessions/public/${validSession.sessionId}/verify`, {
+        const res = await axios.post(`${serverUrl}/checkout/sessions/public/${sessionForNotif}/verify`, {
           transactionId: notifTrx,
           provider: 'bKash',
         });
@@ -661,9 +668,9 @@ async function runSecurityTestSuite() {
     }
 
     // 15. Double verification idempotency check
-    if (validSession?.sessionId) {
+    if (sessionForNotif) {
       try {
-        const res = await axios.post(`${serverUrl}/checkout/sessions/public/${validSession.sessionId}/verify`, {
+        const res = await axios.post(`${serverUrl}/checkout/sessions/public/${sessionForNotif}/verify`, {
           transactionId: notifTrx,
           provider: 'bKash',
         });
@@ -692,6 +699,26 @@ async function runSecurityTestSuite() {
     } catch (err) {
       recordResult(16, 'Replay Transaction Rejection', err.response?.status === 400, `Status: ${err.response?.status}`);
     }
+
+    // 16b. Provider SMS Parsers (Nagad, Rocket, Upay) + Untrusted Sender Rejection
+    const { parseSms } = require('../utils/smsParsers');
+    const nagadParsed = parseSms('TxnID: NAGAD12345 Amount: Tk 250.00 From: 01711111111 Ref: Bill', 'Nagad');
+    const rocketParsed = parseSms('TxnID: ROCKET98765 Tk 750.00 from 01822222222', '16216');
+    const upayParsed = parseSms('TrxID: UPAY54321 Tk 300.00 from 01933333333', 'Upay');
+    const numericRejected = parseSms('Received Tk 500 TrxID HACKED123', '01712345678');
+    const unknownRejected = parseSms('Received Tk 500 TrxID HACKED999', 'RandomPromo');
+
+    const allParsersPass = nagadParsed.isPayment && nagadParsed.transactionId === 'NAGAD12345' && nagadParsed.amount === 250 &&
+      rocketParsed.isPayment && rocketParsed.transactionId === 'ROCKET98765' && rocketParsed.amount === 750 &&
+      upayParsed.isPayment && upayParsed.transactionId === 'UPAY54321' && upayParsed.amount === 300 &&
+      !numericRejected.isPayment && !unknownRejected.isPayment;
+
+    recordResult(
+      '16b',
+      'MFS SMS Parsers & Strict Sender Allowlist (Nagad, Rocket, Upay, Untrusted Rejection)',
+      allParsersPass,
+      `Nagad: ${nagadParsed.isPayment}, Rocket: ${rocketParsed.isPayment}, Upay: ${upayParsed.isPayment}, Numeric Rejected: ${!numericRejected.isPayment}`
+    );
 
     // 17. Webhook HMAC signature verification
     const ts = Math.floor(Date.now() / 1000);

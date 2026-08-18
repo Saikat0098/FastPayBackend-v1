@@ -97,8 +97,8 @@ const paymentSchema = new mongoose.Schema(
     },
     verificationState: {
       type: String,
-      enum: ['NOTIFICATION_ONLY', 'SMS_ONLY', 'CORRELATED_MATCH', 'MISMATCH_SUSPICIOUS', 'PENDING_VERIFICATION', 'UNVERIFIED', 'VERIFIED'],
-      default: 'SMS_ONLY',
+      enum: ['NOTIFICATION_ONLY', 'SMS_ONLY', 'SMS', 'CORRELATED_MATCH', 'MISMATCH_SUSPICIOUS', 'PENDING_VERIFICATION', 'UNVERIFIED', 'VERIFIED'],
+      default: 'SMS',
       index: true,
     },
     packageName: {
