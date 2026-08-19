@@ -92,14 +92,26 @@ const getMerchantEntitlements = async (merchantId) => {
   const webhookEnabled = isActive ? Boolean(planDoc?.webhookEnabled ?? rawSub?.webhookEnabled ?? false) : false;
   const hierarchyRank = planDoc?.hierarchyRank || rawSub?.hierarchyRank || (rawSub?.plan === 'starter' ? 1 : 2);
 
-  const daysRemaining = isActive && rawSub?.expireDate
+  const isTestPlan = Boolean(rawSub?.testOnly || planDoc?.testOnly || planDoc?.isTestOnly || rawSub?.plan === 'test');
+  const durationUnit = planDoc?.durationUnit || rawSub?.durationUnit || (rawSub?.billingCycle === 'test' ? 'minutes' : (rawSub?.billingCycle === 'yearly' ? 'years' : 'days'));
+  const durationValue = planDoc?.durationValue || rawSub?.durationValue || (durationUnit === 'minutes' ? 5 : (durationUnit === 'years' ? 1 : 30));
+
+  const secondsRemaining = isActive && rawSub?.expireDate
+    ? Math.max(0, Math.floor((new Date(rawSub.expireDate).getTime() - now.getTime()) / 1000))
+    : 0;
+
+  const minutesRemaining = isActive && rawSub?.expireDate
+    ? Math.max(0, Math.ceil((new Date(rawSub.expireDate).getTime() - now.getTime()) / (1000 * 60)))
+    : 0;
+
+  const daysRemaining = isActive && rawSub?.expireDate && durationUnit !== 'minutes'
     ? Math.max(0, Math.ceil((new Date(rawSub.expireDate).getTime() - now.getTime()) / (1000 * 60 * 60 * 24)))
     : 0;
 
-  // Compute available upgrade plans (only higher tier plans)
+  // Compute available upgrade plans (only higher tier plans, excluding test plan from production upgrades)
   const availableUpgrades = isActive
     ? allPlans
-        .filter((p) => (p.hierarchyRank || 1) > hierarchyRank)
+        .filter((p) => !p.testOnly && !p.isTestOnly && p.name !== 'test' && (p.hierarchyRank || 1) > hierarchyRank)
         .map((p) => {
           const currentPlanPrice = rawSub.billingCycle === 'yearly'
             ? (planDoc?.priceYearly || rawSub.price || 0)
@@ -133,12 +145,17 @@ const getMerchantEntitlements = async (merchantId) => {
     hasSubscription,
     isActive,
     isExpired,
+    isTestPlan,
     status: isActive ? 'active' : isExpired ? 'expired' : 'none',
     plan: rawSub ? rawSub.plan : 'none',
     planName: planDoc ? planDoc.title : rawSub?.planName || (isActive ? 'Active Plan' : 'No Active Plan'),
     billingCycle: rawSub?.billingCycle || 'monthly',
+    durationUnit,
+    durationValue,
     startDate: rawSub?.startDate || null,
     expireDate: rawSub?.expireDate || null,
+    secondsRemaining,
+    minutesRemaining,
     daysRemaining,
     hierarchyRank,
     limits: {
@@ -280,10 +297,17 @@ const calculateUpgradeQuote = async (merchantId, targetPlanIdOrName) => {
     throw err;
   }
 
+  const currentPlanDoc = await Plan.findOne({
+    $or: [
+      { name: (entitlements.plan || '').toLowerCase() },
+      ...(entitlements.subscription?.planId ? [{ _id: entitlements.subscription.planId }] : []),
+    ],
+  });
+
   const isYearly = entitlements.billingCycle === 'yearly';
   const currentPlanPrice = isYearly
-    ? (entitlements.subscription?.price || entitlements.subscription?.amount || 0)
-    : (entitlements.subscription?.price || entitlements.subscription?.amount || 0);
+    ? (currentPlanDoc?.priceYearly || entitlements.subscription?.price || 0)
+    : (currentPlanDoc?.priceMonthly || currentPlanDoc?.priceBDT || entitlements.subscription?.price || 0);
 
   const targetPlanPrice = isYearly
     ? targetPlan.priceYearly

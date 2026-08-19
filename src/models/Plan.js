@@ -67,9 +67,46 @@ const planSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    badge: {
+      type: String,
+      default: '',
+    },
+    icon: {
+      type: String,
+      default: '',
+    },
+    currency: {
+      type: String,
+      default: 'BDT',
+    },
+    ctaText: {
+      type: String,
+      default: '',
+    },
     isActive: {
       type: Boolean,
       default: true,
+    },
+    durationUnit: {
+      type: String,
+      enum: ['minutes', 'hours', 'days', 'months', 'years'],
+      default: 'days',
+    },
+    durationValue: {
+      type: Number,
+      default: 30,
+    },
+    isFree: {
+      type: Boolean,
+      default: false,
+    },
+    testOnly: {
+      type: Boolean,
+      default: false,
+    },
+    isTestOnly: {
+      type: Boolean,
+      default: false,
     },
     displayOrder: {
       type: Number,

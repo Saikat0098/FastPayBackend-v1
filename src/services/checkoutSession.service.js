@@ -65,6 +65,20 @@ const createCheckoutSession = async ({
     throw new ApiError(404, 'Active merchant not found');
   }
 
+  const entitlementService = require('./entitlement.service');
+  const entitlements = await entitlementService.getMerchantEntitlements(merchantId);
+  if (!entitlements.isActive || entitlements.isExpired) {
+    const err = new ApiError(
+      403,
+      'Your subscription has expired. Please renew your subscription to create checkout sessions.',
+      [],
+      '',
+      { code: 'SUBSCRIPTION_EXPIRED' }
+    );
+    err.code = 'SUBSCRIPTION_EXPIRED';
+    throw err;
+  }
+
   // Cryptographically secure random opaque session ID
   const randomHex = crypto.randomBytes(24).toString('hex');
   const sessionId = `cs_live_${merchant._id.toString().slice(-6)}_${randomHex}`;
@@ -175,6 +189,23 @@ const verifySessionPayment = async ({
   }
 
   const mId = merchantId || (session ? (session.merchant._id || session.merchant) : null);
+
+  if (mId) {
+    const entitlementService = require('./entitlement.service');
+    const entitlements = await entitlementService.getMerchantEntitlements(mId);
+    if (!entitlements.isActive || entitlements.isExpired) {
+      const err = new ApiError(
+        403,
+        'Your subscription has expired. Please renew your subscription to perform payment verification.',
+        [],
+        '',
+        { code: 'SUBSCRIPTION_EXPIRED' }
+      );
+      err.code = 'SUBSCRIPTION_EXPIRED';
+      throw err;
+    }
+  }
+
   const cleanTrx = (trxId || '').trim();
 
   if (!cleanTrx) {

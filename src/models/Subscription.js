@@ -27,12 +27,29 @@ const subscriptionSchema = new mongoose.Schema(
     },
     billingCycle: {
       type: String,
-      enum: ['monthly', 'yearly', 'lifetime'],
+      enum: ['monthly', 'yearly', 'lifetime', 'test'],
       default: 'monthly',
     },
     durationDays: {
       type: Number,
       default: 30,
+    },
+    durationUnit: {
+      type: String,
+      enum: ['minutes', 'hours', 'days', 'months', 'years'],
+      default: 'days',
+    },
+    durationValue: {
+      type: Number,
+      default: 30,
+    },
+    isFree: {
+      type: Boolean,
+      default: false,
+    },
+    testOnly: {
+      type: Boolean,
+      default: false,
     },
     startDate: {
       type: Date,

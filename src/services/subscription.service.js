@@ -9,10 +9,20 @@ const MerchantApplication = require('../models/MerchantApplication');
 const ApiError = require('../utils/apiError');
 const { v4: uuidv4 } = require('uuid');
 
-const getPublicPlans = async () => {
-  let plans = await Plan.find({ isActive: true }).sort({ displayOrder: 1, priceMonthly: 1 });
+const getPublicPlans = async (options = {}) => {
+  const includeTest = options.includeTest === true || options.includeTest === 'true' || process.env.ENABLE_TEST_PLAN === 'true';
+  const filter = { isActive: true };
+  if (!includeTest) {
+    filter.$and = [
+      { testOnly: { $ne: true } },
+      { isTestOnly: { $ne: true } },
+      { name: { $ne: 'test' } },
+    ];
+  }
 
-  if (plans.length === 0) {
+  let plans = await Plan.find(filter).sort({ displayOrder: 1, priceMonthly: 1 });
+
+  if (plans.length === 0 && !includeTest) {
     const { OFFICIAL_PLANS } = require('../scripts/seed_plans');
     plans = await Plan.insertMany(OFFICIAL_PLANS);
   }
@@ -28,6 +38,10 @@ const createSubscription = async ({
   planName = '',
   billingCycle = 'monthly',
   durationDays = 30,
+  durationUnit,
+  durationValue,
+  testOnly,
+  isFree,
   price = 0,
   amount = 0,
   paymentMethod = 'bKash',
@@ -37,16 +51,7 @@ const createSubscription = async ({
   webhookEnabled,
   hierarchyRank,
 }) => {
-  const startDate = new Date();
-  const expireDate = new Date();
-
-  if (billingCycle === 'lifetime') {
-    expireDate.setFullYear(expireDate.getFullYear() + 100);
-  } else {
-    expireDate.setDate(expireDate.getDate() + durationDays);
-  }
-
-  // Resolve plan document if maxDevices or webhookEnabled not passed directly
+  // Resolve plan document
   let planDoc = null;
   if (planId || plan) {
     const isMongoId = planId && mongoose.Types.ObjectId.isValid(planId);
@@ -56,6 +61,33 @@ const createSubscription = async ({
         { name: (plan || '').toLowerCase() },
       ],
     });
+  }
+
+  const isTest = Boolean(testOnly || planDoc?.testOnly || planDoc?.isTestOnly || plan === 'test' || planDoc?.name === 'test');
+  const effectiveIsFree = Boolean(isFree || (isTest && (planDoc?.isFree || planDoc?.priceMonthly === 0)));
+
+  const effectiveUnit = durationUnit || planDoc?.durationUnit || (billingCycle === 'yearly' ? 'years' : 'days');
+  const effectiveValue = durationValue !== undefined
+    ? Number(durationValue)
+    : (planDoc?.durationValue !== undefined
+        ? Number(planDoc.durationValue)
+        : (effectiveUnit === 'minutes' ? 5 : (effectiveUnit === 'hours' ? 1 : (billingCycle === 'yearly' ? 365 : durationDays || 30))));
+
+  const startDate = new Date();
+  const expireDate = new Date(startDate.getTime());
+
+  if (billingCycle === 'lifetime') {
+    expireDate.setFullYear(expireDate.getFullYear() + 100);
+  } else if (effectiveUnit === 'minutes') {
+    expireDate.setTime(expireDate.getTime() + effectiveValue * 60 * 1000);
+  } else if (effectiveUnit === 'hours') {
+    expireDate.setTime(expireDate.getTime() + effectiveValue * 60 * 60 * 1000);
+  } else if (effectiveUnit === 'days') {
+    expireDate.setTime(expireDate.getTime() + effectiveValue * 24 * 60 * 60 * 1000);
+  } else if (effectiveUnit === 'years' || billingCycle === 'yearly') {
+    expireDate.setFullYear(expireDate.getFullYear() + (effectiveUnit === 'years' ? effectiveValue : 1));
+  } else {
+    expireDate.setDate(expireDate.getDate() + effectiveValue);
   }
 
   const resolvedMaxDevices = maxDevices !== undefined ? maxDevices : (planDoc?.maxDevices || 1);
@@ -77,8 +109,12 @@ const createSubscription = async ({
     planId: planId || planDoc?._id || null,
     plan: planDoc?.name || plan,
     planName: planName || planDoc?.title || plan,
-    billingCycle,
-    durationDays,
+    billingCycle: isTest ? 'test' : billingCycle,
+    durationDays: effectiveUnit === 'days' ? effectiveValue : (effectiveUnit === 'hours' ? Math.ceil(effectiveValue / 24) : (effectiveUnit === 'minutes' ? 0 : 365)),
+    durationUnit: effectiveUnit,
+    durationValue: effectiveValue,
+    testOnly: isTest,
+    isFree: effectiveIsFree,
     startDate,
     expireDate,
     status: 'active',
@@ -157,11 +193,7 @@ const submitApplication = async ({
   if (!companyName || !companyName.trim()) {
     throw new ApiError(400, 'Please enter your Company / Business name.');
   }
-  if (!transactionId || !transactionId.trim()) {
-    throw new ApiError(400, 'Please enter your Payment Transaction ID.');
-  }
 
-  const cleanTrxId = transactionId.trim().toUpperCase();
   const selectedCycle = billingCycle === 'yearly' ? 'yearly' : 'monthly';
 
   // 1. Fetch Plan from MongoDB
@@ -183,8 +215,17 @@ const submitApplication = async ({
     throw err;
   }
 
+  const isTestPlan = Boolean(targetPlan.name === 'test' || targetPlan.testOnly || targetPlan.isTestOnly);
+  const isFreeTest = isTestPlan && Boolean(targetPlan.isFree || targetPlan.priceMonthly === 0);
+
+  const cleanTrxId = (transactionId || '').trim().toUpperCase();
+
+  if (!isFreeTest && !cleanTrxId) {
+    throw new ApiError(400, 'Please enter your Payment Transaction ID.');
+  }
+
   // 2. Validate Payment Method Active Status
-  if (paymentMethod) {
+  if (paymentMethod && !isFreeTest) {
     const pmDoc = await PaymentMethod.findOne({
       $or: [
         { code: paymentMethod.toString().toLowerCase() },
@@ -198,61 +239,75 @@ const submitApplication = async ({
     }
   }
 
-  // 3. Server-side expected amount calculation
-  const expectedAmount = selectedCycle === 'yearly'
-    ? targetPlan.priceYearly
-    : (targetPlan.priceMonthly || targetPlan.priceBDT);
+  const expectedAmount = isFreeTest
+    ? 0
+    : (selectedCycle === 'yearly'
+        ? targetPlan.priceYearly
+        : (targetPlan.priceMonthly || targetPlan.priceBDT));
 
-  // 4. Duplicate Transaction ID Protection
-  const existingSub = await Subscription.findOne({
-    transactionId: cleanTrxId,
-    status: { $in: ['active', 'pending'] },
-  });
-  const existingUsedPayment = await Payment.findOne({
-    transactionId: cleanTrxId,
-    isUsedForSubscription: true,
-  });
-  const existingApp = await MerchantApplication.findOne({
-    transactionId: cleanTrxId,
-    status: { $in: ['APPROVED', 'PENDING'] },
-  });
+  let finalTrxId = cleanTrxId;
+  let paymentRecord = null;
 
-  if (existingSub || existingUsedPayment || existingApp) {
-    const err = new ApiError(400, 'This transaction has already been used for another subscription.');
-    err.code = 'TRANSACTION_ALREADY_USED';
-    throw err;
-  }
+  if (isFreeTest) {
+    // FREE TEST PLAN ONLY: Skip payment verification and duplicate checks
+    finalTrxId = cleanTrxId || `TRX_FREE_TEST_${Date.now()}_${uuidv4().substring(0, 8).toUpperCase()}`;
+  } else {
+    // Normal paid plan (or paid test plan): Requires Transaction ID & Verification
+    if (!cleanTrxId) {
+      throw new ApiError(400, 'Transaction ID is required for payment verification');
+    }
 
-  // 5. Verify against existing Payment Collection (Source of Truth)
-  const paymentRecord = await Payment.findOne({ transactionId: cleanTrxId });
-  if (!paymentRecord) {
-    const err = new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment. Please check your Transaction ID and try again.');
-    err.code = 'INVALID_TRANSACTION';
-    throw err;
-  }
+    // 4. Duplicate Transaction ID Protection
+    const existingSub = await Subscription.findOne({
+      transactionId: cleanTrxId,
+      status: { $in: ['active', 'pending'] },
+    });
+    const existingUsedPayment = await Payment.findOne({
+      transactionId: cleanTrxId,
+      isUsedForSubscription: true,
+    });
+    const existingApp = await MerchantApplication.findOne({
+      transactionId: cleanTrxId,
+      status: { $in: ['APPROVED', 'PENDING'] },
+    });
 
-  // 6. Check Payment Provider Match
-  const paymentProviderStr = (paymentRecord.provider || paymentRecord.gateway || '').toLowerCase();
-  const selectedProviderStr = (paymentMethod || '').toLowerCase();
-  if (selectedProviderStr && !paymentProviderStr.includes(selectedProviderStr) && !selectedProviderStr.includes(paymentProviderStr)) {
-    const err = new ApiError(400, 'This Transaction ID does not belong to the selected payment method. Please select the correct payment method and try again.');
-    err.code = 'PAYMENT_PROVIDER_MISMATCH';
-    throw err;
-  }
+    if (existingSub || existingUsedPayment || existingApp) {
+      const err = new ApiError(400, 'This transaction has already been used for another subscription.');
+      err.code = 'TRANSACTION_ALREADY_USED';
+      throw err;
+    }
 
-  // 7. Check Payment Completion Status
-  const isCompleted = ['COMPLETED', 'VERIFIED', 'SUCCESS', 'SUCCESSFUL', 'PAID'].includes((paymentRecord.status || '').toUpperCase());
-  if (!isCompleted) {
-    const err = new ApiError(400, 'Payment has not been completed yet. Please wait or check your transaction.');
-    err.code = 'PAYMENT_NOT_COMPLETED';
-    throw err;
-  }
+    // 5. Verify against existing Payment Collection (Source of Truth)
+    paymentRecord = await Payment.findOne({ transactionId: cleanTrxId });
+    if (!paymentRecord) {
+      const err = new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment. Please check your Transaction ID and try again.');
+      err.code = 'INVALID_TRANSACTION';
+      throw err;
+    }
 
-  // 8. Check Payment Amount
-  if ((paymentRecord.amount || 0) < expectedAmount) {
-    const err = new ApiError(400, 'The payment amount does not match the selected plan. Please make the correct payment and try again.');
-    err.code = 'PAYMENT_AMOUNT_MISMATCH';
-    throw err;
+    // 6. Check Payment Provider Match
+    const paymentProviderStr = (paymentRecord.provider || paymentRecord.gateway || '').toLowerCase();
+    const selectedProviderStr = (paymentMethod || '').toLowerCase();
+    if (selectedProviderStr && !paymentProviderStr.includes(selectedProviderStr) && !selectedProviderStr.includes(paymentProviderStr)) {
+      const err = new ApiError(400, 'This Transaction ID does not belong to the selected payment method. Please select the correct payment method and try again.');
+      err.code = 'PAYMENT_PROVIDER_MISMATCH';
+      throw err;
+    }
+
+    // 7. Check Payment Completion Status
+    const isCompleted = ['COMPLETED', 'VERIFIED', 'SUCCESS', 'SUCCESSFUL', 'PAID'].includes((paymentRecord.status || '').toUpperCase());
+    if (!isCompleted) {
+      const err = new ApiError(400, 'Payment has not been completed yet. Please wait or check your transaction.');
+      err.code = 'PAYMENT_NOT_COMPLETED';
+      throw err;
+    }
+
+    // 8. Check Payment Amount
+    if ((paymentRecord.amount || 0) < expectedAmount) {
+      const err = new ApiError(400, 'The payment amount does not match the selected plan. Please make the correct payment and try again.');
+      err.code = 'PAYMENT_AMOUNT_MISMATCH';
+      throw err;
+    }
   }
 
   // ALL VERIFICATIONS PASSED -> Activate Subscription Immediately
@@ -295,7 +350,10 @@ const submitApplication = async ({
     merchant: merchant._id,
   });
 
-  const durationDays = selectedCycle === 'yearly' ? 365 : 30;
+  const effectiveUnit = targetPlan.durationUnit || (selectedCycle === 'yearly' ? 'years' : 'days');
+  const effectiveValue = targetPlan.durationValue !== undefined
+    ? Number(targetPlan.durationValue)
+    : (isTestPlan ? 5 : (selectedCycle === 'yearly' ? 365 : 30));
 
   const subscription = await createSubscription({
     userId: user._id,
@@ -303,31 +361,38 @@ const submitApplication = async ({
     planId: targetPlan._id,
     plan: targetPlan.name,
     planName: targetPlan.title,
-    billingCycle: selectedCycle,
-    durationDays,
+    billingCycle: isTestPlan ? 'test' : selectedCycle,
+    durationUnit: effectiveUnit,
+    durationValue: effectiveValue,
+    testOnly: isTestPlan,
+    isFree: isFreeTest,
     price: expectedAmount,
     amount: expectedAmount,
-    paymentMethod: paymentMethod || paymentRecord.provider || 'bKash',
-    transactionId: cleanTrxId,
+    paymentMethod: paymentMethod || paymentRecord?.provider || (isFreeTest ? 'FREE' : 'bKash'),
+    transactionId: finalTrxId,
     maxDevices: targetPlan.maxDevices || 1,
     integrationLimit: targetPlan.integrationLimit || 1,
+    webhookEnabled: targetPlan.webhookEnabled,
+    hierarchyRank: targetPlan.hierarchyRank,
   });
 
-  paymentRecord.status = 'VERIFIED';
-  paymentRecord.paymentStatus = 'COMPLETED';
-  paymentRecord.isUsedForSubscription = true;
-  paymentRecord.usedBySubscription = subscription._id;
-  await paymentRecord.save().catch(() => {});
+  if (paymentRecord) {
+    paymentRecord.status = 'VERIFIED';
+    paymentRecord.paymentStatus = 'COMPLETED';
+    paymentRecord.isUsedForSubscription = true;
+    paymentRecord.usedBySubscription = subscription._id;
+    await paymentRecord.save().catch(() => {});
+  }
 
   const application = await MerchantApplication.create({
     user: userId,
     plan: targetPlan.name,
     planName: targetPlan.title,
     companyName: companyName.trim(),
-    billingCycle: selectedCycle,
-    paymentMethod: paymentMethod || paymentRecord.provider || 'bKash',
-    paymentReceiver: paymentReceiver || paymentRecord.accountNumber || '',
-    transactionId: cleanTrxId,
+    billingCycle: isTestPlan ? 'test' : selectedCycle,
+    paymentMethod: paymentMethod || paymentRecord?.provider || (isFreeTest ? 'FREE' : 'bKash'),
+    paymentReceiver: paymentReceiver || paymentRecord?.accountNumber || '',
+    transactionId: finalTrxId,
     paymentNote: note || '',
     amount: expectedAmount,
     status: 'APPROVED',
@@ -335,13 +400,15 @@ const submitApplication = async ({
     reviewedAt: new Date(),
   });
 
-  const { emitPaymentUpdated } = require('../socket/socketManager');
-  emitPaymentUpdated(merchant._id.toString(), {
-    _id: paymentRecord._id,
-    transactionId: cleanTrxId,
-    status: 'VERIFIED',
-    subscriptionActive: true,
-  });
+  if (paymentRecord) {
+    const { emitPaymentUpdated } = require('../socket/socketManager');
+    emitPaymentUpdated(merchant._id.toString(), {
+      _id: paymentRecord._id,
+      transactionId: finalTrxId,
+      status: 'VERIFIED',
+      subscriptionActive: true,
+    });
+  }
 
   return {
     autoVerified: true,

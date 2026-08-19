@@ -15,6 +15,9 @@ router.get('/my', subscriptionController.getMySubscription);
 router.get('/my-subscription', subscriptionController.getMySubscription);
 router.get('/entitlements', subscriptionController.getEntitlements);
 router.get('/upgrade-quote', subscriptionController.getUpgradeQuote);
+router.get('/upgrade/quote', subscriptionController.getUpgradeQuote);
+router.get('/upgrade/checkout-session/:targetPlan', subscriptionController.getUpgradeCheckoutSession);
+router.get('/upgrade/checkout-session', subscriptionController.getUpgradeCheckoutSession);
 router.get('/my-application', subscriptionController.getMyApplication);
 router.get('/my-applications', subscriptionController.getMyApplication);
 

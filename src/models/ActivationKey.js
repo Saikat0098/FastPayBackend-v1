@@ -11,8 +11,10 @@ const activationKeySchema = new mongoose.Schema(
     },
     plan: {
       type: String,
-      enum: ['standard', 'pro', 'enterprise'],
-      default: 'pro',
+      enum: ['starter', 'pro', 'business', 'agency', 'enterprise', 'standard', 'test'],
+      lowercase: true,
+      trim: true,
+      default: 'starter',
     },
     maxDevices: {
       type: Number,

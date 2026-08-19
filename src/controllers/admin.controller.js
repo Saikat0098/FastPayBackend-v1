@@ -185,8 +185,14 @@ const createPlan = asyncHandler(async (req, res) => {
     yearlyDiscountPercent,
     integrationLimit,
     maxDevices,
+    webhookEnabled,
+    hierarchyRank,
     features,
     isPopular,
+    badge,
+    icon,
+    currency,
+    ctaText,
     isActive,
     displayOrder,
   } = req.body;
@@ -226,6 +232,10 @@ const createPlan = asyncHandler(async (req, res) => {
     hierarchyRank: hierarchyRank ? Number(hierarchyRank) : (cleanName === 'starter' ? 1 : cleanName === 'pro' ? 2 : cleanName === 'business' ? 3 : cleanName === 'agency' ? 4 : 5),
     features: Array.isArray(features) ? features : (typeof features === 'string' ? features.split(',').map(f => f.trim()).filter(Boolean) : []),
     isPopular: Boolean(isPopular),
+    badge: badge || '',
+    icon: icon || '',
+    currency: currency || 'BDT',
+    ctaText: ctaText || '',
     isActive: isActive !== undefined ? Boolean(isActive) : true,
     displayOrder: Number(displayOrder) || 0,
   });
@@ -235,16 +245,55 @@ const createPlan = asyncHandler(async (req, res) => {
 
 const updatePlan = asyncHandler(async (req, res) => {
   const { id } = req.params;
+  const existingPlan = await Plan.findById(id);
+  if (!existingPlan) throw new ApiError(404, 'Plan not found');
+
   const updates = { ...req.body };
 
   if (updates.features && typeof updates.features === 'string') {
     updates.features = updates.features.split(',').map(f => f.trim()).filter(Boolean);
   }
 
+  const isTest = existingPlan.name === 'test' || Boolean(existingPlan.testOnly || existingPlan.isTestOnly);
+
+  if (isTest) {
+    // Test Plan specific validation & normalization
+    if (updates.isFree === true || updates.isFree === 'true') {
+      updates.isFree = true;
+      updates.priceMonthly = 0;
+      updates.priceYearly = 0;
+      updates.priceBDT = 0;
+    } else if (updates.isFree === false || updates.isFree === 'false') {
+      updates.isFree = false;
+    }
+
+    if (updates.durationValue !== undefined) {
+      const dVal = Number(updates.durationValue);
+      if (isNaN(dVal) || dVal <= 0 || !Number.isFinite(dVal)) {
+        throw new ApiError(400, 'Test Plan duration value must be a positive number greater than 0');
+      }
+      updates.durationValue = dVal;
+    }
+
+    if (updates.durationUnit !== undefined) {
+      const dUnit = (updates.durationUnit || '').toString().toLowerCase().trim();
+      if (!['minutes', 'hours', 'days'].includes(dUnit)) {
+        throw new ApiError(400, 'Test Plan duration unit must be one of: minutes, hours, days');
+      }
+      updates.durationUnit = dUnit;
+    }
+  } else {
+    // Production plan security protection
+    delete updates.isFree;
+    if (updates.durationUnit && ['minutes', 'hours'].includes(updates.durationUnit)) {
+      throw new ApiError(400, 'Minutes and hours duration units are only available for the QA Test Plan');
+    }
+  }
+
   if (updates.priceMonthly !== undefined || updates.priceYearly !== undefined) {
     const pMonthly = Number(updates.priceMonthly) || 0;
     const pYearly = Number(updates.priceYearly) || 0;
-    if (pMonthly > 0) updates.priceBDT = pMonthly;
+    if (pMonthly >= 0) updates.priceBDT = pMonthly;
 
     if (!updates.yearlyDiscountPercent && pMonthly > 0 && pYearly > 0) {
       const annualNormal = pMonthly * 12;
@@ -255,7 +304,6 @@ const updatePlan = asyncHandler(async (req, res) => {
   }
 
   const plan = await Plan.findByIdAndUpdate(id, updates, { new: true, runValidators: true });
-  if (!plan) throw new ApiError(404, 'Plan not found');
   return ApiResponse.success(res, plan, 'Subscription plan updated');
 });
 

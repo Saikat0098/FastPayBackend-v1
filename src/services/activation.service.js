@@ -28,10 +28,13 @@ const createActivationKey = async ({ merchantId }) => {
   // Key expiration is strictly derived from the merchant's subscription expireDate
   const expireDate = entitlements.expireDate ? new Date(entitlements.expireDate) : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
+  const normalizedPlan = (entitlements.plan || 'starter').toString().toLowerCase().trim();
+
   const key = await ActivationKey.create({
     key: keyString,
     merchant: merchantId,
-    plan: entitlements.plan || 'pro',
+    plan: normalizedPlan,
+    maxDevices: entitlements.limits?.devices || 1,
     expireDate,
   });
 

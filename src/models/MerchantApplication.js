@@ -23,7 +23,7 @@ const merchantApplicationSchema = new mongoose.Schema(
     },
     billingCycle: {
       type: String,
-      enum: ['monthly', 'yearly', 'lifetime'],
+      enum: ['monthly', 'yearly', 'lifetime', 'test'],
       default: 'monthly',
     },
     paymentMethod: {

@@ -26,10 +26,21 @@ const loginAdmin = asyncHandler(async (req, res) => {
 const getProfile = asyncHandler(async (req, res) => {
   if (req.merchant) {
     const merchantObj = req.merchant.toObject ? req.merchant.toObject() : req.merchant;
+    let linkedUser = null;
+    if (req.user?.id) {
+      linkedUser = await User.findById(req.user.id).select('-password');
+    } else if (merchantObj.user) {
+      linkedUser = await User.findById(merchantObj.user).select('-password');
+    }
+    const userObj = linkedUser ? (linkedUser.toObject ? linkedUser.toObject() : linkedUser) : {};
     return ApiResponse.success(res, {
+      ...userObj,
       ...merchantObj,
+      phone: userObj.phone || merchantObj.phone || '',
       role: 'MERCHANT',
-      merchantId: merchantObj._id || merchantObj.id
+      merchantId: merchantObj._id || merchantObj.id,
+      user: userObj,
+      createdAt: userObj.createdAt || merchantObj.createdAt,
     }, 'Merchant profile retrieved');
   } else if (req.admin) {
     const adminObj = req.admin.toObject ? req.admin.toObject() : req.admin;
