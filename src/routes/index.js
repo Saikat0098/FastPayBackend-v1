@@ -24,6 +24,7 @@ const paymentMethodRoutes = require('./paymentMethod.routes');
 const merchantGatewayRoutes = require('./merchantGateway.routes');
 const formSubmissionRoutes = require('./formSubmission.routes');
 const checkoutSessionRoutes = require('./checkoutSession.routes');
+const uploadRoutes = require('./upload.routes');
 
 // Android Controller for direct legacy compatibility routes
 const androidController = require('../controllers/android.controller');
@@ -36,6 +37,8 @@ router.get('/health', androidController.checkVersion);
 
 // Versioned SaaS Routes
 router.use('/auth', authRoutes);
+router.use('/uploads', uploadRoutes);
+router.use('/upload', uploadRoutes);
 router.use('/merchant/gateways', merchantGatewayRoutes);
 router.use('/merchant', merchantRoutes);
 router.use('/admin', adminRoutes);

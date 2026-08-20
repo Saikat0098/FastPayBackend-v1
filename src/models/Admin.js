@@ -26,6 +26,16 @@ const adminSchema = new mongoose.Schema(
       enum: ['superadmin', 'admin'],
       default: 'admin',
     },
+    avatar: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    profileImage: {
+      type: String,
+      default: '',
+      trim: true,
+    },
     status: {
       type: String,
       enum: ['active', 'inactive'],

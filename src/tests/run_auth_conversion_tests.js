@@ -74,6 +74,9 @@ async function runAuthConversionTests() {
     const originalPassword = 'MySecretPass123!';
     const userEmail = `conv_user_${Date.now()}@test.com`;
 
+    const OTP = require('../models/OTP');
+    const { hashOtp } = require('../utils/otp');
+
     const regResult = await authService.registerUser({
       name: 'Conversion Test User',
       email: userEmail,
@@ -81,9 +84,20 @@ async function runAuthConversionTests() {
       phone: '01700001111',
     });
 
-    const initialUserObj = regResult.user;
-    const initialToken = regResult.accessToken;
-    console.log(`TEST 1: User registered successfully (${userEmail}) -> ✅ PASS`);
+    const testOtp = '123456';
+    await OTP.updateOne(
+      { email: userEmail, purpose: 'EMAIL_VERIFICATION' },
+      { $set: { otpHash: hashOtp(testOtp) } }
+    );
+
+    const verifyResult = await authService.verifyEmailOtp({
+      email: userEmail,
+      otp: testOtp,
+    });
+
+    const initialUserObj = verifyResult.user;
+    const initialToken = verifyResult.accessToken;
+    console.log(`TEST 1: User registered & email verified successfully (${userEmail}) -> ✅ PASS`);
 
     // Fetch initial password hash from DB
     const userDbBefore = await User.findById(initialUserObj._id).select('+password');

@@ -48,6 +48,21 @@ const merchantSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    avatar: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    profileImage: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    logo: {
+      type: String,
+      default: '',
+      trim: true,
+    },
     status: {
       type: String,
       enum: ['active', 'suspended', 'pending'],

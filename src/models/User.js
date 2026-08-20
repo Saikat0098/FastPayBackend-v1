@@ -40,10 +40,23 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    avatar: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    profileImage: {
+      type: String,
+      default: '',
+      trim: true,
+    },
     status: {
       type: String,
       enum: ['active', 'suspended', 'inactive'],
       default: 'active',
+    },
+    emailVerified: {
+      type: Boolean,
     },
     lastLoginAt: {
       type: Date,

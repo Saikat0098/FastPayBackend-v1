@@ -48,9 +48,35 @@ const sessionLimiter = rateLimit({
   },
 });
 
+const otpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20, // limit OTP requests
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    statusCode: 429,
+    success: false,
+    message: 'Too many OTP requests. Please try again after 15 minutes.',
+  },
+});
+
+const uploadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 60, // limit uploads per 15 minutes
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    statusCode: 429,
+    success: false,
+    message: 'Too many image upload requests. Please wait a few minutes before trying again.',
+  },
+});
+
 module.exports = {
   apiLimiter,
   authLimiter,
   verifyLimiter,
   sessionLimiter,
+  otpLimiter,
+  uploadLimiter,
 };

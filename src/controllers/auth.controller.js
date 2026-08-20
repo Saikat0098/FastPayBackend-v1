@@ -5,7 +5,32 @@ const User = require('../models/User');
 
 const registerUser = asyncHandler(async (req, res) => {
   const result = await authService.registerUser(req.body);
-  return ApiResponse.success(res, result, 'User registered successfully', 201);
+  return ApiResponse.success(res, result, result.message || 'User registered successfully', 201);
+});
+
+const verifyEmail = asyncHandler(async (req, res) => {
+  const result = await authService.verifyEmailOtp(req.body);
+  return ApiResponse.success(res, result, result.message || 'Email verified successfully', 200);
+});
+
+const resendOtp = asyncHandler(async (req, res) => {
+  const result = await authService.resendOtp(req.body);
+  return ApiResponse.success(res, result, result.message || 'Verification code resent', 200);
+});
+
+const forgotPassword = asyncHandler(async (req, res) => {
+  const result = await authService.forgotPassword(req.body);
+  return ApiResponse.success(res, result, result.message || 'Password reset code sent', 200);
+});
+
+const verifyResetOtp = asyncHandler(async (req, res) => {
+  const result = await authService.verifyResetOtp(req.body);
+  return ApiResponse.success(res, result, result.message || 'Reset code verified successfully', 200);
+});
+
+const resetPassword = asyncHandler(async (req, res) => {
+  const result = await authService.resetPassword(req.body);
+  return ApiResponse.success(res, result, result.message || 'Password reset successfully', 200);
 });
 
 const registerMerchant = asyncHandler(async (req, res) => {
@@ -76,6 +101,11 @@ const changePassword = asyncHandler(async (req, res) => {
 
 module.exports = {
   registerUser,
+  verifyEmail,
+  resendOtp,
+  forgotPassword,
+  verifyResetOtp,
+  resetPassword,
   registerMerchant,
   loginMerchant,
   loginAdmin,
