@@ -31,12 +31,23 @@ const createForm = async ({
   if (!merchantId) throw new ApiError(403, 'Tenant context missing');
 
   let resolvedBrand = null;
-  if (brandId && mongoose.Types.ObjectId.isValid(brandId)) {
+  if (brandId) {
+    if (!mongoose.Types.ObjectId.isValid(brandId)) {
+      throw new ApiError(400, 'Invalid Brand ID format');
+    }
     resolvedBrand = await Brand.findOne({ _id: brandId, merchant: merchantId });
+    if (!resolvedBrand) {
+      throw new ApiError(404, 'Brand not found or does not belong to your merchant account');
+    }
+  } else {
+    const merchantBrands = await Brand.find({ merchant: merchantId }).sort({ createdAt: 1 });
+    if (merchantBrands.length === 1) {
+      resolvedBrand = merchantBrands[0];
+    } else if (merchantBrands.length > 1) {
+      resolvedBrand = merchantBrands.find((b) => b.status === 'ACTIVE') || merchantBrands[0];
+    }
   }
-  if (!resolvedBrand) {
-    resolvedBrand = await Brand.findOne({ merchant: merchantId });
-  }
+
   if (!resolvedBrand) {
     resolvedBrand = await Brand.create({
       merchant: merchantId,
@@ -87,6 +98,12 @@ const updateForm = async (id, merchantId, updateData) => {
 
   const form = await PaymentForm.findOne({ _id: id, merchant: merchantId });
   if (!form) throw new ApiError(404, 'Payment form not found or access denied');
+
+  if (updateData.brandId !== undefined && mongoose.Types.ObjectId.isValid(updateData.brandId)) {
+    const brand = await Brand.findOne({ _id: updateData.brandId, merchant: merchantId });
+    if (!brand) throw new ApiError(404, 'Brand not found or does not belong to your merchant account');
+    form.brand = brand._id;
+  }
 
   if (updateData.title !== undefined) form.title = updateData.title;
   if (updateData.description !== undefined) form.description = updateData.description;
@@ -164,7 +181,22 @@ const getFormBySlug = async (slugOrId) => {
     throw new ApiError(410, 'This payment form has expired.');
   }
 
-  return form;
+  // Load active brand-specific gateways and attach to form response
+  const formObj = form.toObject ? form.toObject() : { ...form };
+  if (form.brand && form.merchant) {
+    const MerchantGateway = require('../models/MerchantGateway');
+    const bId = form.brand._id || form.brand;
+    const mId = form.merchant._id || form.merchant;
+    const brandGateways = await MerchantGateway.find({
+      merchant: mId,
+      brand: bId,
+      isActive: true,
+    }).sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
+
+    formObj.gateways = brandGateways;
+  }
+
+  return formObj;
 };
 
 const submitPaymentForm = async ({ formId, slug, formData = {}, amount, paymentMethod, transactionId, customerPhone, customerName }) => {

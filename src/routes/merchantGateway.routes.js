@@ -7,6 +7,7 @@ const { enforceTenant } = require('../middlewares/tenant.middleware');
 // Public checkout endpoints (no auth required)
 router.get('/public/brand/:brandId', merchantGatewayController.getPublicBrandGateways);
 router.get('/public/:merchantId', merchantGatewayController.getPublicMerchantGateways);
+router.get('/public', merchantGatewayController.getPublicMerchantGateways);
 
 
 // Protected Merchant Gateway APIs

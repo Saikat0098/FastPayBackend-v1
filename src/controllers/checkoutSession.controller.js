@@ -25,9 +25,14 @@ const createSession = asyncHandler(async (req, res) => {
     brandId,
   } = req.body;
 
+  // Anti-spoofing: If authenticated via Brand API Key, brandId must match req.brand._id
+  if (req.brand && brandId && brandId.toString() !== req.brand._id.toString()) {
+    throw new ApiError(403, 'Brand ID in request body does not match the authenticated Brand credential');
+  }
+
   const session = await checkoutSessionService.createCheckoutSession({
     merchantId,
-    brandId: brandId || req.brand?._id,
+    brandId: req.brand ? req.brand._id : brandId,
     orderId,
     amount,
     currency,
@@ -41,10 +46,29 @@ const createSession = asyncHandler(async (req, res) => {
     expiresInMinutes,
   });
 
-  const protocol = req.protocol || 'http';
-  const host = req.get('host') || 'localhost:3000';
-  const frontendOrigin = req.get('origin') || `${protocol}://${host}`;
-  const checkoutUrl = `${frontendOrigin}/checkout/session/${session.sessionId}`;
+  // Authoritative Checkout Frontend URL resolution
+  const configuredCheckoutUrl =
+    process.env.CHECKOUT_FRONTEND_URL ||
+    process.env.CHECKOUT_URL ||
+    process.env.FRONTEND_URL ||
+    process.env.FASTPAY_CHECKOUT_URL ||
+    process.env.PUBLIC_CHECKOUT_URL;
+
+  let frontendBase = '';
+  if (configuredCheckoutUrl && typeof configuredCheckoutUrl === 'string' && configuredCheckoutUrl.trim()) {
+    frontendBase = configuredCheckoutUrl.trim().replace(/\/+$/, '');
+  } else if (process.env.NODE_ENV === 'production') {
+    frontendBase = 'https://fast-pay-weld.vercel.app';
+  } else {
+    const reqOrigin = req.get('origin');
+    if (reqOrigin && (reqOrigin.includes('localhost') || reqOrigin.includes('127.0.0.1') || reqOrigin.includes('vercel.app'))) {
+      frontendBase = reqOrigin.replace(/\/+$/, '');
+    } else {
+      frontendBase = 'https://fast-pay-weld.vercel.app';
+    }
+  }
+
+  const checkoutUrl = `${frontendBase}/checkout/session/${session.sessionId}`;
 
   return ApiResponse.success(
     res,
@@ -54,6 +78,7 @@ const createSession = asyncHandler(async (req, res) => {
       orderId: session.orderId,
       amount: session.amount,
       currency: session.currency,
+      brandId: session.brand,
       status: session.status,
       expiresAt: session.expiresAt,
     },
@@ -91,8 +116,9 @@ const verifyPublicSessionPayment = asyncHandler(async (req, res) => {
 const getMerchantSessionStatus = asyncHandler(async (req, res) => {
   const { sessionId } = req.params;
   const merchantId = req.merchantId || req.merchant?._id;
+  const brandId = req.brand ? req.brand._id : req.query.brandId;
 
-  const session = await checkoutSessionService.getMerchantCheckoutSessionStatus(sessionId, merchantId);
+  const session = await checkoutSessionService.getMerchantCheckoutSessionStatus(sessionId, merchantId, brandId);
 
   return ApiResponse.success(res, session, 'Checkout session status fetched');
 });
@@ -102,6 +128,7 @@ const verifyMerchantSessionPayment = asyncHandler(async (req, res) => {
   const merchantId = req.merchantId || req.merchant?._id;
   const { sessionId: paramSessionId } = req.params;
   const { sessionId: bodySessionId, trxId, transactionId, gateway, provider, customerName, phone, amount } = req.body;
+  const brandId = req.brand ? req.brand._id : req.body?.brandId;
 
   const result = await checkoutSessionService.verifySessionPayment({
     sessionId: paramSessionId || bodySessionId,
@@ -111,6 +138,7 @@ const verifyMerchantSessionPayment = asyncHandler(async (req, res) => {
     customerName,
     phone,
     merchantId,
+    brandId,
   });
 
   return ApiResponse.success(res, result, 'Payment verified successfully for merchant');

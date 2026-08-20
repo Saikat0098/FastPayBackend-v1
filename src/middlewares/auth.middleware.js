@@ -146,8 +146,9 @@ const verifyApiKey = asyncHandler(async (req, res, next) => {
   }
 
   const { checkBrandOperationalStatus } = require('./brandGuard.middleware');
+  const mongoose = require('mongoose');
 
-  // 1. Check Brand API Key first
+  // 1. Check Brand API Key first (Authoritative Brand Credential)
   const Brand = require('../models/Brand');
   const brand = await Brand.findOne({ apiKey }).populate('merchant');
   if (brand) {
@@ -158,6 +159,12 @@ const verifyApiKey = asyncHandler(async (req, res, next) => {
     req.brandId = brand._id;
     req.merchant = brand.merchant;
     req.merchantId = brand.merchant?._id || brand.merchant;
+
+    // Anti-Spoofing: If a brandId was explicitly passed, verify it matches the authenticated credential
+    const requestedBrandId = req.headers['x-brand-id'] || req.body?.brandId || req.query?.brandId;
+    if (requestedBrandId && requestedBrandId.toString() !== brand._id.toString()) {
+      throw new ApiError(403, 'Requested Brand ID does not match the authenticated Brand API Key credential');
+    }
 
     const entitlementService = require('../services/entitlement.service');
     const entitlements = await entitlementService.getMerchantEntitlements(req.merchantId);
@@ -181,11 +188,23 @@ const verifyApiKey = asyncHandler(async (req, res, next) => {
     // If a specific brand was requested with merchant API key, verify ownership & status
     const requestedBrandId = req.headers['x-brand-id'] || req.body?.brandId || req.query?.brandId;
     if (requestedBrandId) {
+      if (!mongoose.Types.ObjectId.isValid(requestedBrandId)) {
+        throw new ApiError(400, 'Invalid Brand ID format');
+      }
       const targetBrand = await Brand.findOne({ _id: requestedBrandId, merchant: merchant._id });
-      if (targetBrand) {
-        await checkBrandOperationalStatus(targetBrand);
-        req.brand = targetBrand;
-        req.brandId = targetBrand._id;
+      if (!targetBrand) {
+        throw new ApiError(403, 'Brand not found or does not belong to your merchant account');
+      }
+      await checkBrandOperationalStatus(targetBrand);
+      req.brand = targetBrand;
+      req.brandId = targetBrand._id;
+    } else {
+      // Legacy fallback: If merchant has exactly 1 brand, safely resolve that default brand
+      const brands = await Brand.find({ merchant: merchant._id });
+      if (brands.length === 1) {
+        await checkBrandOperationalStatus(brands[0]);
+        req.brand = brands[0];
+        req.brandId = brands[0]._id;
       }
     }
 

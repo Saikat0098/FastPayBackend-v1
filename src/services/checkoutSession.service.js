@@ -83,13 +83,34 @@ const createCheckoutSession = async ({
 
   const { checkBrandOperationalStatus } = require('../middlewares/brandGuard.middleware');
 
-  // Resolve Brand Context
+  // Resolve Authoritative Brand Context
   let resolvedBrand = null;
-  if (brandId && mongoose.Types.ObjectId.isValid(brandId)) {
+  if (brandId) {
+    if (!mongoose.Types.ObjectId.isValid(brandId)) {
+      throw new ApiError(400, 'Invalid Brand ID format');
+    }
     resolvedBrand = await Brand.findOne({ _id: brandId, merchant: merchant._id });
+    if (!resolvedBrand) {
+      throw new ApiError(404, 'Brand not found or does not belong to your merchant account');
+    }
+  } else {
+    // If brandId was not provided, safely resolve the merchant's brand
+    const merchantBrands = await Brand.find({ merchant: merchant._id }).sort({ createdAt: 1 });
+    if (merchantBrands.length === 1) {
+      resolvedBrand = merchantBrands[0];
+    } else if (merchantBrands.length > 1) {
+      resolvedBrand = merchantBrands.find((b) => b.status === 'ACTIVE') || merchantBrands[0];
+    }
   }
+
   if (!resolvedBrand) {
-    resolvedBrand = await Brand.findOne({ merchant: merchant._id }).sort({ createdAt: 1 });
+    // Create initial default brand if merchant has zero brands
+    resolvedBrand = await Brand.create({
+      merchant: merchant._id,
+      name: merchant.companyName || merchant.name || 'Default Brand',
+      slug: `brand-${merchant._id.toString().slice(-6)}-${Date.now()}`,
+      status: 'ACTIVE',
+    }).catch(() => null);
   }
 
   if (resolvedBrand) {
@@ -158,7 +179,21 @@ const getPublicCheckoutSession = async (sessionId) => {
     await session.save();
   }
 
-  return session;
+  // Authoritatively load Brand-specific gateways and attach to response
+  const sessionObj = session.toObject ? session.toObject() : { ...session };
+  if (session.brand && session.merchant) {
+    const bId = session.brand._id || session.brand;
+    const mId = session.merchant._id || session.merchant;
+    const brandGateways = await MerchantGateway.find({
+      merchant: mId,
+      brand: bId,
+      isActive: true,
+    }).sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
+
+    sessionObj.gateways = brandGateways;
+  }
+
+  return sessionObj;
 };
 
 
@@ -170,6 +205,7 @@ const verifySessionPayment = async ({
   customerName,
   phone,
   merchantId,
+  brandId,
 }) => {
   if (!sessionId && !trxId) {
     throw new ApiError(400, 'Session ID or Transaction ID is required');
@@ -188,6 +224,13 @@ const verifySessionPayment = async ({
     if (merchantId && sMerchantId.toString() !== merchantId.toString()) {
       const err = new ApiError(404, 'Checkout session not found or access denied');
       err.code = 'NOT_FOUND';
+      throw err;
+    }
+
+    const sBrandId = session.brand ? (session.brand._id || session.brand) : null;
+    if (brandId && sBrandId && sBrandId.toString() !== brandId.toString()) {
+      const err = new ApiError(403, 'Checkout session does not belong to the authenticated brand context');
+      err.code = 'BRAND_MISMATCH';
       throw err;
     }
 
@@ -260,7 +303,7 @@ const verifySessionPayment = async ({
     throw err;
   }
 
-  const brandId = session && session.brand ? (session.brand._id || session.brand) : null;
+  const resolvedBrandId = session && session.brand ? (session.brand._id || session.brand) : (brandId || null);
 
   // Validate Gateway Ownership & Active Status for this Brand/Merchant
   if (mId) {
@@ -269,17 +312,18 @@ const verifySessionPayment = async ({
       provider: { $regex: new RegExp(`^${targetProvider}$`, 'i') },
       isActive: true,
     };
-    if (brandId) {
-      gwQuery.brand = brandId;
+    if (resolvedBrandId) {
+      gwQuery.brand = resolvedBrandId;
     }
 
     let activeGateway = await MerchantGateway.findOne(gwQuery);
-    if (!activeGateway && brandId) {
-      // Fallback for legacy gateways without brandId
+    if (!activeGateway && resolvedBrandId) {
+      // Fallback ONLY for unassigned legacy records (brand is null)
       activeGateway = await MerchantGateway.findOne({
         merchant: mId,
         provider: { $regex: new RegExp(`^${targetProvider}$`, 'i') },
         isActive: true,
+        $or: [{ brand: null }, { brand: { $exists: false } }],
       });
     }
 
@@ -294,14 +338,13 @@ const verifySessionPayment = async ({
   const payment = await verifyCustomerCheckoutPayment({
     trxId: cleanTrx,
     merchantId: mId,
-    brandId,
+    brandId: resolvedBrandId,
     gateway: targetProvider,
     provider: targetProvider,
     amount: session ? session.amount : undefined,
     phone: phone || (session ? session.customerPhone : undefined),
     customerName: customerName || (session ? session.customerName : undefined),
   });
-
 
   if (session) {
     session.status = 'VERIFIED';
@@ -316,7 +359,7 @@ const verifySessionPayment = async ({
   if (mId) {
     sendWebhook({
       merchantId: mId,
-      brandId: session && session.brand ? (session.brand._id || session.brand) : null,
+      brandId: session && session.brand ? (session.brand._id || session.brand) : resolvedBrandId,
       payment,
       session,
       event: 'payment.verified',
@@ -331,13 +374,16 @@ const verifySessionPayment = async ({
   };
 };
 
-const getMerchantCheckoutSessionStatus = async (sessionId, merchantId) => {
+const getMerchantCheckoutSessionStatus = async (sessionId, merchantId, brandId = null) => {
   const query = { sessionId };
   if (merchantId) {
     query.merchant = merchantId;
   }
+  if (brandId) {
+    query.brand = brandId;
+  }
 
-  const session = await CheckoutSession.findOne(query).populate('payment');
+  const session = await CheckoutSession.findOne(query).populate('payment brand');
   if (!session) {
     throw new ApiError(404, 'Checkout session not found or access denied');
   }

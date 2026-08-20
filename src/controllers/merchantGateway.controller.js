@@ -3,6 +3,7 @@ const ApiResponse = require('../utils/apiResponse');
 const ApiError = require('../utils/apiError');
 const MerchantGateway = require('../models/MerchantGateway');
 const Brand = require('../models/Brand');
+const Merchant = require('../models/Merchant');
 const { checkBrandOperationalStatus } = require('../middlewares/brandGuard.middleware');
 const mongoose = require('mongoose');
 
@@ -100,7 +101,18 @@ const createMerchantGateway = asyncHandler(async (req, res) => {
   let targetBrandId = brandId;
   if (!targetBrandId || !mongoose.Types.ObjectId.isValid(targetBrandId)) {
     // If brand not explicitly supplied, fallback to merchant's first active brand
-    const firstBrand = await Brand.findOne({ merchant: merchantId }).sort({ createdAt: 1 });
+    let firstBrand = await Brand.findOne({ merchant: merchantId }).sort({ createdAt: 1 });
+    if (!firstBrand) {
+      const merchant = await Merchant.findById(merchantId);
+      if (merchant) {
+        firstBrand = await Brand.create({
+          merchant: merchantId,
+          name: merchant.companyName || merchant.name || 'Default Store',
+          slug: `brand-${merchantId.toString().slice(-6)}-${Date.now()}`,
+          status: 'ACTIVE',
+        }).catch(() => null);
+      }
+    }
     if (firstBrand) {
       targetBrandId = firstBrand._id;
     }
@@ -341,41 +353,77 @@ const setDefaultMerchantGateway = asyncHandler(async (req, res) => {
 // 7. Get public gateways for customer checkout (strictly Brand-isolated)
 const getPublicMerchantGateways = asyncHandler(async (req, res) => {
   const { merchantId } = req.params;
-  const { brandId } = req.query;
+  const { brandId, sessionId } = req.query;
+  const headerBrandId = req.headers['x-brand-id'];
 
-  const query = { isActive: true };
-
-  let brandContext = null;
-  if (brandId && mongoose.Types.ObjectId.isValid(brandId)) {
-    brandContext = await Brand.findById(brandId);
-  }
+  let targetMerchantId = null;
+  let targetBrandId = brandId || headerBrandId || null;
 
   if (merchantId && mongoose.Types.ObjectId.isValid(merchantId)) {
-    query.merchant = merchantId;
-  } else if (brandContext && brandContext.merchant) {
-    query.merchant = brandContext.merchant;
+    targetMerchantId = merchantId;
   }
 
-  if (brandContext) {
-    // Check if Brand is blocked or suspended
-    try {
-      await checkBrandOperationalStatus(brandContext);
-    } catch (err) {
-      return ApiResponse.error(res, err.message, err.statusCode || 403);
+  // 1. If sessionId is provided, resolve Brand & Merchant from CheckoutSession
+  if (sessionId) {
+    const CheckoutSession = require('../models/CheckoutSession');
+    const session = await CheckoutSession.findOne({ sessionId });
+    if (session) {
+      targetMerchantId = session.merchant;
+      targetBrandId = session.brand;
     }
-    query.brand = brandContext._id;
   }
+
+  let brandDoc = null;
+
+  // 2. If targetBrandId is available, look up and verify brand
+  if (targetBrandId && mongoose.Types.ObjectId.isValid(targetBrandId)) {
+    brandDoc = await Brand.findById(targetBrandId);
+    if (!brandDoc) {
+      throw new ApiError(404, 'Brand not found');
+    }
+    if (targetMerchantId && brandDoc.merchant && brandDoc.merchant.toString() !== targetMerchantId.toString()) {
+      throw new ApiError(403, 'Brand does not belong to the specified merchant');
+    }
+    targetMerchantId = brandDoc.merchant;
+    await checkBrandOperationalStatus(brandDoc);
+  } else if (targetMerchantId) {
+    // 3. If brandId was not specified, resolve the merchant's authoritative Brand
+    const merchantBrands = await Brand.find({ merchant: targetMerchantId }).sort({ createdAt: 1 });
+    if (merchantBrands.length === 1) {
+      brandDoc = merchantBrands[0];
+      targetBrandId = brandDoc._id;
+      await checkBrandOperationalStatus(brandDoc);
+    } else if (merchantBrands.length > 1) {
+      // Pick first active brand to prevent multi-brand gateway aggregation/leakage
+      const activeBrand = merchantBrands.find((b) => b.status === 'ACTIVE') || merchantBrands[0];
+      brandDoc = activeBrand;
+      targetBrandId = activeBrand._id;
+      await checkBrandOperationalStatus(brandDoc);
+    }
+  }
+
+  if (!targetMerchantId && !targetBrandId) {
+    throw new ApiError(400, 'Merchant ID or Brand ID is required');
+  }
+
+  // Query ONLY gateways belonging to this specific resolved Brand
+  const query = { isActive: true };
+  if (targetMerchantId) query.merchant = targetMerchantId;
+  if (targetBrandId) query.brand = targetBrandId;
 
   let activeGateways = await MerchantGateway.find(query)
     .sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
 
-  // Fallback for legacy records if zero brand gateways found
-  if (activeGateways.length === 0 && query.merchant && !query.brand) {
-    activeGateways = await MerchantGateway.find({ merchant: query.merchant, isActive: true })
-      .sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
+  // Safe fallback ONLY for legacy unmigrated records (brand is null) when merchant has <= 1 brand
+  if (activeGateways.length === 0 && targetMerchantId && (!targetBrandId || (await Brand.countDocuments({ merchant: targetMerchantId })) <= 1)) {
+    activeGateways = await MerchantGateway.find({
+      merchant: targetMerchantId,
+      isActive: true,
+      $or: [{ brand: null }, { brand: { $exists: false } }],
+    }).sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
   }
 
-  return ApiResponse.success(res, activeGateways, 'Active gateways retrieved for checkout');
+  return ApiResponse.success(res, activeGateways, 'Active brand gateways retrieved for checkout');
 });
 
 // 8. Get public gateways by Brand ID directly
@@ -390,11 +438,12 @@ const getPublicBrandGateways = asyncHandler(async (req, res) => {
     throw new ApiError(404, 'Brand not found');
   }
 
-  // Check brand operational status
+  // Authoritative operational check (blocks/suspensions)
   await checkBrandOperationalStatus(brand);
 
   const activeGateways = await MerchantGateway.find({
     brand: brand._id,
+    merchant: brand.merchant,
     isActive: true,
   }).sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
 

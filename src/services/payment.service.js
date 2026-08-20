@@ -697,8 +697,13 @@ const verifyCustomerCheckoutPayment = async ({
     throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
   }
 
-  // 2. Correct merchant/tenant
+  // 2. Correct merchant/tenant check
   if (merchantId && payment.merchant && payment.merchant.toString() !== merchantId.toString()) {
+    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+  }
+
+  // 2b. Correct brand isolation check (payment already claimed by another brand cannot be verified)
+  if (brandId && payment.brand && payment.brand.toString() !== brandId.toString()) {
     throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
   }
 
@@ -738,13 +743,19 @@ const verifyCustomerCheckoutPayment = async ({
   }
 
   // Mark as verified & used atomically to prevent concurrent race conditions
+  const claimFilter = {
+    _id: payment._id,
+    isUsed: { $ne: true },
+    status: { $nin: ['USED', 'CLAIMED', 'REJECTED'] },
+    verificationState: { $nin: ['MISMATCH_SUSPICIOUS'] },
+  };
+
+  if (brandId) {
+    claimFilter.$or = [{ brand: null }, { brand: { $exists: false } }, { brand: brandId }];
+  }
+
   const claimedPayment = await Payment.findOneAndUpdate(
-    {
-      _id: payment._id,
-      isUsed: { $ne: true },
-      status: { $nin: ['USED', 'CLAIMED', 'REJECTED'] },
-      verificationState: { $nin: ['MISMATCH_SUSPICIOUS'] },
-    },
+    claimFilter,
     {
       $set: {
         status: 'VERIFIED',

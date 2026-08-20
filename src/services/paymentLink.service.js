@@ -8,17 +8,25 @@ const createLink = async ({ merchantId, brandId, title, amount, customerName, cu
 
   let resolvedBrand = null;
   if (brandId) {
+    const mongoose = require('mongoose');
+    if (!mongoose.Types.ObjectId.isValid(brandId)) {
+      throw new ApiError(400, 'Invalid Brand ID format');
+    }
     resolvedBrand = await Brand.findOne({ _id: brandId, merchant: merchantId });
-    if (!resolvedBrand) throw new ApiError(400, 'Brand not found or invalid');
+    if (!resolvedBrand) throw new ApiError(404, 'Brand not found or does not belong to your merchant account');
   } else {
-    resolvedBrand = await Brand.findOne({ merchant: merchantId });
+    const merchantBrands = await Brand.find({ merchant: merchantId }).sort({ createdAt: 1 });
+    if (merchantBrands.length === 1) {
+      resolvedBrand = merchantBrands[0];
+    } else if (merchantBrands.length > 1) {
+      resolvedBrand = merchantBrands.find((b) => b.status === 'ACTIVE') || merchantBrands[0];
+    }
   }
 
   if (resolvedBrand) {
     const { checkBrandOperationalStatus } = require('../middlewares/brandGuard.middleware');
     await checkBrandOperationalStatus(resolvedBrand);
   }
-
 
   const expiresAt = new Date(Date.now() + Number(expiresInHours) * 60 * 60 * 1000);
   const maxAttempts = 5;
@@ -80,7 +88,22 @@ const getPublicLink = async (code) => {
     await link.save();
     throw new ApiError(410, 'Payment link has expired');
   }
-  return link;
+
+  const linkObj = link.toObject ? link.toObject() : { ...link };
+  if (link.brand && link.merchant) {
+    const MerchantGateway = require('../models/MerchantGateway');
+    const bId = link.brand._id || link.brand;
+    const mId = link.merchant._id || link.merchant;
+    const brandGateways = await MerchantGateway.find({
+      merchant: mId,
+      brand: bId,
+      isActive: true,
+    }).sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
+
+    linkObj.gateways = brandGateways;
+  }
+
+  return linkObj;
 };
 
 
