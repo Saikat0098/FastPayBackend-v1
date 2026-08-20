@@ -145,11 +145,17 @@ const verifyApiKey = asyncHandler(async (req, res, next) => {
     throw new ApiError(401, 'API Key is required in X-API-Key or Authorization header');
   }
 
+  const { checkBrandOperationalStatus } = require('./brandGuard.middleware');
+
   // 1. Check Brand API Key first
   const Brand = require('../models/Brand');
-  const brand = await Brand.findOne({ apiKey, status: 'ACTIVE' }).populate('merchant');
+  const brand = await Brand.findOne({ apiKey }).populate('merchant');
   if (brand) {
+    // Authoritative Operational Status Guard (Blocked / Suspended check)
+    await checkBrandOperationalStatus(brand);
+
     req.brand = brand;
+    req.brandId = brand._id;
     req.merchant = brand.merchant;
     req.merchantId = brand.merchant?._id || brand.merchant;
 
@@ -166,11 +172,22 @@ const verifyApiKey = asyncHandler(async (req, res, next) => {
     return next();
   }
 
-  // 2. Check Merchant API Key
+  // 2. Check Merchant API Key (Legacy compatibility)
   const merchant = await Merchant.findOne({ apiKey, status: 'active' });
   if (merchant) {
     req.merchant = merchant;
     req.merchantId = merchant._id;
+
+    // If a specific brand was requested with merchant API key, verify ownership & status
+    const requestedBrandId = req.headers['x-brand-id'] || req.body?.brandId || req.query?.brandId;
+    if (requestedBrandId) {
+      const targetBrand = await Brand.findOne({ _id: requestedBrandId, merchant: merchant._id });
+      if (targetBrand) {
+        await checkBrandOperationalStatus(targetBrand);
+        req.brand = targetBrand;
+        req.brandId = targetBrand._id;
+      }
+    }
 
     const entitlementService = require('../services/entitlement.service');
     const entitlements = await entitlementService.getMerchantEntitlements(req.merchantId);
@@ -187,6 +204,7 @@ const verifyApiKey = asyncHandler(async (req, res, next) => {
 
   throw new ApiError(401, 'Invalid or inactive API Key');
 });
+
 
 const verifyHeartbeatAuth = asyncHandler(async (req, res, next) => {
   const logger = require('../config/logger');

@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 
 const getSubmissions = async ({
   merchantId,
+  brandId,
   formId,
   paymentStatus,
   orderStatus,
@@ -16,9 +17,14 @@ const getSubmissions = async ({
 
   const query = { merchant: merchantId };
 
+  if (brandId && brandId !== 'ALL' && mongoose.Types.ObjectId.isValid(brandId)) {
+    query.brand = brandId;
+  }
+
   if (formId && mongoose.Types.ObjectId.isValid(formId)) {
     query.form = formId;
   }
+
 
   if (paymentStatus) {
     query.paymentStatus = paymentStatus.toUpperCase();

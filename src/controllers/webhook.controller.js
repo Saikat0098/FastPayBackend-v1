@@ -3,11 +3,14 @@ const webhookService = require('../services/webhook.service');
 
 const getLogs = asyncHandler(async (req, res) => {
   const merchantId = req.merchantId || req.merchant?._id;
-  const result = await webhookService.getWebhookLogs(
-    merchantId,
-    parseInt(req.query.page || '1', 10),
-    parseInt(req.query.limit || '20', 10)
-  );
+  const result = await webhookService.getWebhookLogs(merchantId, {
+    page: parseInt(req.query.page || '1', 10),
+    limit: parseInt(req.query.limit || '20', 10),
+    brandId: req.query.brandId,
+    status: req.query.status,
+    event: req.query.event,
+  });
+
 
   return res.status(200).json({
     success: true,

@@ -69,6 +69,7 @@ const getPaymentsList = asyncHandler(async (req, res) => {
 
   const result = await paymentService.getPayments({
     merchantId: isSuperAdmin ? (req.query.merchantId || merchantId) : merchantId,
+    brandId: req.query.brandId,
     isSuperAdmin,
     provider: req.query.provider || req.query.gateway,
     status: req.query.status,
@@ -76,6 +77,7 @@ const getPaymentsList = asyncHandler(async (req, res) => {
     page: req.query.page || 1,
     limit: req.query.limit || 50,
   });
+
 
   return res.status(200).json({
     success: true,

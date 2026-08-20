@@ -6,6 +6,7 @@ const getSubmissions = asyncHandler(async (req, res) => {
   const merchantId = req.merchantId || req.merchant?._id;
   const result = await formSubmissionService.getSubmissions({
     merchantId,
+    brandId: req.query.brandId,
     formId: req.query.formId || req.query.form,
     paymentStatus: req.query.paymentStatus || req.query.status,
     orderStatus: req.query.orderStatus,
@@ -14,6 +15,7 @@ const getSubmissions = asyncHandler(async (req, res) => {
     page: req.query.page || 1,
     limit: req.query.limit || 20,
   });
+
 
   return ApiResponse.success(res, result.submissions, 'Form submissions retrieved successfully', 200, {
     pagination: result.pagination,

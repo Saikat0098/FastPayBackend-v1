@@ -134,5 +134,8 @@ const paymentFormSchema = new mongoose.Schema(
 );
 
 paymentFormSchema.index({ merchant: 1, createdAt: -1 });
+paymentFormSchema.index({ merchant: 1, brand: 1, createdAt: -1 });
+paymentFormSchema.index({ brand: 1, createdAt: -1 });
 
 module.exports = mongoose.model('PaymentForm', paymentFormSchema);
+

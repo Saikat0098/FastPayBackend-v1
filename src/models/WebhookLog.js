@@ -70,6 +70,9 @@ const webhookLogSchema = new mongoose.Schema(
 );
 
 webhookLogSchema.index({ merchant: 1, createdAt: -1 });
+webhookLogSchema.index({ merchant: 1, brand: 1, createdAt: -1 });
+webhookLogSchema.index({ brand: 1, createdAt: -1 });
 webhookLogSchema.index({ merchant: 1, event: 1, payment: 1 });
 
 module.exports = mongoose.model('WebhookLog', webhookLogSchema);
+

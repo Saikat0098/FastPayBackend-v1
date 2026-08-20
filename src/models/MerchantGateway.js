@@ -8,6 +8,12 @@ const merchantGatewaySchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    brand: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Brand',
+      required: false,
+      index: true,
+    },
     provider: {
       type: String,
       required: [true, 'Gateway provider is required'],
@@ -50,7 +56,9 @@ const merchantGatewaySchema = new mongoose.Schema(
   }
 );
 
-merchantGatewaySchema.index({ merchant: 1, provider: 1, accountNumber: 1 }, { unique: true });
+merchantGatewaySchema.index({ merchant: 1, brand: 1, provider: 1, accountNumber: 1 }, { unique: true });
+merchantGatewaySchema.index({ brand: 1, isActive: 1 });
 merchantGatewaySchema.index({ merchant: 1, isActive: 1 });
 
 module.exports = mongoose.model('MerchantGateway', merchantGatewaySchema);
+

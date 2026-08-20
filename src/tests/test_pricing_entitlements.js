@@ -103,7 +103,7 @@ async function runPricingEntitlementTests() {
     // 4. Verify Entitlements for Starter Plan
     const starterEntitlements = await entitlementService.getMerchantEntitlements(merchant._id);
     console.log(`TEST 6: Starter Entitlements check -> DevicesLimit: ${starterEntitlements.limits.devices}, WebsitesLimit: ${starterEntitlements.limits.websites}, Webhook: ${starterEntitlements.features.webhook} -> ✅ PASS`);
-    if (starterEntitlements.features.webhook !== false || starterEntitlements.limits.devices !== 1 || starterEntitlements.limits.websites !== 1) {
+    if (starterEntitlements.features.webhook !== false || starterEntitlements.limits.devices !== 5 || starterEntitlements.limits.websites !== 5) {
       throw new Error('Starter entitlements mismatch');
     }
 
@@ -112,19 +112,28 @@ async function runPricingEntitlementTests() {
     console.log(`TEST 7: Webhook permission check on Starter Plan: canMerchantUseWebhook = ${canStarterWebhook} -> ✅ PASS`);
     if (canStarterWebhook !== false) throw new Error('Starter plan must not be able to use webhooks');
 
-    // 6. Test Upgrade Quote Calculation (Starter -> Pro: ৳150 - ৳100 = ৳50)
-    const quote = await entitlementService.calculateUpgradeQuote(merchant._id, 'pro');
-    console.log(`TEST 8: Upgrade quote calculated (Current: ৳${quote.currentPlanPrice}, Target: ৳${quote.targetPlanPrice}, Difference: ৳${quote.priceDifference}) -> ✅ PASS`);
-    if (quote.priceDifference !== 50) throw new Error(`Expected price difference of 50, got ${quote.priceDifference}`);
+    // 6. Test Upgrade Quote Calculation (Monthly Starter -> Monthly Pro: ৳150 - ৳100 = ৳50)
+    const quoteMonthly = await entitlementService.calculateUpgradeQuote(merchant._id, 'pro', 'monthly');
+    console.log(`TEST 8A: Monthly->Monthly Upgrade quote calculated (Current: ৳${quoteMonthly.currentPlanPrice}, Target: ৳${quoteMonthly.targetPlanPrice}, Difference: ৳${quoteMonthly.priceDifference}) -> ✅ PASS`);
+    if (quoteMonthly.priceDifference !== 50) throw new Error(`Expected price difference of 50, got ${quoteMonthly.priceDifference}`);
 
-    // 7. Test Downgrade Rejection (Pro -> Starter should fail)
-    // First simulate trying to downgrade directly from code
+    // 6B. Test Monthly Starter -> Yearly Starter Conversion (৳960 - ৳100 = ৳860)
+    const quoteYearlyStarter = await entitlementService.calculateUpgradeQuote(merchant._id, 'starter', 'yearly');
+    console.log(`TEST 8B: Monthly Starter -> Yearly Starter conversion quote (Target: ৳${quoteYearlyStarter.targetPlanPrice}, Credit: ৳${quoteYearlyStarter.creditAmount}, Difference: ৳${quoteYearlyStarter.priceDifference}) -> ✅ PASS`);
+    if (quoteYearlyStarter.priceDifference !== 860) throw new Error(`Expected price difference of 860, got ${quoteYearlyStarter.priceDifference}`);
+
+    // 6C. Test Monthly Starter -> Yearly Pro Conversion (৳1440 - ৳100 = ৳1340)
+    const quoteYearlyPro = await entitlementService.calculateUpgradeQuote(merchant._id, 'pro', 'yearly');
+    console.log(`TEST 8C: Monthly Starter -> Yearly Pro conversion quote (Target: ৳${quoteYearlyPro.targetPlanPrice}, Credit: ৳${quoteYearlyPro.creditAmount}, Difference: ৳${quoteYearlyPro.priceDifference}) -> ✅ PASS`);
+    if (quoteYearlyPro.priceDifference !== 1340) throw new Error(`Expected price difference of 1340, got ${quoteYearlyPro.priceDifference}`);
+
+    // 7. Test Downgrade Rejection (Pro -> Starter should fail on same cycle)
     try {
-      await entitlementService.calculateUpgradeQuote(merchant._id, 'starter');
-      throw new Error('TEST 9 FAILED: Should not allow downgrade or same tier upgrade quote');
+      await entitlementService.calculateUpgradeQuote(merchant._id, 'starter', 'monthly');
+      throw new Error('TEST 9 FAILED: Should not allow same-cycle downgrade or same tier without conversion');
     } catch (err) {
       if (err.code === 'DOWNGRADE_NOT_ALLOWED') {
-        console.log(`TEST 9: Downgrade attempt rejected with DOWNGRADE_NOT_ALLOWED -> ✅ PASS`);
+        console.log(`TEST 9: Same-cycle downgrade attempt rejected with DOWNGRADE_NOT_ALLOWED -> ✅ PASS`);
       } else {
         throw new Error(`TEST 9 FAILED with unexpected error: ${err.message}`);
       }
@@ -145,6 +154,7 @@ async function runPricingEntitlementTests() {
     const upgradeRes = await entitlementService.upgradeMerchantSubscription({
       merchantId: merchant._id,
       targetPlanIdOrName: 'pro',
+      targetBillingCycle: 'monthly',
       transactionId: upgradeTxId,
       paymentMethod: 'bKash',
     });
@@ -154,70 +164,109 @@ async function runPricingEntitlementTests() {
 
     // Verify expiry date preservation (MUST NOT reset to 30 days)
     if (afterUpgradeExpiry !== initialExpiry) {
-      throw new Error(`TEST 11 FAILED: Expiry date was altered during upgrade! Initial: ${initialExpiry}, After: ${afterUpgradeExpiry}`);
+      throw new Error(`TEST 11 FAILED: Expiry date was altered during same-cycle upgrade! Initial: ${initialExpiry}, After: ${afterUpgradeExpiry}`);
     }
-    console.log(`TEST 11: Original subscription expiry date strictly preserved after upgrade (${initialExpiry}) -> ✅ PASS`);
+    console.log(`TEST 11: Original subscription expiry date strictly preserved after same-cycle upgrade (${initialExpiry}) -> ✅ PASS`);
+
+    // 8B. Test Monthly Pro -> Yearly Pro conversion quote (৳1440 - ৳150 = ৳1290)
+    const quoteProToYearlyPro = await entitlementService.calculateUpgradeQuote(merchant._id, 'pro', 'yearly');
+    console.log(`TEST 11B: Monthly Pro -> Yearly Pro conversion quote (Target: ৳${quoteProToYearlyPro.targetPlanPrice}, Credit: ৳${quoteProToYearlyPro.creditAmount}, Difference: ৳${quoteProToYearlyPro.priceDifference}) -> ✅ PASS`);
+    if (quoteProToYearlyPro.priceDifference !== 1290) throw new Error(`Expected price difference of 1290, got ${quoteProToYearlyPro.priceDifference}`);
+
+    // 8C. Test Monthly Pro -> Yearly Business conversion quote (৳1920 - ৳150 = ৳1770)
+    const quoteProToYearlyBiz = await entitlementService.calculateUpgradeQuote(merchant._id, 'business', 'yearly');
+    console.log(`TEST 11C: Monthly Pro -> Yearly Business conversion quote (Target: ৳${quoteProToYearlyBiz.targetPlanPrice}, Credit: ৳${quoteProToYearlyBiz.creditAmount}, Difference: ৳${quoteProToYearlyBiz.priceDifference}) -> ✅ PASS`);
+    if (quoteProToYearlyBiz.priceDifference !== 1770) throw new Error(`Expected price difference of 1770, got ${quoteProToYearlyBiz.priceDifference}`);
+
+    // 8D. Execute Monthly Pro -> Yearly Pro Conversion (Pays ৳1290)
+    const yearlyUpgradeTxId = `TX_UPG_YEARLY_${Date.now()}`;
+    await Payment.create({
+      transactionId: yearlyUpgradeTxId,
+      gateway: 'bKash',
+      provider: 'bKash',
+      amount: 1290,
+      status: 'COMPLETED',
+      paymentStatus: 'COMPLETED',
+      sender: '01711112222',
+    });
+
+    const yearlyUpgradeRes = await entitlementService.upgradeMerchantSubscription({
+      merchantId: merchant._id,
+      targetPlanIdOrName: 'pro',
+      targetBillingCycle: 'yearly',
+      transactionId: yearlyUpgradeTxId,
+      paymentMethod: 'bKash',
+    });
+
+    console.log(`TEST 11D: Converted to Yearly Pro Plan (Billing: ${yearlyUpgradeRes.subscription.billingCycle}, Expiry: ${yearlyUpgradeRes.subscription.expireDate}) -> ✅ PASS`);
+    if (yearlyUpgradeRes.subscription.billingCycle !== 'yearly') throw new Error('Expected subscription billing cycle to be yearly');
+
+    // 8E. Test Yearly Subscriber Downgrade Protection (Yearly -> Monthly should fail)
+    try {
+      await entitlementService.calculateUpgradeQuote(merchant._id, 'pro', 'monthly');
+      throw new Error('TEST 11E FAILED: Should block Yearly subscriber from downgrading to Monthly');
+    } catch (err) {
+      if (err.code === 'DOWNGRADE_NOT_ALLOWED') {
+        console.log(`TEST 11E: Yearly -> Monthly downgrade attempt blocked with DOWNGRADE_NOT_ALLOWED -> ✅ PASS`);
+      } else {
+        throw new Error(`TEST 11E FAILED with unexpected error: ${err.message}`);
+      }
+    }
+
+    // 8F. Test Yearly Pro -> Yearly Business Upgrade quote (৳1920 - ৳1440 = ৳480)
+    const quoteYearlyProToBiz = await entitlementService.calculateUpgradeQuote(merchant._id, 'business', 'yearly');
+    console.log(`TEST 11F: Yearly Pro -> Yearly Business upgrade quote (Target: ৳${quoteYearlyProToBiz.targetPlanPrice}, Current: ৳${quoteYearlyProToBiz.currentPlanPrice}, Difference: ৳${quoteYearlyProToBiz.priceDifference}) -> ✅ PASS`);
+    if (quoteYearlyProToBiz.priceDifference !== 480) throw new Error(`Expected price difference of 480, got ${quoteYearlyProToBiz.priceDifference}`);
 
     // 9. Verify Entitlements for Pro Plan
     const proEntitlements = await entitlementService.getMerchantEntitlements(merchant._id);
     console.log(`TEST 12: Pro Entitlements check -> DevicesLimit: ${proEntitlements.limits.devices}, WebsitesLimit: ${proEntitlements.limits.websites}, Webhook: ${proEntitlements.features.webhook} -> ✅ PASS`);
-    if (proEntitlements.features.webhook !== true || proEntitlements.limits.devices !== 2 || proEntitlements.limits.websites !== 2) {
+    if (proEntitlements.features.webhook !== true || proEntitlements.limits.devices !== 10 || proEntitlements.limits.websites !== 10) {
       throw new Error('Pro entitlements mismatch');
     }
 
-    // 10. Test Website Limit Enforcement on Pro Plan (Max 2 Websites)
-    const brand1 = await brandService.createBrand({
-      merchantId: merchant._id,
-      name: 'Brand One',
-      websiteUrl: 'https://store1.com',
-    });
-    console.log(`TEST 13: Created Brand 1/2 (${brand1.name}) -> ✅ PASS`);
-
-    const brand2 = await brandService.createBrand({
-      merchantId: merchant._id,
-      name: 'Brand Two',
-      websiteUrl: 'https://store2.com',
-    });
-    console.log(`TEST 14: Created Brand 2/2 (${brand2.name}) -> ✅ PASS`);
+    // 10. Test Website Limit Enforcement on Pro Plan (Max 10 Websites)
+    for (let i = 1; i <= 10; i++) {
+      await brandService.createBrand({
+        merchantId: merchant._id,
+        name: `Brand ${i}`,
+        websiteUrl: `https://store${i}.com`,
+      });
+    }
+    console.log(`TEST 13 & 14: Created 10/10 Pro Plan Brands -> ✅ PASS`);
 
     try {
       await brandService.createBrand({
         merchantId: merchant._id,
-        name: 'Brand Three (Exceeds Limit)',
-        websiteUrl: 'https://store3.com',
+        name: 'Brand Eleven (Exceeds Limit)',
+        websiteUrl: 'https://store11.com',
       });
       throw new Error('TEST 15 FAILED: Allowed creating website exceeding plan limit');
     } catch (err) {
       if (err.code === 'LIMIT_REACHED') {
-        console.log(`TEST 15: Creating 3rd website rejected with LIMIT_REACHED (2/2) -> ✅ PASS`);
+        console.log(`TEST 15: Creating 11th website rejected with LIMIT_REACHED (10/10) -> ✅ PASS`);
       } else {
         throw new Error(`TEST 15 FAILED with unexpected error: ${err.message}`);
       }
     }
 
-    // 11. Test Device Limit Enforcement on Pro Plan (Max 2 Devices)
-    const key1 = await activationService.createActivationKey({ merchantId: merchant._id, plan: 'pro' });
-    const dev1Res = await activationService.activateDeviceWithKey({
-      keyString: key1.key,
-      androidId: `ANDROID_TEST_DEV_1_${Date.now()}`,
-      deviceModel: 'Samsung Galaxy A53',
-    });
-    console.log(`TEST 16: Activated Device 1/2 (${dev1Res.device.androidId}) -> ✅ PASS`);
-
-    const key2 = await activationService.createActivationKey({ merchantId: merchant._id, plan: 'pro' });
-    const dev2Res = await activationService.activateDeviceWithKey({
-      keyString: key2.key,
-      androidId: `ANDROID_TEST_DEV_2_${Date.now()}`,
-      deviceModel: 'Xiaomi Redmi Note 12',
-    });
-    console.log(`TEST 17: Activated Device 2/2 (${dev2Res.device.androidId}) -> ✅ PASS`);
+    // 11. Test Device Limit Enforcement on Pro Plan (Max 10 Devices)
+    for (let i = 1; i <= 10; i++) {
+      const key = await activationService.createActivationKey({ merchantId: merchant._id, plan: 'pro' });
+      await activationService.activateDeviceWithKey({
+        keyString: key.key,
+        androidId: `ANDROID_TEST_DEV_${i}_${Date.now()}`,
+        deviceModel: `Samsung Galaxy Test ${i}`,
+      });
+    }
+    console.log(`TEST 16 & 17: Activated 10/10 Pro Plan Devices -> ✅ PASS`);
 
     try {
       await activationService.createActivationKey({ merchantId: merchant._id, plan: 'pro' });
       throw new Error('TEST 18 FAILED: Allowed generating key exceeding device limit');
     } catch (err) {
       if (err.code === 'LIMIT_REACHED') {
-        console.log(`TEST 18: Registering 3rd device rejected with LIMIT_REACHED (2/2) -> ✅ PASS`);
+        console.log(`TEST 18: Registering 11th device rejected with LIMIT_REACHED (10/10) -> ✅ PASS`);
       } else {
         throw new Error(`TEST 18 FAILED with unexpected error: ${err.message}`);
       }

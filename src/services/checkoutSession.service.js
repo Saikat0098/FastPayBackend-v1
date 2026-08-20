@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const CheckoutSession = require('../models/CheckoutSession');
 const Merchant = require('../models/Merchant');
 const MerchantGateway = require('../models/MerchantGateway');
@@ -6,6 +7,7 @@ const { verifyCustomerCheckoutPayment } = require('./payment.service');
 const { sendWebhook } = require('./webhook.service');
 const ApiError = require('../utils/apiError');
 const crypto = require('crypto');
+
 
 const validateReturnUrl = (urlStr) => {
   if (!urlStr || typeof urlStr !== 'string') {
@@ -79,6 +81,21 @@ const createCheckoutSession = async ({
     throw err;
   }
 
+  const { checkBrandOperationalStatus } = require('../middlewares/brandGuard.middleware');
+
+  // Resolve Brand Context
+  let resolvedBrand = null;
+  if (brandId && mongoose.Types.ObjectId.isValid(brandId)) {
+    resolvedBrand = await Brand.findOne({ _id: brandId, merchant: merchant._id });
+  }
+  if (!resolvedBrand) {
+    resolvedBrand = await Brand.findOne({ merchant: merchant._id }).sort({ createdAt: 1 });
+  }
+
+  if (resolvedBrand) {
+    await checkBrandOperationalStatus(resolvedBrand);
+  }
+
   // Cryptographically secure random opaque session ID
   const randomHex = crypto.randomBytes(24).toString('hex');
   const sessionId = `cs_live_${merchant._id.toString().slice(-6)}_${randomHex}`;
@@ -89,7 +106,7 @@ const createCheckoutSession = async ({
   const session = await CheckoutSession.create({
     sessionId,
     merchant: merchant._id,
-    brand: brandId || null,
+    brand: resolvedBrand ? resolvedBrand._id : null,
     orderId: orderId.toString().trim(),
     amount: Number(amount),
     currency: currency.toUpperCase(),
@@ -117,11 +134,23 @@ const getPublicCheckoutSession = async (sessionId) => {
     select: 'companyName name logo status',
   }).populate({
     path: 'brand',
-    select: 'name logo status',
+    select: 'name logo status suspension blockedReason',
   });
 
   if (!session) {
     throw new ApiError(404, 'Checkout session not found');
+  }
+
+  // Check Brand operational status for public checkout
+  if (session.brand) {
+    const { checkBrandOperationalStatus } = require('../middlewares/brandGuard.middleware');
+    try {
+      await checkBrandOperationalStatus(session.brand);
+    } catch (err) {
+      const publicErr = new ApiError(403, 'This payment service is currently unavailable.');
+      publicErr.code = 'BRAND_UNAVAILABLE';
+      throw publicErr;
+    }
   }
 
   if (session.status === 'PENDING' && new Date() > new Date(session.expiresAt)) {
@@ -131,6 +160,7 @@ const getPublicCheckoutSession = async (sessionId) => {
 
   return session;
 };
+
 
 const verifySessionPayment = async ({
   sessionId,
@@ -230,16 +260,31 @@ const verifySessionPayment = async ({
     throw err;
   }
 
-  // Validate Gateway Ownership & Active Status
+  const brandId = session && session.brand ? (session.brand._id || session.brand) : null;
+
+  // Validate Gateway Ownership & Active Status for this Brand/Merchant
   if (mId) {
-    const activeGateway = await MerchantGateway.findOne({
+    const gwQuery = {
       merchant: mId,
       provider: { $regex: new RegExp(`^${targetProvider}$`, 'i') },
       isActive: true,
-    });
+    };
+    if (brandId) {
+      gwQuery.brand = brandId;
+    }
+
+    let activeGateway = await MerchantGateway.findOne(gwQuery);
+    if (!activeGateway && brandId) {
+      // Fallback for legacy gateways without brandId
+      activeGateway = await MerchantGateway.findOne({
+        merchant: mId,
+        provider: { $regex: new RegExp(`^${targetProvider}$`, 'i') },
+        isActive: true,
+      });
+    }
 
     if (!activeGateway) {
-      const err = new ApiError(400, `Selected payment channel (${targetProvider}) is invalid or inactive for this merchant.`);
+      const err = new ApiError(400, `Selected payment channel (${targetProvider}) is invalid or inactive for this brand.`);
       err.code = 'PAYMENT_PROVIDER_MISMATCH';
       throw err;
     }
@@ -249,12 +294,14 @@ const verifySessionPayment = async ({
   const payment = await verifyCustomerCheckoutPayment({
     trxId: cleanTrx,
     merchantId: mId,
+    brandId,
     gateway: targetProvider,
     provider: targetProvider,
     amount: session ? session.amount : undefined,
     phone: phone || (session ? session.customerPhone : undefined),
     customerName: customerName || (session ? session.customerName : undefined),
   });
+
 
   if (session) {
     session.status = 'VERIFIED';

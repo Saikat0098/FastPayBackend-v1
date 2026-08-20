@@ -14,6 +14,12 @@ const createLink = async ({ merchantId, brandId, title, amount, customerName, cu
     resolvedBrand = await Brand.findOne({ merchant: merchantId });
   }
 
+  if (resolvedBrand) {
+    const { checkBrandOperationalStatus } = require('../middlewares/brandGuard.middleware');
+    await checkBrandOperationalStatus(resolvedBrand);
+  }
+
+
   const expiresAt = new Date(Date.now() + Number(expiresInHours) * 60 * 60 * 1000);
   const maxAttempts = 5;
 
@@ -46,17 +52,29 @@ const createLink = async ({ merchantId, brandId, title, amount, customerName, cu
 const getLinks = async (merchantId, brandId) => {
   if (!merchantId) throw new ApiError(403, 'Tenant context missing');
   const query = { merchant: merchantId };
-  if (brandId) query.brand = brandId;
-  return await PaymentLink.find(query).populate('brand', 'name slug logo').sort({ createdAt: -1 });
+  if (brandId && brandId !== 'ALL') query.brand = brandId;
+  return await PaymentLink.find(query).populate('brand', 'name slug logo status').sort({ createdAt: -1 });
 };
 
 const getPublicLink = async (code) => {
   if (!code) throw new ApiError(400, 'Payment link code required');
   const link = await PaymentLink.findOne({
     $or: [{ code: code }, { uniqueCode: code }],
-  }).populate('brand');
+  }).populate('brand', 'name slug logo status suspension blockedReason');
 
   if (!link) throw new ApiError(404, 'Payment link not found');
+
+  if (link.brand) {
+    const { checkBrandOperationalStatus } = require('../middlewares/brandGuard.middleware');
+    try {
+      await checkBrandOperationalStatus(link.brand);
+    } catch (err) {
+      const publicErr = new ApiError(403, 'This payment service is currently unavailable.');
+      publicErr.code = 'BRAND_UNAVAILABLE';
+      throw publicErr;
+    }
+  }
+
   if (link.expiresAt && new Date(link.expiresAt) < new Date()) {
     link.status = 'EXPIRED';
     await link.save();
@@ -64,6 +82,7 @@ const getPublicLink = async (code) => {
   }
   return link;
 };
+
 
 module.exports = {
   createLink,

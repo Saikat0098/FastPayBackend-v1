@@ -11,7 +11,14 @@ router.post('/', enforceTenant, requireActiveSubscription, requireWebsiteLimit, 
 router.get('/', enforceTenant, brandController.getBrands);
 router.get('/:id', enforceTenant, brandController.getBrandDetail);
 router.put('/:id', enforceTenant, requireActiveSubscription, brandController.updateBrand);
+router.put('/:id/business-info', enforceTenant, brandController.submitBusinessInfo);
 router.delete('/:id', enforceTenant, brandController.deleteBrand);
+
+// Brand Credentials & Webhooks
+router.get('/:id/credentials', enforceTenant, brandController.getBrandCredentials);
+router.post('/:id/credentials/rotate-key', enforceTenant, requireActiveSubscription, brandController.rotateBrandApiKey);
+router.post('/:id/credentials/rotate-webhook-secret', enforceTenant, requireActiveSubscription, brandController.rotateBrandWebhookSecret);
+router.put('/:id/webhook-url', enforceTenant, requireActiveSubscription, brandController.updateBrandWebhookUrl);
 
 module.exports = router;
 

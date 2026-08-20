@@ -17,6 +17,7 @@ const generateKey = asyncHandler(async (req, res) => {
 
   const key = await activationService.createActivationKey({
     merchantId: targetMerchant,
+    brandId: req.body.brandId,
   });
 
   return ApiResponse.success(res, key, 'Activation key generated successfully', 201);
@@ -25,6 +26,7 @@ const generateKey = asyncHandler(async (req, res) => {
 const listKeys = asyncHandler(async (req, res) => {
   const isSuperAdmin = req.user && (req.user.role === 'superadmin' || req.user.role === 'SUPER_ADMIN' || req.user.role === 'admin');
   const merchantId = req.merchantId || req.merchant?._id;
+  const { brandId } = req.query;
 
   const query = {};
   if (!isSuperAdmin) {
@@ -33,9 +35,19 @@ const listKeys = asyncHandler(async (req, res) => {
     query.merchant = merchantId;
   }
 
-  const keys = await ActivationKey.find(query).populate('merchant usedByDevice').sort({ createdAt: -1 });
+  if (brandId && brandId !== 'ALL' && mongoose.Types.ObjectId.isValid(brandId)) {
+    query.brand = brandId;
+  }
+
+  const keys = await ActivationKey.find(query)
+    .populate('merchant', 'name companyName email')
+    .populate('brand', 'name slug logo status')
+    .populate('usedByDevice')
+    .sort({ createdAt: -1 });
+
   return ApiResponse.success(res, keys, 'Activation keys retrieved');
 });
+
 
 const resetKey = asyncHandler(async (req, res) => {
   const isSuperAdmin = req.user && (req.user.role === 'superadmin' || req.user.role === 'SUPER_ADMIN' || req.user.role === 'admin');

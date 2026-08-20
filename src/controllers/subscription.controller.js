@@ -142,8 +142,8 @@ const getSubscriptionCheckoutSession = asyncHandler(async (req, res) => {
   const amount = isFree
     ? 0
     : (isTest
-        ? (plan.priceMonthly ?? plan.priceBDT ?? 5)
-        : (isYearly ? plan.priceYearly : (plan.priceMonthly || plan.priceBDT)));
+      ? (plan.priceMonthly ?? plan.priceBDT ?? 5)
+      : (isYearly ? plan.priceYearly : (plan.priceMonthly || plan.priceBDT)));
 
   const paymentMethods = await PaymentMethod.find({ isActive: true }).sort({ displayOrder: 1 });
 
@@ -173,24 +173,29 @@ const getSubscriptionCheckoutSession = asyncHandler(async (req, res) => {
 const getUpgradeQuote = asyncHandler(async (req, res) => {
   const entitlementService = require('../services/entitlement.service');
   const merchantId = req.merchantId || req.merchant?._id || req.user?.merchant;
-  const { targetPlan } = req.query;
+  const { targetPlan, billingCycle, targetBillingCycle } = req.query;
 
   if (!targetPlan) {
     return ApiResponse.error(res, 'targetPlan is required', 400);
   }
 
-  const quote = await entitlementService.calculateUpgradeQuote(merchantId, targetPlan);
+  const quote = await entitlementService.calculateUpgradeQuote(
+    merchantId,
+    targetPlan,
+    targetBillingCycle || billingCycle
+  );
   return ApiResponse.success(res, quote, 'Upgrade quote calculated');
 });
 
 const upgradeSubscription = asyncHandler(async (req, res) => {
   const entitlementService = require('../services/entitlement.service');
   const merchantId = req.merchantId || req.merchant?._id || req.user?.merchant;
-  const { targetPlan, transactionId, paymentMethod } = req.body;
+  const { targetPlan, billingCycle, targetBillingCycle, transactionId, paymentMethod } = req.body;
 
   const result = await entitlementService.upgradeMerchantSubscription({
     merchantId,
     targetPlanIdOrName: targetPlan,
+    targetBillingCycle: targetBillingCycle || billingCycle,
     transactionId,
     paymentMethod,
   });
@@ -204,33 +209,45 @@ const getUpgradeCheckoutSession = asyncHandler(async (req, res) => {
   const merchantId = req.merchantId || req.merchant?._id || req.user?.merchant;
 
   const targetPlan = req.params.targetPlan || req.query.targetPlan;
+  const billingCycle = req.query.billingCycle || req.query.targetBillingCycle || req.body?.billingCycle;
+
   if (!targetPlan) {
     return ApiResponse.error(res, 'Target plan is required for upgrade checkout', 400);
   }
 
-  const quote = await entitlementService.calculateUpgradeQuote(merchantId, targetPlan);
+  const quote = await entitlementService.calculateUpgradeQuote(
+    merchantId,
+    targetPlan,
+    billingCycle
+  );
   const paymentMethods = await PaymentMethod.find({ isActive: true }).sort({ displayOrder: 1 });
 
   return ApiResponse.success(res, {
     orderId: `UPG-${quote.targetPlan.toUpperCase()}-${Date.now().toString().slice(-6)}`,
     amount: quote.priceDifference,
     currency: 'BDT',
+    upgradeType: quote.upgradeType,
+    isCycleConversion: quote.isCycleConversion,
     currentPlan: quote.currentPlan,
     currentPlanName: quote.currentPlanName,
     currentPlanPrice: quote.currentPlanPrice,
     targetPlan: quote.targetPlan,
     targetPlanName: quote.targetPlanName,
     targetPlanPrice: quote.targetPlanPrice,
+    creditAmount: quote.creditAmount,
     upgradeAmount: quote.priceDifference,
     priceDifference: quote.priceDifference,
-    billingCycle: quote.billingCycle,
+    currentBillingCycle: quote.currentBillingCycle,
+    targetBillingCycle: quote.targetBillingCycle,
+    billingCycle: quote.targetBillingCycle,
     expireDate: quote.expireDate,
+    newExpireDate: quote.newExpireDate,
     daysRemaining: quote.daysRemaining,
     newLimits: quote.newLimits,
     gateways: paymentMethods,
     merchant: {
       name: 'FastPay Official',
-      brandName: `FastPay Plan Upgrade: ${quote.currentPlanName} → ${quote.targetPlanName}`,
+      brandName: `FastPay Plan Upgrade: ${quote.currentPlanName} → ${quote.targetPlanName} (${quote.targetBillingCycle === 'yearly' ? 'Yearly' : 'Monthly'})`,
     },
   }, 'Upgrade checkout session created');
 });

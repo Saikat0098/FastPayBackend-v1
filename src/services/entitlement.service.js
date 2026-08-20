@@ -39,7 +39,7 @@ const getActiveSubscription = async (merchantId) => {
   const now = new Date();
   if (now >= new Date(sub.expireDate)) {
     sub.status = 'expired';
-    await sub.save().catch(() => {});
+    await sub.save().catch(() => { });
     logger.info(`[Entitlement] Subscription ${sub._id} for merchant ${mId} automatically marked EXPIRED.`);
     return null;
   }
@@ -78,7 +78,7 @@ const getMerchantEntitlements = async (merchantId) => {
   // If active in DB but past expireDate, update status in background
   if (hasSubscription && rawSub.status === 'active' && isExpired) {
     rawSub.status = 'expired';
-    await rawSub.save().catch(() => {});
+    await rawSub.save().catch(() => { });
   }
 
   let planDoc = rawSub?.planId || null;
@@ -111,33 +111,33 @@ const getMerchantEntitlements = async (merchantId) => {
   // Compute available upgrade plans (only higher tier plans, excluding test plan from production upgrades)
   const availableUpgrades = isActive
     ? allPlans
-        .filter((p) => !p.testOnly && !p.isTestOnly && p.name !== 'test' && (p.hierarchyRank || 1) > hierarchyRank)
-        .map((p) => {
-          const currentPlanPrice = rawSub.billingCycle === 'yearly'
-            ? (planDoc?.priceYearly || rawSub.price || 0)
-            : (planDoc?.priceMonthly || planDoc?.priceBDT || rawSub.price || 0);
+      .filter((p) => !p.testOnly && !p.isTestOnly && p.name !== 'test' && (p.hierarchyRank || 1) > hierarchyRank)
+      .map((p) => {
+        const currentPlanPrice = rawSub.billingCycle === 'yearly'
+          ? (planDoc?.priceYearly || rawSub.price || 0)
+          : (planDoc?.priceMonthly || planDoc?.priceBDT || rawSub.price || 0);
 
-          const targetPlanPrice = rawSub.billingCycle === 'yearly'
-            ? p.priceYearly
-            : (p.priceMonthly || p.priceBDT);
+        const targetPlanPrice = rawSub.billingCycle === 'yearly'
+          ? p.priceYearly
+          : (p.priceMonthly || p.priceBDT);
 
-          const priceDifference = Math.max(0, targetPlanPrice - currentPlanPrice);
+        const priceDifference = Math.max(0, targetPlanPrice - currentPlanPrice);
 
-          return {
-            planId: p._id,
-            name: p.name,
-            title: p.title,
-            hierarchyRank: p.hierarchyRank,
-            billingCycle: rawSub.billingCycle,
-            targetPlanPrice,
-            currentPlanPrice,
-            priceDifference,
-            maxDevices: p.maxDevices,
-            integrationLimit: p.integrationLimit,
-            webhookEnabled: p.webhookEnabled,
-            features: p.features,
-          };
-        })
+        return {
+          planId: p._id,
+          name: p.name,
+          title: p.title,
+          hierarchyRank: p.hierarchyRank,
+          billingCycle: rawSub.billingCycle,
+          targetPlanPrice,
+          currentPlanPrice,
+          priceDifference,
+          maxDevices: p.maxDevices,
+          integrationLimit: p.integrationLimit,
+          webhookEnabled: p.webhookEnabled,
+          features: p.features,
+        };
+      })
     : [];
 
   return {
@@ -181,8 +181,21 @@ const getMerchantEntitlements = async (merchantId) => {
       _id: rawSub._id,
       transactionId: rawSub.transactionId,
       paymentMethod: rawSub.paymentMethod,
+      price: rawSub.price,
       amount: rawSub.amount || rawSub.price,
+      plan: rawSub.plan,
+      planName: rawSub.planName || planDoc?.title || rawSub.plan,
+      billingCycle: rawSub.billingCycle,
+      startDate: rawSub.startDate,
+      expireDate: rawSub.expireDate,
+      status: rawSub.status,
+      maxDevices: maxDevices,
+      integrationLimit: maxWebsites,
+      webhookEnabled: webhookEnabled,
       upgradeHistory: rawSub.upgradeHistory || [],
+      renewalHistory: rawSub.renewalHistory || [],
+      createdAt: rawSub.createdAt,
+      updatedAt: rawSub.updatedAt,
     } : null,
   };
 };
@@ -262,7 +275,7 @@ const checkWebsiteLimit = async (merchantId) => {
 /**
  * Calculates prorated upgrade quote
  */
-const calculateUpgradeQuote = async (merchantId, targetPlanIdOrName) => {
+const calculateUpgradeQuote = async (merchantId, targetPlanIdOrName, requestedTargetBillingCycle = null) => {
   const mId = resolveMerchantId(merchantId);
   const entitlements = await getMerchantEntitlements(mId);
 
@@ -285,17 +298,21 @@ const calculateUpgradeQuote = async (merchantId, targetPlanIdOrName) => {
     throw new ApiError(404, 'Selected target plan not found or inactive');
   }
 
-  const currentRank = entitlements.hierarchyRank || 1;
-  const targetRank = targetPlan.hierarchyRank || 1;
+  const currentBillingCycle = entitlements.billingCycle || 'monthly';
+  const targetBillingCycle = (requestedTargetBillingCycle || currentBillingCycle).toLowerCase();
 
-  if (targetRank <= currentRank) {
+  // Rule: Yearly subscribers cannot downgrade to Monthly
+  if (currentBillingCycle === 'yearly' && targetBillingCycle === 'monthly') {
     const err = new ApiError(
       400,
-      `Plan downgrade is not permitted. You can only upgrade to a higher tier plan (e.g. Pro, Business, Agency, Enterprise).`
+      'Yearly subscribers cannot downgrade to Monthly billing. You can only upgrade to higher-tier Yearly plans.'
     );
     err.code = 'DOWNGRADE_NOT_ALLOWED';
     throw err;
   }
+
+  const currentRank = entitlements.hierarchyRank || 1;
+  const targetRank = targetPlan.hierarchyRank || 1;
 
   const currentPlanDoc = await Plan.findOne({
     $or: [
@@ -304,30 +321,89 @@ const calculateUpgradeQuote = async (merchantId, targetPlanIdOrName) => {
     ],
   });
 
-  const isYearly = entitlements.billingCycle === 'yearly';
-  const currentPlanPrice = isYearly
-    ? (currentPlanDoc?.priceYearly || entitlements.subscription?.price || 0)
-    : (currentPlanDoc?.priceMonthly || currentPlanDoc?.priceBDT || entitlements.subscription?.price || 0);
+  let upgradeType = 'SAME_CYCLE_TIER_UPGRADE';
+  let currentPlanPrice = 0;
+  let targetPlanPrice = 0;
+  let creditAmount = 0;
+  let priceDifference = 0;
+  let isCycleConversion = false;
+  let newExpireDate = entitlements.expireDate;
 
-  const targetPlanPrice = isYearly
-    ? targetPlan.priceYearly
-    : (targetPlan.priceMonthly || targetPlan.priceBDT);
+  if (currentBillingCycle === 'monthly' && targetBillingCycle === 'yearly') {
+    // Case B: Monthly -> Yearly Billing Conversion
+    upgradeType = 'MONTHLY_TO_YEARLY_CONVERSION';
+    isCycleConversion = true;
 
-  const priceDifference = Math.max(0, targetPlanPrice - currentPlanPrice);
+    // Allowed if targetRank >= currentRank (e.g. Starter -> Yearly Starter, Starter -> Yearly Pro, Pro -> Yearly Pro, Pro -> Yearly Business)
+    if (targetRank < currentRank) {
+      const err = new ApiError(
+        400,
+        `Plan downgrade is not permitted. You cannot convert from a higher tier (${entitlements.planName}) to a lower tier (${targetPlan.title}).`
+      );
+      err.code = 'DOWNGRADE_NOT_ALLOWED';
+      throw err;
+    }
+
+    // Target is Yearly price
+    targetPlanPrice = Number(targetPlan.priceYearly ?? (targetPlan.priceMonthly ? targetPlan.priceMonthly * 12 * 0.8 : 0));
+    
+    // Credit is the merchant's actual current monthly plan price
+    const monthlyPaid = Number(entitlements.subscription?.amount || entitlements.subscription?.price || 0);
+    const monthlyDocPrice = Number(currentPlanDoc?.priceMonthly ?? currentPlanDoc?.priceBDT ?? 0);
+    creditAmount = monthlyPaid > 0 ? monthlyPaid : (monthlyDocPrice > 0 ? monthlyDocPrice : 100);
+    currentPlanPrice = creditAmount;
+
+    priceDifference = Math.max(0, targetPlanPrice - creditAmount);
+    // 1-year term granted on yearly conversion
+    newExpireDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
+  } else {
+    // Case A: Same-Cycle Tier Upgrade (Monthly -> Monthly OR Yearly -> Yearly)
+    upgradeType = 'SAME_CYCLE_TIER_UPGRADE';
+    isCycleConversion = false;
+
+    if (targetRank <= currentRank) {
+      const err = new ApiError(
+        400,
+        `Plan downgrade is not permitted. You can only upgrade to a higher tier plan (e.g. Pro, Business, Agency, Enterprise).`
+      );
+      err.code = 'DOWNGRADE_NOT_ALLOWED';
+      throw err;
+    }
+
+    const isYearly = currentBillingCycle === 'yearly';
+    currentPlanPrice = isYearly
+      ? Number(currentPlanDoc?.priceYearly || entitlements.subscription?.price || entitlements.subscription?.amount || 0)
+      : Number(currentPlanDoc?.priceMonthly || currentPlanDoc?.priceBDT || entitlements.subscription?.price || entitlements.subscription?.amount || 0);
+
+    targetPlanPrice = isYearly
+      ? Number(targetPlan.priceYearly || (targetPlan.priceMonthly ? targetPlan.priceMonthly * 12 * 0.8 : 0))
+      : Number(targetPlan.priceMonthly || targetPlan.priceBDT || 0);
+
+    creditAmount = currentPlanPrice;
+    priceDifference = Math.max(0, targetPlanPrice - currentPlanPrice);
+    // Original expiry is strictly preserved
+    newExpireDate = entitlements.expireDate;
+  }
 
   return {
     merchantId: mId,
+    upgradeType,
+    isCycleConversion,
     currentPlan: entitlements.plan,
     currentPlanName: entitlements.planName,
     currentRank,
     targetPlan: targetPlan.name,
     targetPlanName: targetPlan.title,
     targetRank,
-    billingCycle: entitlements.billingCycle,
+    currentBillingCycle,
+    targetBillingCycle,
+    billingCycle: targetBillingCycle,
     expireDate: entitlements.expireDate,
+    newExpireDate,
     daysRemaining: entitlements.daysRemaining,
     currentPlanPrice,
     targetPlanPrice,
+    creditAmount,
     priceDifference,
     newLimits: {
       devices: targetPlan.maxDevices,
@@ -343,11 +419,12 @@ const calculateUpgradeQuote = async (merchantId, targetPlanIdOrName) => {
 const upgradeMerchantSubscription = async ({
   merchantId,
   targetPlanIdOrName,
+  targetBillingCycle,
   transactionId,
   paymentMethod = 'bKash',
 }) => {
   const mId = resolveMerchantId(merchantId);
-  const quote = await calculateUpgradeQuote(mId, targetPlanIdOrName);
+  const quote = await calculateUpgradeQuote(mId, targetPlanIdOrName, targetBillingCycle);
 
   if (!transactionId || !transactionId.trim()) {
     throw new ApiError(400, 'Payment Transaction ID is required for upgrading your subscription.');
@@ -406,8 +483,9 @@ const upgradeMerchantSubscription = async ({
 
   const previousPlan = activeSub.plan;
   const previousRank = activeSub.hierarchyRank || quote.currentRank;
+  const previousBillingCycle = activeSub.billingCycle || 'monthly';
 
-  // 6. Update Subscription (PRESERVING original expireDate!)
+  // 6. Update Subscription
   activeSub.planId = targetPlan._id;
   activeSub.plan = targetPlan.name;
   activeSub.planName = targetPlan.title;
@@ -415,10 +493,18 @@ const upgradeMerchantSubscription = async ({
   activeSub.integrationLimit = targetPlan.integrationLimit;
   activeSub.webhookEnabled = targetPlan.webhookEnabled;
   activeSub.hierarchyRank = targetPlan.hierarchyRank;
+  activeSub.billingCycle = quote.targetBillingCycle;
   activeSub.price = quote.targetPlanPrice;
   activeSub.amount = quote.targetPlanPrice;
   activeSub.paymentMethod = paymentMethod || paymentRecord.provider || 'bKash';
   activeSub.transactionId = cleanTrxId;
+
+  if (quote.upgradeType === 'MONTHLY_TO_YEARLY_CONVERSION') {
+    // Fresh 1-year activation term on Yearly conversion
+    activeSub.startDate = new Date();
+    activeSub.expireDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
+  }
+  // Otherwise, if SAME_CYCLE_TIER_UPGRADE, original activeSub.expireDate is strictly PRESERVED!
 
   // Append to upgrade history
   if (!activeSub.upgradeHistory) activeSub.upgradeHistory = [];
@@ -427,6 +513,9 @@ const upgradeMerchantSubscription = async ({
     toPlan: targetPlan.name,
     fromRank: previousRank,
     toRank: targetPlan.hierarchyRank,
+    fromBillingCycle: previousBillingCycle,
+    toBillingCycle: quote.targetBillingCycle,
+    upgradeType: quote.upgradeType,
     priceDifference: quote.priceDifference,
     transactionId: cleanTrxId,
     upgradedAt: new Date(),
@@ -439,14 +528,14 @@ const upgradeMerchantSubscription = async ({
   paymentRecord.paymentStatus = 'COMPLETED';
   paymentRecord.isUsedForSubscription = true;
   paymentRecord.usedBySubscription = activeSub._id;
-  await paymentRecord.save().catch(() => {});
+  await paymentRecord.save().catch(() => { });
 
-  logger.info(`[Subscription Upgrade] Merchant ${mId} upgraded from ${previousPlan} to ${targetPlan.name}. Original expiry ${activeSub.expireDate} preserved.`);
+  logger.info(`[Subscription Upgrade] Merchant ${mId} upgraded from ${previousPlan} (${previousBillingCycle}) to ${targetPlan.name} (${quote.targetBillingCycle}). UpgradeType: ${quote.upgradeType}. Expiry: ${activeSub.expireDate}.`);
 
   return {
     success: true,
     code: 'UPGRADE_SUCCESSFUL',
-    message: `Successfully upgraded to ${targetPlan.title}! Your new limits and features are now active.`,
+    message: `Successfully upgraded to ${targetPlan.title} (${quote.targetBillingCycle === 'yearly' ? 'Yearly' : 'Monthly'})! Your new limits and features are now active.`,
     subscription: activeSub,
     entitlements: await getMerchantEntitlements(mId),
   };

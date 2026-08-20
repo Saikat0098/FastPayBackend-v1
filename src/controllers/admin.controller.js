@@ -542,6 +542,119 @@ const updateAdminSettings = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, settings, 'System settings updated');
 });
 
+// 12. Brand Management & Compliance (Admin Review & Suspension)
+const getAllBrands = asyncHandler(async (req, res) => {
+  const brandService = require('../services/brand.service');
+  const { page, limit, status, submissionStatus, reviewStatus, search } = req.query;
+  const result = await brandService.getAdminBrands({
+    page,
+    limit,
+    status,
+    submissionStatus,
+    reviewStatus,
+    search,
+  });
+  return ApiResponse.success(res, result, 'Admin brands list retrieved');
+});
+
+const getAdminBrandStats = asyncHandler(async (req, res) => {
+  const brandService = require('../services/brand.service');
+  const stats = await brandService.getAdminBrandStats();
+  return ApiResponse.success(res, stats, 'Admin brand statistics retrieved');
+});
+
+const getAdminBrandDetail = asyncHandler(async (req, res) => {
+  const brandService = require('../services/brand.service');
+  const brand = await brandService.getAdminBrandDetail(req.params.id);
+  return ApiResponse.success(res, brand, 'Brand details retrieved successfully');
+});
+
+const reviewAdminBrand = asyncHandler(async (req, res) => {
+  const brandService = require('../services/brand.service');
+  const { action, note, reason } = req.body;
+  const adminUser = req.admin || req.user;
+
+  let brand;
+  const upperAction = (action || '').toUpperCase();
+  if (upperAction === 'APPROVE' || upperAction === 'APPROVED') {
+    brand = await brandService.approveBrand(req.params.id, { adminUser, note: note || reason });
+  } else if (upperAction === 'REQUEST_UPDATE' || upperAction === 'NEEDS_UPDATE') {
+    brand = await brandService.requestBrandUpdate(req.params.id, { adminUser, reason: reason || note });
+  } else if (upperAction === 'REJECT' || upperAction === 'REJECTED') {
+    brand = await brandService.rejectBrand(req.params.id, { adminUser, reason: reason || note });
+  } else {
+    throw new ApiError(400, 'Invalid review action. Allowed: APPROVE, REQUEST_UPDATE, REJECT');
+  }
+
+  return ApiResponse.success(res, brand, `Brand review action '${upperAction}' executed successfully`);
+});
+
+const suspendAdminBrand = asyncHandler(async (req, res) => {
+  const brandService = require('../services/brand.service');
+  const { suspensionType, durationHours, durationMinutes, customExpiresAt, reason } = req.body;
+  const adminUser = req.admin || req.user;
+
+  const brand = await brandService.suspendBrand(req.params.id, {
+    adminUser,
+    suspensionType: suspensionType || 'TEMPORARY',
+    durationHours,
+    durationMinutes,
+    customExpiresAt,
+    reason,
+  });
+
+  return ApiResponse.success(res, brand, 'Brand suspended successfully');
+});
+
+const unsuspendAdminBrand = asyncHandler(async (req, res) => {
+  const brandService = require('../services/brand.service');
+  const { reason } = req.body;
+  const adminUser = req.admin || req.user;
+
+  const brand = await brandService.unsuspendBrand(req.params.id, {
+    adminUser,
+    reason,
+  });
+
+  return ApiResponse.success(res, brand, 'Brand unsuspended successfully');
+});
+
+const blockAdminBrand = asyncHandler(async (req, res) => {
+  const brandService = require('../services/brand.service');
+  const { reason } = req.body;
+  const adminUser = req.admin || req.user;
+
+  const brand = await brandService.blockBrand(req.params.id, {
+    adminUser,
+    reason,
+  });
+
+  return ApiResponse.success(res, brand, 'Brand permanently blocked successfully');
+});
+
+const unblockAdminBrand = asyncHandler(async (req, res) => {
+  const brandService = require('../services/brand.service');
+  const { reason } = req.body;
+  const adminUser = req.admin || req.user;
+
+  const brand = await brandService.unblockBrand(req.params.id, {
+    adminUser,
+    reason,
+  });
+
+  return ApiResponse.success(res, brand, 'Brand unblocked successfully');
+});
+
+const revealAdminBrandDoc = asyncHandler(async (req, res) => {
+  const brandService = require('../services/brand.service');
+  const adminUser = req.admin || req.user;
+  const ipAddress = req.ip || req.headers['x-forwarded-for'] || '';
+  const userAgent = req.headers['user-agent'] || '';
+
+  const doc = await brandService.revealBrandVerificationDoc(req.params.id, adminUser, ipAddress, userAgent);
+  return ApiResponse.success(res, doc, 'Verification document unmasked');
+});
+
 module.exports = {
   getAdminDashboard,
   getAllUsers,
@@ -567,4 +680,16 @@ module.exports = {
   getLoginHistories,
   getAdminSettings,
   updateAdminSettings,
+  // Brand Compliance & Isolation
+  getAllBrands,
+  getAdminBrandStats,
+  getAdminBrandDetail,
+  reviewAdminBrand,
+  suspendAdminBrand,
+  unsuspendAdminBrand,
+  blockAdminBrand,
+  unblockAdminBrand,
+  revealAdminBrandDoc,
 };
+
+

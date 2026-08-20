@@ -4,8 +4,10 @@ const merchantGatewayController = require('../controllers/merchantGateway.contro
 const { verifyToken } = require('../middlewares/auth.middleware');
 const { enforceTenant } = require('../middlewares/tenant.middleware');
 
-// Public checkout endpoint (no auth required)
+// Public checkout endpoints (no auth required)
+router.get('/public/brand/:brandId', merchantGatewayController.getPublicBrandGateways);
 router.get('/public/:merchantId', merchantGatewayController.getPublicMerchantGateways);
+
 
 // Protected Merchant Gateway APIs
 router.use(verifyToken, enforceTenant);

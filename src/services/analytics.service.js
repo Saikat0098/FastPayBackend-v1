@@ -21,9 +21,12 @@ const getOverviewStats = async (opts = {}) => {
     query.merchant = new mongoose.Types.ObjectId(merchantId.toString());
   }
 
-  if (brandId) query.brand = new mongoose.Types.ObjectId(brandId.toString());
+  if (brandId && brandId !== 'ALL' && mongoose.Types.ObjectId.isValid(brandId)) {
+    query.brand = new mongoose.Types.ObjectId(brandId.toString());
+  }
 
-  const tenantFilter = query.merchant ? { merchant: query.merchant } : {};
+  const tenantFilter = { ...(query.merchant ? { merchant: query.merchant } : {}), ...(query.brand ? { brand: query.brand } : {}) };
+
 
   // 1. Calculate Revenue and Total Count
   const revenueAggregation = await Payment.aggregate([

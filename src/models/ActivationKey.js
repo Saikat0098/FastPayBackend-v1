@@ -38,6 +38,13 @@ const activationKeySchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Merchant',
       required: true,
+      index: true,
+    },
+    brand: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Brand',
+      required: false,
+      index: true,
     },
     activationTime: {
       type: Date,
@@ -55,5 +62,7 @@ const activationKeySchema = new mongoose.Schema(
 
 activationKeySchema.index({ key: 1 });
 activationKeySchema.index({ merchant: 1 });
+activationKeySchema.index({ merchant: 1, brand: 1 });
 
 module.exports = mongoose.model('ActivationKey', activationKeySchema);
+

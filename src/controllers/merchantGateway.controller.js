@@ -3,6 +3,7 @@ const ApiResponse = require('../utils/apiResponse');
 const ApiError = require('../utils/apiError');
 const MerchantGateway = require('../models/MerchantGateway');
 const Brand = require('../models/Brand');
+const { checkBrandOperationalStatus } = require('../middlewares/brandGuard.middleware');
 const mongoose = require('mongoose');
 
 // Helper to normalize and validate Bangladeshi mobile numbers
@@ -28,61 +29,96 @@ const getProviderDisplayName = (code) => {
   }
 };
 
-// 1. Get authenticated merchant's gateways
+// 1. Get authenticated merchant's gateways (scoped by Brand)
 const getMerchantGateways = asyncHandler(async (req, res) => {
   const merchantId = req.merchantId || req.merchant?._id;
   if (!merchantId) {
     throw new ApiError(403, 'Tenant context missing');
   }
 
-  let gateways = await MerchantGateway.find({ merchant: merchantId }).sort({ isDefault: -1, createdAt: -1 });
+  const { brandId } = req.query;
+  const query = { merchant: merchantId };
 
-  // Auto-migrate from Brand/Settings legacy numbers if zero gateways exist
-  if (gateways.length === 0) {
-    const brand = await Brand.findOne({ merchant: merchantId });
-    if (brand && brand.paymentSettings) {
-      const legacyMap = [
-        { provider: 'bkash', number: brand.paymentSettings.bKashNumber },
-        { provider: 'nagad', number: brand.paymentSettings.nagadNumber },
-        { provider: 'rocket', number: brand.paymentSettings.rocketNumber },
-        { provider: 'upay', number: brand.paymentSettings.upayNumber },
-      ];
-      let firstAdded = false;
+  let targetBrand = null;
+  if (brandId && brandId !== 'ALL' && mongoose.Types.ObjectId.isValid(brandId)) {
+    query.brand = brandId;
+    targetBrand = await Brand.findOne({ _id: brandId, merchant: merchantId });
+  }
 
-      for (const item of legacyMap) {
-        if (item.number && item.number.trim()) {
-          const { valid, number } = normalizeAndValidateNumber(item.number);
-          if (valid) {
-            await MerchantGateway.create({
-              merchant: merchantId,
-              provider: item.provider,
-              accountNumber: number,
-              accountType: 'personal',
-              isActive: true,
-              isDefault: !firstAdded,
-            }).catch(() => {});
-            firstAdded = true;
-          }
+  let gateways = await MerchantGateway.find(query)
+    .populate('brand', 'name slug logo status')
+    .sort({ isDefault: -1, createdAt: -1 });
+
+  // Auto-migrate from Brand legacy paymentSettings if zero gateways exist for this specific brand
+  if (gateways.length === 0 && targetBrand && targetBrand.paymentSettings) {
+    const legacyMap = [
+      { provider: 'bkash', number: targetBrand.paymentSettings.bKashNumber },
+      { provider: 'nagad', number: targetBrand.paymentSettings.nagadNumber },
+      { provider: 'rocket', number: targetBrand.paymentSettings.rocketNumber },
+      { provider: 'upay', number: targetBrand.paymentSettings.upayNumber },
+    ];
+    let firstAdded = false;
+
+    for (const item of legacyMap) {
+      if (item.number && item.number.trim()) {
+        const { valid, number } = normalizeAndValidateNumber(item.number);
+        if (valid) {
+          await MerchantGateway.create({
+            merchant: merchantId,
+            brand: targetBrand._id,
+            provider: item.provider,
+            accountNumber: number,
+            accountType: 'personal',
+            isActive: true,
+            isDefault: !firstAdded,
+          }).catch(() => {});
+          firstAdded = true;
         }
       }
+    }
 
-      if (firstAdded) {
-        gateways = await MerchantGateway.find({ merchant: merchantId }).sort({ isDefault: -1, createdAt: -1 });
-      }
+    if (firstAdded) {
+      gateways = await MerchantGateway.find(query)
+        .populate('brand', 'name slug logo status')
+        .sort({ isDefault: -1, createdAt: -1 });
     }
   }
 
   return ApiResponse.success(res, gateways, 'Merchant payment gateways retrieved successfully');
 });
 
-// 2. Create gateway
+// 2. Create gateway for a specific Brand
 const createMerchantGateway = asyncHandler(async (req, res) => {
   const merchantId = req.merchantId || req.merchant?._id;
   if (!merchantId) {
     throw new ApiError(403, 'Tenant context missing');
   }
 
-  const { provider, accountNumber, accountType, accountName, isDefault, isActive } = req.body;
+  const { brandId, provider, accountNumber, accountType, accountName, isDefault, isActive } = req.body;
+
+  // Resolve Brand context
+  let targetBrandId = brandId;
+  if (!targetBrandId || !mongoose.Types.ObjectId.isValid(targetBrandId)) {
+    // If brand not explicitly supplied, fallback to merchant's first active brand
+    const firstBrand = await Brand.findOne({ merchant: merchantId }).sort({ createdAt: 1 });
+    if (firstBrand) {
+      targetBrandId = firstBrand._id;
+    }
+  }
+
+  if (!targetBrandId) {
+    throw new ApiError(400, 'Brand selection is required to add a payment gateway. Please select or create a Brand first.');
+  }
+
+  // Verify Brand belongs to merchant and check operational status
+  const brandDoc = await Brand.findOne({ _id: targetBrandId, merchant: merchantId });
+  if (!brandDoc) {
+    throw new ApiError(404, 'Brand not found or does not belong to your merchant account.');
+  }
+
+  if (brandDoc.status === 'BLOCKED') {
+    throw new ApiError(403, 'Cannot add payment gateways to a blocked Brand.');
+  }
 
   const normProvider = (provider || '').toLowerCase().trim();
   if (!['bkash', 'nagad', 'rocket', 'upay'].includes(normProvider)) {
@@ -95,26 +131,28 @@ const createMerchantGateway = asyncHandler(async (req, res) => {
     throw new ApiError(400, `Invalid ${providerTitle} number.`);
   }
 
-  // Check duplicate
+  // Check duplicate within the same Brand
   const existingDuplicate = await MerchantGateway.findOne({
     merchant: merchantId,
+    brand: targetBrandId,
     provider: normProvider,
     accountNumber: number,
   });
 
   if (existingDuplicate) {
-    throw new ApiError(400, 'This gateway is already added.');
+    throw new ApiError(400, `This ${providerTitle} number is already added for ${brandDoc.name}.`);
   }
 
-  const existingCount = await MerchantGateway.countDocuments({ merchant: merchantId });
+  const existingCount = await MerchantGateway.countDocuments({ merchant: merchantId, brand: targetBrandId });
   const makeDefault = isDefault || existingCount === 0;
 
   if (makeDefault) {
-    await MerchantGateway.updateMany({ merchant: merchantId }, { isDefault: false });
+    await MerchantGateway.updateMany({ merchant: merchantId, brand: targetBrandId }, { isDefault: false });
   }
 
   const gateway = await MerchantGateway.create({
     merchant: merchantId,
+    brand: targetBrandId,
     provider: normProvider,
     accountNumber: number,
     accountType: (accountType || 'personal').toLowerCase(),
@@ -123,7 +161,8 @@ const createMerchantGateway = asyncHandler(async (req, res) => {
     isActive: isActive !== undefined ? Boolean(isActive) : true,
   });
 
-  return ApiResponse.success(res, gateway, `${providerTitle} gateway added successfully.`, 201);
+  const populated = await MerchantGateway.findById(gateway._id).populate('brand', 'name slug logo status');
+  return ApiResponse.success(res, populated, `${providerTitle} gateway added successfully to ${brandDoc.name}.`, 201);
 });
 
 // 3. Update gateway
@@ -143,7 +182,14 @@ const updateMerchantGateway = asyncHandler(async (req, res) => {
     throw new ApiError(404, 'Gateway not found or you do not have permission to manage this gateway.');
   }
 
-  const { provider, accountNumber, accountType, accountName, isDefault, isActive } = req.body;
+  const { brandId, provider, accountNumber, accountType, accountName, isDefault, isActive } = req.body;
+
+  let targetBrandId = gateway.brand;
+  if (brandId && mongoose.Types.ObjectId.isValid(brandId) && brandId.toString() !== gateway.brand?.toString()) {
+    const newBrand = await Brand.findOne({ _id: brandId, merchant: merchantId });
+    if (!newBrand) throw new ApiError(404, 'Target brand not found');
+    targetBrandId = newBrand._id;
+  }
 
   let targetProvider = gateway.provider;
   if (provider !== undefined) {
@@ -165,19 +211,21 @@ const updateMerchantGateway = asyncHandler(async (req, res) => {
     targetNumber = number;
   }
 
-  // Check duplicate if provider or number changed
-  if (targetProvider !== gateway.provider || targetNumber !== gateway.accountNumber) {
+  // Check duplicate within the brand
+  if (targetProvider !== gateway.provider || targetNumber !== gateway.accountNumber || targetBrandId !== gateway.brand) {
     const dup = await MerchantGateway.findOne({
       _id: { $ne: id },
       merchant: merchantId,
+      brand: targetBrandId,
       provider: targetProvider,
       accountNumber: targetNumber,
     });
     if (dup) {
-      throw new ApiError(400, 'This gateway is already added.');
+      throw new ApiError(400, 'This gateway number is already added for this brand.');
     }
   }
 
+  gateway.brand = targetBrandId;
   gateway.provider = targetProvider;
   gateway.accountNumber = targetNumber;
   if (accountType !== undefined) gateway.accountType = accountType.toLowerCase();
@@ -186,7 +234,7 @@ const updateMerchantGateway = asyncHandler(async (req, res) => {
 
   if (isDefault !== undefined && Boolean(isDefault) !== gateway.isDefault) {
     if (isDefault) {
-      await MerchantGateway.updateMany({ merchant: merchantId }, { isDefault: false });
+      await MerchantGateway.updateMany({ merchant: merchantId, brand: targetBrandId }, { isDefault: false });
       gateway.isDefault = true;
     } else {
       gateway.isDefault = false;
@@ -195,14 +243,17 @@ const updateMerchantGateway = asyncHandler(async (req, res) => {
 
   await gateway.save();
 
-  // If no default gateway exists after update, set first gateway as default
-  const hasDefault = await MerchantGateway.findOne({ merchant: merchantId, isDefault: true });
-  if (!hasDefault) {
-    await MerchantGateway.findOneAndUpdate({ merchant: merchantId }, { isDefault: true });
-    gateway.isDefault = true;
+  // If no default gateway exists in this brand, promote first
+  if (targetBrandId) {
+    const hasDefault = await MerchantGateway.findOne({ merchant: merchantId, brand: targetBrandId, isDefault: true });
+    if (!hasDefault) {
+      await MerchantGateway.findOneAndUpdate({ merchant: merchantId, brand: targetBrandId }, { isDefault: true });
+      gateway.isDefault = true;
+    }
   }
 
-  return ApiResponse.success(res, gateway, 'Gateway updated successfully.');
+  const populated = await MerchantGateway.findById(gateway._id).populate('brand', 'name slug logo status');
+  return ApiResponse.success(res, populated, 'Gateway updated successfully.');
 });
 
 // 4. Delete gateway
@@ -222,9 +273,9 @@ const deleteMerchantGateway = asyncHandler(async (req, res) => {
     throw new ApiError(404, 'Gateway not found or you do not have permission to manage this gateway.');
   }
 
-  // If deleted gateway was default, promote another gateway to default
-  if (gateway.isDefault) {
-    const nextGateway = await MerchantGateway.findOne({ merchant: merchantId }).sort({ isActive: -1, createdAt: -1 });
+  // If deleted gateway was default, promote another gateway within the same Brand
+  if (gateway.isDefault && gateway.brand) {
+    const nextGateway = await MerchantGateway.findOne({ merchant: merchantId, brand: gateway.brand }).sort({ isActive: -1, createdAt: -1 });
     if (nextGateway) {
       nextGateway.isDefault = true;
       await nextGateway.save();
@@ -258,7 +309,7 @@ const toggleMerchantGateway = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, gateway, `Gateway ${statusText} successfully.`);
 });
 
-// 6. Set default gateway
+// 6. Set default gateway for Brand
 const setDefaultMerchantGateway = asyncHandler(async (req, res) => {
   const merchantId = req.merchantId || req.merchant?._id;
   if (!merchantId) {
@@ -275,26 +326,79 @@ const setDefaultMerchantGateway = asyncHandler(async (req, res) => {
     throw new ApiError(404, 'Gateway not found or you do not have permission to manage this gateway.');
   }
 
-  await MerchantGateway.updateMany({ merchant: merchantId }, { isDefault: false });
+  if (gateway.brand) {
+    await MerchantGateway.updateMany({ merchant: merchantId, brand: gateway.brand }, { isDefault: false });
+  } else {
+    await MerchantGateway.updateMany({ merchant: merchantId }, { isDefault: false });
+  }
+
   gateway.isDefault = true;
   await gateway.save();
 
   return ApiResponse.success(res, gateway, 'Gateway set as default successfully.');
 });
 
-// 7. Get public gateways for customer checkout
+// 7. Get public gateways for customer checkout (strictly Brand-isolated)
 const getPublicMerchantGateways = asyncHandler(async (req, res) => {
   const { merchantId } = req.params;
-  if (!merchantId || !mongoose.Types.ObjectId.isValid(merchantId)) {
-    throw new ApiError(400, 'Valid Merchant ID is required');
+  const { brandId } = req.query;
+
+  const query = { isActive: true };
+
+  let brandContext = null;
+  if (brandId && mongoose.Types.ObjectId.isValid(brandId)) {
+    brandContext = await Brand.findById(brandId);
   }
 
+  if (merchantId && mongoose.Types.ObjectId.isValid(merchantId)) {
+    query.merchant = merchantId;
+  } else if (brandContext && brandContext.merchant) {
+    query.merchant = brandContext.merchant;
+  }
+
+  if (brandContext) {
+    // Check if Brand is blocked or suspended
+    try {
+      await checkBrandOperationalStatus(brandContext);
+    } catch (err) {
+      return ApiResponse.error(res, err.message, err.statusCode || 403);
+    }
+    query.brand = brandContext._id;
+  }
+
+  let activeGateways = await MerchantGateway.find(query)
+    .sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
+
+  // Fallback for legacy records if zero brand gateways found
+  if (activeGateways.length === 0 && query.merchant && !query.brand) {
+    activeGateways = await MerchantGateway.find({ merchant: query.merchant, isActive: true })
+      .sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
+  }
+
+  return ApiResponse.success(res, activeGateways, 'Active gateways retrieved for checkout');
+});
+
+// 8. Get public gateways by Brand ID directly
+const getPublicBrandGateways = asyncHandler(async (req, res) => {
+  const { brandId } = req.params;
+  if (!brandId || !mongoose.Types.ObjectId.isValid(brandId)) {
+    throw new ApiError(400, 'Valid Brand ID is required');
+  }
+
+  const brand = await Brand.findById(brandId);
+  if (!brand) {
+    throw new ApiError(404, 'Brand not found');
+  }
+
+  // Check brand operational status
+  await checkBrandOperationalStatus(brand);
+
   const activeGateways = await MerchantGateway.find({
-    merchant: merchantId,
+    brand: brand._id,
     isActive: true,
   }).sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
 
-  return ApiResponse.success(res, activeGateways, 'Active merchant gateways retrieved for checkout');
+  return ApiResponse.success(res, activeGateways, 'Active brand gateways retrieved for checkout');
 });
 
 module.exports = {
@@ -305,4 +409,5 @@ module.exports = {
   toggleMerchantGateway,
   setDefaultMerchantGateway,
   getPublicMerchantGateways,
+  getPublicBrandGateways,
 };

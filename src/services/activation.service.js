@@ -8,7 +8,11 @@ const generateKeyString = () => {
   return `SUB-${seg()}-${seg()}-${seg()}`;
 };
 
-const createActivationKey = async ({ merchantId }) => {
+const Brand = require('../models/Brand');
+const { checkBrandOperationalStatus } = require('../middlewares/brandGuard.middleware');
+const mongoose = require('mongoose');
+
+const createActivationKey = async ({ merchantId, brandId }) => {
   const entitlementService = require('./entitlement.service');
   const entitlements = await entitlementService.getMerchantEntitlements(merchantId);
 
@@ -16,6 +20,19 @@ const createActivationKey = async ({ merchantId }) => {
     const err = new ApiError(403, 'Your subscription is expired or inactive. Please activate or renew your subscription to generate activation keys.');
     err.code = 'SUBSCRIPTION_EXPIRED';
     throw err;
+  }
+
+  // Resolve & Validate Brand Context
+  let resolvedBrand = null;
+  if (brandId && mongoose.Types.ObjectId.isValid(brandId)) {
+    resolvedBrand = await Brand.findOne({ _id: brandId, merchant: merchantId });
+    if (!resolvedBrand) throw new ApiError(404, 'Brand not found or invalid');
+  } else {
+    resolvedBrand = await Brand.findOne({ merchant: merchantId }).sort({ createdAt: 1 });
+  }
+
+  if (resolvedBrand) {
+    await checkBrandOperationalStatus(resolvedBrand);
   }
 
   await entitlementService.checkDeviceLimit(merchantId);
@@ -33,13 +50,15 @@ const createActivationKey = async ({ merchantId }) => {
   const key = await ActivationKey.create({
     key: keyString,
     merchant: merchantId,
+    brand: resolvedBrand ? resolvedBrand._id : null,
     plan: normalizedPlan,
     maxDevices: entitlements.limits?.devices || 1,
     expireDate,
   });
 
-  return key;
+  return await ActivationKey.findById(key._id).populate('brand', 'name slug logo status');
 };
+
 
 const activateDeviceWithKey = async ({
   keyString,
@@ -192,8 +211,22 @@ const resetActivationKey = async (keyId) => {
   return keyDoc;
 };
 
+const getMerchantActivationKeys = async (merchantId, brandId) => {
+  if (!merchantId) throw new ApiError(403, 'Tenant context missing');
+  const query = { merchant: merchantId };
+  if (brandId && brandId !== 'ALL' && mongoose.Types.ObjectId.isValid(brandId)) {
+    query.brand = brandId;
+  }
+  return await ActivationKey.find(query)
+    .populate('brand', 'name slug logo status')
+    .populate('usedByDevice', 'deviceModel deviceBrand androidId isOnline')
+    .sort({ createdAt: -1 });
+};
+
 module.exports = {
   createActivationKey,
+  getMerchantActivationKeys,
   activateDeviceWithKey,
   resetActivationKey,
 };
+

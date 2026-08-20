@@ -186,8 +186,11 @@ const paymentSchema = new mongoose.Schema(
 paymentSchema.index({ transactionId: 1 }, { unique: true });
 paymentSchema.index({ provider: 1, transactionId: 1 });
 paymentSchema.index({ merchant: 1, createdAt: -1 });
+paymentSchema.index({ merchant: 1, brand: 1, createdAt: -1 });
+paymentSchema.index({ brand: 1, createdAt: -1 });
 paymentSchema.index({ provider: 1 });
 paymentSchema.index({ gateway: 1 });
 
 module.exports = mongoose.model('Payment', paymentSchema);
+
 

@@ -567,7 +567,7 @@ const processIncomingSms = async ({ deviceId, merchantId, rawSms, senderNumber, 
   });
 };
 
-const getPayments = async ({ merchantId, isSuperAdmin = false, provider, status, search, page = 1, limit = 20 }) => {
+const getPayments = async ({ merchantId, brandId, isSuperAdmin = false, provider, status, search, page = 1, limit = 20 }) => {
   const query = {};
 
   if (!isSuperAdmin) {
@@ -578,6 +578,10 @@ const getPayments = async ({ merchantId, isSuperAdmin = false, provider, status,
     }
   } else if (merchantId) {
     query.merchant = merchantId;
+  }
+
+  if (brandId && brandId !== 'ALL' && mongoose.Types.ObjectId.isValid(brandId)) {
+    query.brand = new mongoose.Types.ObjectId(brandId.toString());
   }
 
   if (provider) query.provider = provider;
@@ -599,9 +603,11 @@ const getPayments = async ({ merchantId, isSuperAdmin = false, provider, status,
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit))
-      .populate('device', 'deviceModel androidId deviceBrand'),
+      .populate('device', 'deviceModel androidId deviceBrand')
+      .populate('brand', 'name slug logo status'),
     Payment.countDocuments(query),
   ]);
+
 
   return {
     payments,
@@ -664,6 +670,7 @@ const verifyOrUpdatePaymentStatus = async ({ paymentId, trxId, merchantId, statu
 const verifyCustomerCheckoutPayment = async ({
   trxId,
   merchantId,
+  brandId,
   gateway,
   provider,
   amount,
@@ -745,12 +752,14 @@ const verifyCustomerCheckoutPayment = async ({
         verificationState: 'VERIFIED',
         isUsed: true,
         usedAt: new Date(),
+        ...(brandId ? { brand: brandId } : {}),
         ...(customerName ? { customerName } : {}),
         ...(phone ? { phone } : {}),
       },
     },
     { new: true }
   );
+
 
   if (!claimedPayment) {
     throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');

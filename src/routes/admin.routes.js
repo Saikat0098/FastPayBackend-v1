@@ -58,4 +58,17 @@ router.get('/login-history', adminController.getLoginHistories);
 router.get('/settings', adminController.getAdminSettings);
 router.put('/settings', adminController.updateAdminSettings);
 
+// 12. Brand Management & Compliance (Admin Review, Suspension & Permanent Blocking)
+router.get('/brands/stats', adminController.getAdminBrandStats);
+router.get('/brands', adminController.getAllBrands);
+router.get('/brands/:id', adminController.getAdminBrandDetail);
+router.put('/brands/:id/review', adminController.reviewAdminBrand);
+router.put('/brands/:id/suspend', adminController.suspendAdminBrand);
+router.put('/brands/:id/unsuspend', adminController.unsuspendAdminBrand);
+router.put('/brands/:id/block', adminController.blockAdminBrand);
+router.put('/brands/:id/unblock', adminController.unblockAdminBrand);
+router.post('/brands/:id/reveal-doc', adminController.revealAdminBrandDoc);
+
 module.exports = router;
+
+

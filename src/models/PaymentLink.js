@@ -66,5 +66,8 @@ const paymentLinkSchema = new mongoose.Schema(
 );
 
 paymentLinkSchema.index({ merchant: 1, createdAt: -1 });
+paymentLinkSchema.index({ merchant: 1, brand: 1, createdAt: -1 });
+paymentLinkSchema.index({ brand: 1, createdAt: -1 });
 
 module.exports = mongoose.model('PaymentLink', paymentLinkSchema);
+

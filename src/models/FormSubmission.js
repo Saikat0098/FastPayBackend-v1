@@ -68,8 +68,11 @@ const formSubmissionSchema = new mongoose.Schema(
 );
 
 formSubmissionSchema.index({ merchant: 1, createdAt: -1 });
+formSubmissionSchema.index({ merchant: 1, brand: 1, createdAt: -1 });
+formSubmissionSchema.index({ brand: 1, createdAt: -1 });
 formSubmissionSchema.index({ merchant: 1, form: 1 });
 formSubmissionSchema.index({ merchant: 1, paymentStatus: 1 });
 formSubmissionSchema.index({ merchant: 1, orderStatus: 1 });
 
 module.exports = mongoose.model('FormSubmission', formSubmissionSchema);
+

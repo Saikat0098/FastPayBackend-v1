@@ -81,6 +81,10 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
 
     if (brandId) {
       const brand = await Brand.findById(brandId);
+      if (brand && brand.status === 'BLOCKED') {
+        logger.warn(`[Webhook Engine] Skipping webhook delivery for blocked brand ${brandId}`);
+        return null;
+      }
       if (brand && brand.webhookUrl) {
         targetUrl = brand.webhookUrl;
         secret = brand.webhookSecret || '';
@@ -92,6 +96,7 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
         }
       }
     }
+
 
     if (!targetUrl && merchantId) {
       const merchant = await Merchant.findById(merchantId).select('+apiSecret');
@@ -371,15 +376,32 @@ const retryWebhook = async (webhookLogId, merchantId) => {
   }
 };
 
-const getWebhookLogs = async (merchantId, page = 1, limit = 20) => {
+const getWebhookLogs = async (merchantId, options = {}) => {
+  const page = typeof options === 'object' ? (options.page || 1) : options;
+  const limit = typeof options === 'object' ? (options.limit || 20) : arguments[2] || 20;
+  const brandId = typeof options === 'object' ? options.brandId : null;
+  const status = typeof options === 'object' ? options.status : null;
+  const event = typeof options === 'object' ? options.event : null;
+
   const query = { merchant: merchantId };
+  if (brandId && brandId !== 'ALL') {
+    query.brand = brandId;
+  }
+  if (status) {
+    query.status = status.toUpperCase();
+  }
+  if (event) {
+    query.event = event;
+  }
+
   const skip = (page - 1) * limit;
 
   const logs = await WebhookLog.find(query)
     .sort({ createdAt: -1 })
     .skip(skip)
     .limit(limit)
-    .populate('payment', 'transactionId amount gateway provider status');
+    .populate('payment', 'transactionId amount gateway provider status')
+    .populate('brand', 'name slug logo');
 
   const total = await WebhookLog.countDocuments(query);
 
@@ -401,3 +423,4 @@ module.exports = {
   generateSignature,
   verifySignature,
 };
+

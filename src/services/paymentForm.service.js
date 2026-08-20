@@ -45,6 +45,11 @@ const createForm = async ({
     }).catch(() => null);
   }
 
+  if (resolvedBrand) {
+    const { checkBrandOperationalStatus } = require('../middlewares/brandGuard.middleware');
+    await checkBrandOperationalStatus(resolvedBrand);
+  }
+
   const brandSlug = resolvedBrand ? resolvedBrand.slug : 'store';
   const cleanTitle = (title || 'Payment Form').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, '');
   const slug = `${brandSlug}-${cleanTitle}-${Date.now()}`;
@@ -127,8 +132,8 @@ const toggleFormStatus = async (id, merchantId) => {
 const getForms = async (merchantId, brandId) => {
   if (!merchantId) throw new ApiError(403, 'Tenant context missing');
   const query = { merchant: merchantId };
-  if (brandId && mongoose.Types.ObjectId.isValid(brandId)) query.brand = brandId;
-  return await PaymentForm.find(query).populate('brand', 'name slug logo').sort({ createdAt: -1 });
+  if (brandId && brandId !== 'ALL' && mongoose.Types.ObjectId.isValid(brandId)) query.brand = brandId;
+  return await PaymentForm.find(query).populate('brand', 'name slug logo status').sort({ createdAt: -1 });
 };
 
 const getFormBySlug = async (slugOrId) => {
@@ -136,9 +141,20 @@ const getFormBySlug = async (slugOrId) => {
   const isMongoId = mongoose.Types.ObjectId.isValid(slugOrId);
   const form = await PaymentForm.findOne({
     $or: [{ slug: slugOrId }, ...(isMongoId ? [{ _id: slugOrId }] : [])],
-  }).populate('brand', 'name slug logo');
+  }).populate('brand', 'name slug logo status suspension blockedReason');
 
   if (!form) throw new ApiError(404, 'Payment Form not found');
+
+  if (form.brand) {
+    const { checkBrandOperationalStatus } = require('../middlewares/brandGuard.middleware');
+    try {
+      await checkBrandOperationalStatus(form.brand);
+    } catch (err) {
+      const publicErr = new ApiError(403, 'This payment service is currently unavailable.');
+      publicErr.code = 'BRAND_UNAVAILABLE';
+      throw publicErr;
+    }
+  }
 
   if (form.status === 'INACTIVE') {
     throw new ApiError(400, 'This payment form is currently inactive.');
@@ -156,11 +172,13 @@ const submitPaymentForm = async ({ formId, slug, formData = {}, amount, paymentM
   if (!form) throw new ApiError(404, 'Payment form not found');
 
   const expectedAmount = form.amountType === 'FIXED' ? form.fixedAmount : Number(amount || 0);
+  const brandId = form.brand ? (form.brand._id || form.brand) : null;
 
-  // Reuse existing automated payment verification engine
+  // Reuse existing automated payment verification engine with brand scoping
   const verifiedPayment = await verifyCustomerCheckoutPayment({
     trxId: transactionId,
     merchantId: form.merchant,
+    brandId,
     gateway: paymentMethod,
     provider: paymentMethod,
     amount: expectedAmount,
@@ -176,7 +194,7 @@ const submitPaymentForm = async ({ formId, slug, formData = {}, amount, paymentM
   if (extractedPhone) {
     customerDoc = await recordCustomerPayment({
       merchantId: form.merchant,
-      brandId: form.brand ? form.brand._id : null,
+      brandId,
       phone: extractedPhone,
       amount: verifiedPayment.amount,
       name: extractedName,
@@ -186,7 +204,7 @@ const submitPaymentForm = async ({ formId, slug, formData = {}, amount, paymentM
   const submission = await FormSubmission.create({
     merchant: form.merchant,
     form: form._id,
-    brand: form.brand ? form.brand._id : null,
+    brand: brandId,
     customer: customerDoc ? customerDoc._id : null,
     formData,
     amount: verifiedPayment.amount,
@@ -197,6 +215,7 @@ const submitPaymentForm = async ({ formId, slug, formData = {}, amount, paymentM
     submittedAt: new Date(),
     verifiedAt: new Date(),
   });
+
 
   return {
     submission,

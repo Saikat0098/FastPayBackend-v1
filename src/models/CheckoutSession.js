@@ -92,4 +92,10 @@ const checkoutSessionSchema = new mongoose.Schema(
   }
 );
 
+checkoutSessionSchema.index({ merchant: 1, createdAt: -1 });
+checkoutSessionSchema.index({ merchant: 1, brand: 1, createdAt: -1 });
+checkoutSessionSchema.index({ brand: 1, createdAt: -1 });
+
 module.exports = mongoose.model('CheckoutSession', checkoutSessionSchema);
+
+
