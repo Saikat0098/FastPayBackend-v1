@@ -85,29 +85,25 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
         logger.warn(`[Webhook Engine] Skipping webhook delivery for blocked brand ${brandId}`);
         return null;
       }
-      if (brand && brand.webhookUrl) {
-        targetUrl = brand.webhookUrl;
-        secret = brand.webhookSecret || '';
-      }
-      if (brand && !secret && brand.merchant) {
-        const merchant = await Merchant.findById(brand.merchant).select('+apiSecret');
-        if (merchant) {
-          secret = merchant.webhookSecret || merchant.apiSecret || merchant.apiKey || '';
+      if (brand) {
+        if (brand.webhookUrl) {
+          targetUrl = brand.webhookUrl;
+        }
+        if (brand.webhookSecret) {
+          secret = brand.webhookSecret;
         }
       }
     }
 
-
-    if (!targetUrl && merchantId) {
-      const merchant = await Merchant.findById(merchantId).select('+apiSecret');
+    if (!targetUrl && effectiveMerchantId) {
+      const merchant = await Merchant.findById(effectiveMerchantId).select('+apiSecret');
       if (merchant && merchant.webhookUrl) {
         targetUrl = merchant.webhookUrl;
-        secret = merchant.webhookSecret || merchant.apiSecret || merchant.apiKey || '';
       }
     }
 
-    if (!secret && merchantId) {
-      const merchant = await Merchant.findById(merchantId).select('+apiSecret');
+    if (!secret && effectiveMerchantId) {
+      const merchant = await Merchant.findById(effectiveMerchantId).select('+apiSecret');
       if (merchant) {
         secret = merchant.webhookSecret || merchant.apiSecret || merchant.apiKey || '';
       }
