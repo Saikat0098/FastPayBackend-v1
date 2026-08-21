@@ -25,6 +25,8 @@ const merchantGatewayRoutes = require('./merchantGateway.routes');
 const formSubmissionRoutes = require('./formSubmission.routes');
 const checkoutSessionRoutes = require('./checkoutSession.routes');
 const uploadRoutes = require('./upload.routes');
+const landingPageRoutes = require('./landingPage.routes');
+const landingPageOrderRoutes = require('./landingPageOrder.routes');
 
 // Android Controller for direct legacy compatibility routes
 const androidController = require('../controllers/android.controller');
@@ -56,6 +58,9 @@ router.use('/forms', paymentFormRoutes);
 router.use('/payment-forms', paymentFormRoutes);
 router.use('/form-submissions', formSubmissionRoutes);
 router.use('/orders', formSubmissionRoutes);
+router.use('/landing-pages', landingPageRoutes);
+router.use('/landing-page-orders', landingPageOrderRoutes);
+router.use('/landing-orders', landingPageOrderRoutes);
 router.use('/links', paymentLinkRoutes);
 router.use('/payment-links', paymentLinkRoutes);
 router.use('/devices', deviceRoutes);

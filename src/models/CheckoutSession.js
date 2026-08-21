@@ -86,6 +86,34 @@ const checkoutSessionSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    // Order Confirmation Email Tracking
+    confirmationEmailSent: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    confirmationEmailSentAt: {
+      type: Date,
+      default: null,
+    },
+    confirmationEmailStatus: {
+      type: String,
+      enum: ['NOT_SENT', 'PENDING', 'SENDING', 'SENT', 'FAILED'],
+      default: 'NOT_SENT',
+      index: true,
+    },
+    confirmationEmailError: {
+      type: String,
+      default: '',
+    },
+    confirmationEmailAttempts: {
+      type: Number,
+      default: 0,
+    },
+    confirmationEmailMessageId: {
+      type: String,
+      default: '',
+    },
   },
   {
     timestamps: true,

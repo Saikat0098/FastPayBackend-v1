@@ -113,7 +113,7 @@ class FastPay {
    * @param {string} [params.cancelUrl] - Callback URL if customer cancels
    * @param {string} [params.customerName] - Customer name
    * @param {string} [params.customerPhone] - Customer phone number
-   * @param {string} [params.customerEmail] - Customer email address
+   * @param {string} [params.customerEmail] - Customer email address (used by FastPay for automatic order confirmation notification upon payment)
    * @param {string} [params.customerAddress] - Customer shipping address
    * @param {Object} [params.customFields] - Additional order metadata
    * @param {number} [params.expiresInMinutes=30] - Session lifetime in minutes

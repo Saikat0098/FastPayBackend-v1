@@ -5,7 +5,9 @@ const MerchantGateway = require('../models/MerchantGateway');
 const Brand = require('../models/Brand');
 const { verifyCustomerCheckoutPayment } = require('./payment.service');
 const { sendWebhook } = require('./webhook.service');
+const { sendOrderConfirmationEmail } = require('./email.service');
 const ApiError = require('../utils/apiError');
+const logger = require('../config/logger');
 const crypto = require('crypto');
 
 
@@ -346,6 +348,7 @@ const verifySessionPayment = async ({
     customerName: customerName || (session ? session.customerName : undefined),
   });
 
+  let lpOrder = null;
   if (session) {
     session.status = 'VERIFIED';
     session.payment = payment._id;
@@ -353,6 +356,15 @@ const verifySessionPayment = async ({
     if (customerName) session.customerName = customerName;
     if (phone) session.customerPhone = phone;
     await session.save();
+
+    const postRes = await handleSuccessfulPaymentVerification({
+      session,
+      payment,
+      brand: session.brand,
+      merchant: session.merchant,
+      triggerSource: sessionId ? 'PUBLIC_VERIFICATION' : 'DIRECT_VERIFICATION',
+    });
+    lpOrder = postRes?.lpOrder;
   }
 
   // Dispatch webhook event asynchronously
@@ -372,6 +384,70 @@ const verifySessionPayment = async ({
     returnUrl: session ? session.returnUrl : '',
     message: 'Payment verified successfully',
   };
+};
+
+/**
+ * Centralized Post-Verification Handler
+ * Responsible for:
+ * 1. Synchronizing LandingPageOrder status & updating landing page metrics
+ * 2. Triggering Order Confirmation Email via Atomic Lock & Nodemailer
+ */
+const handleSuccessfulPaymentVerification = async ({
+  session,
+  payment,
+  order = null,
+  brand = null,
+  merchant = null,
+  triggerSource = 'DIRECT_VERIFICATION',
+}) => {
+  let lpOrder = order;
+
+  // 1. Sync LandingPageOrder if session exists
+  if (session && !lpOrder) {
+    try {
+      const LandingPageOrder = require('../models/LandingPageOrder');
+      const LandingPage = require('../models/LandingPage');
+      lpOrder = await LandingPageOrder.findOne({
+        $or: [
+          { checkoutSessionId: session.sessionId },
+          { checkoutSession: session._id },
+          { orderId: session.orderId },
+        ],
+      });
+      if (lpOrder) {
+        lpOrder.paymentStatus = 'VERIFIED';
+        lpOrder.orderStatus = 'COMPLETED';
+        if (payment?._id) lpOrder.payment = payment._id;
+        if (payment?.transactionId) lpOrder.transactionId = payment.transactionId;
+        if (payment?.gateway || payment?.provider) lpOrder.paymentMethod = payment.gateway || payment.provider;
+        lpOrder.paidAt = new Date();
+        await lpOrder.save();
+
+        if (lpOrder.landingPage) {
+          await LandingPage.updateOne(
+            { _id: lpOrder.landingPage },
+            { $inc: { orderCount: 1, totalRevenue: lpOrder.amount || 0 } }
+          ).catch(() => {});
+        }
+      }
+    } catch (orderSyncErr) {
+      logger.warn(`[LandingPageOrder Sync] Error updating order: ${orderSyncErr.message}`);
+    }
+  }
+
+  // 2. Trigger automatic Order Confirmation Email asynchronously (Atomic & Non-blocking)
+  sendOrderConfirmationEmail({
+    session,
+    order: lpOrder,
+    payment,
+    brand: brand || session?.brand,
+    merchant: merchant || session?.merchant,
+    triggerSource,
+  }).catch((emailErr) => {
+    logger.warn(`[Order Confirmation Email] Delivery error: ${emailErr.message}`);
+  });
+
+  return { lpOrder };
 };
 
 const getMerchantCheckoutSessionStatus = async (sessionId, merchantId, brandId = null) => {
@@ -396,4 +472,5 @@ module.exports = {
   getPublicCheckoutSession,
   verifySessionPayment,
   getMerchantCheckoutSessionStatus,
+  handleSuccessfulPaymentVerification,
 };

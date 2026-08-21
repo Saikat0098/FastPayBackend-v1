@@ -64,6 +64,45 @@ const verifySignature = (signatureHeader, payloadString, secret, toleranceInSeco
   }
 };
 
+const sanitizeResponseBody = (data, defaultMessage = '') => {
+  if (!data) return defaultMessage;
+  if (typeof data === 'string') {
+    if (data.includes('<!DOCTYPE') || data.includes('<html')) {
+      const match = data.match(/<title>(.*?)<\/title>/i);
+      const title = match ? match[1].trim() : '502 Bad Gateway';
+      return `HTTP HTML [${title}]: Upstream server temporarily unavailable / cold start`;
+    }
+    return data.substring(0, 1000);
+  }
+  return JSON.stringify(data).substring(0, 1000);
+};
+
+const dispatchHttpRequest = async (targetUrl, rawBody, headers, timeout = 25000) => {
+  const maxAttempts = 2;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await axios.post(targetUrl, rawBody, {
+        headers,
+        timeout,
+      });
+      return response;
+    } catch (err) {
+      lastError = err;
+      const status = err.response ? err.response.status : (err.code === 'ECONNABORTED' ? 504 : 500);
+      const isTransient = [502, 503, 504].includes(status) || ['ECONNABORTED', 'ETIMEDOUT', 'ECONNRESET'].includes(err.code);
+      if (attempt < maxAttempts && isTransient) {
+        logger.info(`[Webhook Dispatch] Transient ${status}/${err.code || 'ERR'} from ${targetUrl}. Fast backoff retry in 2.5s (attempt ${attempt}/${maxAttempts})...`);
+        await new Promise((r) => setTimeout(r, 2500));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
+};
+
 const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'payment.verified', eventId = null }) => {
   try {
     let targetUrl = '';
@@ -168,6 +207,22 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
       },
     };
 
+    // Centralized Order Confirmation Email trigger on payment.verified event
+    if (event === 'payment.verified' && sessionData) {
+      try {
+        const { sendOrderConfirmationEmail } = require('./email.service');
+        sendOrderConfirmationEmail({
+          session: sessionData,
+          payment,
+          brand: brandId || sessionData.brand,
+          merchant: effectiveMerchantId || sessionData.merchant,
+          triggerSource: 'WEBHOOK',
+        }).catch((emailErr) => {
+          logger.warn(`[Webhook Engine] Order confirmation email trigger error: ${emailErr.message}`);
+        });
+      } catch (_) {}
+    }
+
     // Serialize once into raw string so that signed payload matches transmitted body exactly
     const rawBody = JSON.stringify(payload);
     const timestamp = Math.floor(Date.now() / 1000);
@@ -200,18 +255,15 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
     logger.info(`[Webhook Dispatch] [ID:${logEntry._id}] [EventID:${assignedEventId}] Attempt:${currentAttempt} | Method: POST | Target: ${targetUrl} | Event: ${event} | Tx: ${payment.transactionId} | BodyHash: ${bodyHash} | Timestamp: ${timestamp}`);
 
     try {
-      const response = await axios.post(targetUrl, rawBody, {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-FastPay-Signature': `t=${timestamp},v1=${signature}`,
-          'X-FirstPay-Signature': `t=${timestamp},v1=${signature}`,
-          'X-Gateway-Signature': `t=${timestamp},v1=${signature}`,
-          'User-Agent': 'FastPay-Webhook-Engine/1.0',
-        },
-        timeout: 10000,
-      });
+      const response = await dispatchHttpRequest(targetUrl, rawBody, {
+        'Content-Type': 'application/json',
+        'X-FastPay-Signature': `t=${timestamp},v1=${signature}`,
+        'X-FirstPay-Signature': `t=${timestamp},v1=${signature}`,
+        'X-Gateway-Signature': `t=${timestamp},v1=${signature}`,
+        'User-Agent': 'FastPay-Webhook-Engine/1.0',
+      }, 25000);
 
-      const respBodyStr = typeof response.data === 'string' ? response.data.substring(0, 1000) : JSON.stringify(response.data || {}).substring(0, 1000);
+      const respBodyStr = sanitizeResponseBody(response.data);
       const isSuccess = response.status >= 200 && response.status < 300;
 
       logEntry.responseStatus = response.status;
@@ -230,9 +282,8 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
       logger.info(`[Webhook Response] [ID:${logEntry._id}] [EventID:${assignedEventId}] Attempt:${currentAttempt} | Status: ${response.status} | Body: ${respBodyStr}`);
       return logEntry;
     } catch (httpError) {
-      const statusErr = httpError.response ? httpError.response.status : 500;
-      const respData = httpError.response?.data;
-      const respBodyStr = (typeof respData === 'string' ? respData : (respData ? JSON.stringify(respData) : (httpError.message || 'Connection failed'))).substring(0, 1000);
+      const statusErr = httpError.response ? httpError.response.status : (httpError.code === 'ECONNABORTED' ? 504 : 500);
+      const respBodyStr = sanitizeResponseBody(httpError.response?.data, httpError.message || 'Connection failed');
 
       logEntry.responseStatus = statusErr;
       logEntry.responseBody = respBodyStr;
@@ -320,18 +371,15 @@ const retryWebhook = async (webhookLogId, merchantId) => {
   logger.info(`[Webhook Retry] [ID:${logEntry._id}] [EventID:${assignedEventId}] Attempt:${currentAttempt} | Target: ${logEntry.url} | BodyHash: ${bodyHash} | Timestamp: ${timestamp}`);
 
   try {
-    const response = await axios.post(logEntry.url, rawBody, {
-      headers: {
-        'Content-Type': 'application/json',
-        'X-FastPay-Signature': `t=${timestamp},v1=${signature}`,
-        'X-FirstPay-Signature': `t=${timestamp},v1=${signature}`,
-        'X-Gateway-Signature': `t=${timestamp},v1=${signature}`,
-        'User-Agent': 'FastPay-Webhook-Engine/1.0',
-      },
-      timeout: 10000,
-    });
+    const response = await dispatchHttpRequest(logEntry.url, rawBody, {
+      'Content-Type': 'application/json',
+      'X-FastPay-Signature': `t=${timestamp},v1=${signature}`,
+      'X-FirstPay-Signature': `t=${timestamp},v1=${signature}`,
+      'X-Gateway-Signature': `t=${timestamp},v1=${signature}`,
+      'User-Agent': 'FastPay-Webhook-Engine/1.0',
+    }, 25000);
 
-    const respBodyStr = typeof response.data === 'string' ? response.data.substring(0, 1000) : JSON.stringify(response.data || {}).substring(0, 1000);
+    const respBodyStr = sanitizeResponseBody(response.data);
     const isSuccess = response.status >= 200 && response.status < 300;
 
     logEntry.responseStatus = response.status;
@@ -350,9 +398,8 @@ const retryWebhook = async (webhookLogId, merchantId) => {
     logger.info(`[Webhook Retry Response] [ID:${logEntry._id}] [EventID:${assignedEventId}] Status: ${response.status} | Body: ${respBodyStr}`);
     return logEntry;
   } catch (httpError) {
-    const statusErr = httpError.response ? httpError.response.status : 500;
-    const respData = httpError.response?.data;
-    const respBodyStr = (typeof respData === 'string' ? respData : (respData ? JSON.stringify(respData) : (httpError.message || 'Retry connection failed'))).substring(0, 1000);
+    const statusErr = httpError.response ? httpError.response.status : (httpError.code === 'ECONNABORTED' ? 504 : 500);
+    const respBodyStr = sanitizeResponseBody(httpError.response?.data, httpError.message || 'Retry connection failed');
 
     logEntry.responseStatus = statusErr;
     logEntry.responseBody = respBodyStr;

@@ -128,8 +128,9 @@ const verifyPayment = asyncHandler(async (req, res) => {
 // POST /api/v1/payments/verify-checkout
 const verifyCheckoutPayment = asyncHandler(async (req, res) => {
   const { trxId, transactionId, merchantId, gateway, provider, amount, phone, customerName } = req.body;
+  const cleanTrx = (trxId || transactionId || '').trim();
   const payment = await paymentService.verifyCustomerCheckoutPayment({
-    trxId: trxId || transactionId,
+    trxId: cleanTrx,
     merchantId,
     gateway,
     provider,
@@ -137,6 +138,34 @@ const verifyCheckoutPayment = asyncHandler(async (req, res) => {
     phone,
     customerName,
   });
+
+  // Centralized post-verification session sync and confirmation email trigger
+  try {
+    const CheckoutSession = require('../models/CheckoutSession');
+    const { handleSuccessfulPaymentVerification } = require('../services/checkoutSession.service');
+    const session = await CheckoutSession.findOne({
+      $or: [
+        { transactionId: cleanTrx },
+        { payment: payment._id },
+      ],
+    });
+    if (session) {
+      if (session.status !== 'VERIFIED') {
+        session.status = 'VERIFIED';
+        session.payment = payment._id;
+        session.transactionId = payment.transactionId;
+        await session.save();
+      }
+      await handleSuccessfulPaymentVerification({
+        session,
+        payment,
+        brand: session.brand,
+        merchant: session.merchant,
+        triggerSource: 'MERCHANT_VERIFICATION',
+      });
+    }
+  } catch (_) {}
+
   return ApiResponse.success(res, payment, 'Payment verified successfully');
 });
 
