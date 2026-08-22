@@ -1,40 +1,79 @@
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '../../.env') });
 const nodemailer = require('nodemailer');
 const logger = require('../config/logger');
 const { maskEmail } = require('../utils/otp');
 
-// Read SMTP configuration from environment variables
-const SMTP_HOST = process.env.SMTP_HOST || process.env.EMAIL_HOST || '';
-const SMTP_PORT = parseInt(process.env.SMTP_PORT || process.env.EMAIL_PORT || '587', 10);
-const SMTP_SECURE = process.env.SMTP_SECURE === 'true' || process.env.EMAIL_SECURE === 'true' || SMTP_PORT === 465;
-const SMTP_USER = process.env.SMTP_USER || process.env.EMAIL_USER || '';
-const SMTP_PASS = process.env.SMTP_PASS || process.env.EMAIL_PASS || '';
-const SMTP_FROM_NAME = process.env.SMTP_FROM_NAME || process.env.EMAIL_FROM_NAME || 'FastPay';
-const SMTP_FROM_EMAIL = process.env.SMTP_FROM || process.env.EMAIL_FROM || (SMTP_USER ? `"${SMTP_FROM_NAME}" <${SMTP_USER}>` : '"FastPay" <noreply@fastpay.com>');
+/**
+ * Dynamic runtime SMTP configuration reader
+ */
+const getSmtpConfig = () => {
+  const host = process.env.SMTP_HOST || process.env.EMAIL_HOST || 'smtp.gmail.com';
+  const port = parseInt(process.env.SMTP_PORT || process.env.EMAIL_PORT || '587', 10);
+  const secure = process.env.SMTP_SECURE === 'true' || process.env.EMAIL_SECURE === 'true' || port === 465;
+  const user = process.env.SMTP_USER || process.env.EMAIL_USER || '';
+  const pass = process.env.SMTP_PASS || process.env.SMTP_PASSWORD || process.env.EMAIL_PASS || process.env.EMAIL_PASSWORD || '';
+  const fromName = process.env.SMTP_FROM_NAME || process.env.EMAIL_FROM_NAME || 'FastPay';
+  const fromEmail = process.env.SMTP_FROM || process.env.EMAIL_FROM || (user ? `"${fromName}" <${user}>` : '"FastPay" <noreply@fastpay.com>');
+  const isConfigured = Boolean(user && pass && pass !== 'YOUR_GMAIL_APP_PASSWORD');
+
+  return {
+    host,
+    port,
+    secure,
+    user,
+    pass,
+    fromName,
+    fromEmail,
+    isConfigured,
+  };
+};
 
 // Singleton transporter instance
 let transporter = null;
 
 const getTransporter = () => {
-  if (!transporter) {
-    if (SMTP_HOST && SMTP_USER && SMTP_PASS && SMTP_PASS !== 'YOUR_GMAIL_APP_PASSWORD') {
-      transporter = nodemailer.createTransport({
-        host: SMTP_HOST,
-        port: SMTP_PORT,
-        secure: SMTP_SECURE,
-        auth: {
-          user: SMTP_USER,
-          pass: SMTP_PASS,
-        },
-        tls: {
-          rejectUnauthorized: false,
-        },
-      });
-      logger.info(`[EmailService] SMTP transporter initialized with host: ${SMTP_HOST}:${SMTP_PORT}`);
-    } else {
-      logger.warn('[EmailService] SMTP configuration is incomplete or using placeholder credentials. Running in mock delivery mode.');
-    }
+  const config = getSmtpConfig();
+  if (!transporter && config.isConfigured) {
+    transporter = nodemailer.createTransport({
+      host: config.host,
+      port: config.port,
+      secure: config.secure,
+      auth: {
+        user: config.user,
+        pass: config.pass,
+      },
+      tls: {
+        rejectUnauthorized: false,
+      },
+    });
+    logger.info(`[EmailService] SMTP transporter initialized with host: ${config.host}:${config.port}`);
   }
   return transporter;
+};
+
+/**
+ * Safe diagnostic to verify SMTP connectivity
+ */
+const verifySmtpConnection = async () => {
+  const config = getSmtpConfig();
+  if (!config.isConfigured) {
+    logger.warn('[EMAIL_SMTP_FAILED] SMTP credentials missing or incomplete in environment');
+    return { success: false, error: 'SMTP credentials missing or incomplete' };
+  }
+  const activeTransporter = getTransporter();
+  if (!activeTransporter) {
+    logger.warn('[EMAIL_SMTP_FAILED] Failed to initialize SMTP transporter');
+    return { success: false, error: 'Failed to initialize SMTP transporter' };
+  }
+  try {
+    await activeTransporter.verify();
+    logger.info('[EMAIL_SMTP_READY] SMTP connection verified successfully');
+    return { success: true };
+  } catch (err) {
+    logger.error(`[EMAIL_SMTP_FAILED] SMTP connection verification failed: ${err.message}`);
+    return { success: false, error: err.message };
+  }
 };
 
 /**
@@ -42,15 +81,22 @@ const getTransporter = () => {
  */
 const sendMail = async ({ to, subject, html, text }) => {
   const maskedTo = maskEmail(to);
+  const config = getSmtpConfig();
   const activeTransporter = getTransporter();
 
-  if (!activeTransporter) {
-    logger.info(`[EmailService:Mock] Email to: ${maskedTo} | Subject: "${subject}"`);
-    return { success: true, mocked: true, messageId: `mock_${Date.now()}` };
+  // If SMTP is not configured
+  if (!activeTransporter || !config.isConfigured) {
+    if (process.env.NODE_ENV === 'test' || process.env.ALLOW_MOCK_EMAIL === 'true') {
+      logger.info(`[EmailService:Mock] Test mode mock email to: ${maskedTo} | Subject: "${subject}"`);
+      return { success: true, mocked: true, messageId: `mock_${Date.now()}` };
+    }
+    logger.error(`[EMAIL_SMTP_FAILED] Cannot send email to ${maskedTo}: SMTP credentials missing or unconfigured in ${process.env.NODE_ENV || 'production'} environment`);
+    return { success: false, error: 'SMTP credentials missing or unconfigured in environment', mocked: false };
   }
 
   try {
-    const fromHeader = SMTP_FROM_EMAIL.includes('<') ? SMTP_FROM_EMAIL : `"${SMTP_FROM_NAME}" <${SMTP_FROM_EMAIL}>`;
+    const fromHeader = config.fromEmail.includes('<') ? config.fromEmail : `"${config.fromName}" <${config.fromEmail}>`;
+    logger.info(`[ORDER_CONFIRMATION_SMTP_SEND_STARTED] Recipient: ${maskedTo}`);
     const info = await activeTransporter.sendMail({
       from: fromHeader,
       to,
@@ -58,12 +104,11 @@ const sendMail = async ({ to, subject, html, text }) => {
       text: text || '',
       html,
     });
-    logger.info(`[EmailService] Email sent successfully to: ${maskedTo} [MessageId: ${info.messageId}]`);
-    return { success: true, messageId: info.messageId };
+    logger.info(`[ORDER_CONFIRMATION_SMTP_SEND_SUCCESS] Recipient: ${maskedTo} | MessageId: ${info.messageId}`);
+    return { success: true, messageId: info.messageId, mocked: false };
   } catch (error) {
     logger.error(`[EmailService] Failed to send email to ${maskedTo}: ${error.message}`);
-    // Return structured failure rather than crashing process
-    return { success: false, error: error.message };
+    return { success: false, error: error.message, mocked: false };
   }
 };
 
@@ -683,15 +728,23 @@ const sendOrderConfirmationEmail = async ({
       text,
     });
 
-    const isSuccess = Boolean(sendResult.success);
+    // In non-test mode, if mocked is true or messageId starts with mock_, reject as failure
+    const isMock = Boolean(sendResult.mocked || (sendResult.messageId && sendResult.messageId.startsWith('mock_')));
+    const isSuccess = Boolean(sendResult.success) && (!isMock || process.env.NODE_ENV === 'test');
+
+    const effectiveError = !isSuccess
+      ? (isMock && process.env.NODE_ENV !== 'test'
+          ? 'Mock email transmission rejected in production/live environment'
+          : (sendResult.error || 'Delivery failed'))
+      : '';
 
     // 7. Persist Delivery State
     const updatePayload = {
       confirmationEmailSent: isSuccess,
       confirmationEmailStatus: isSuccess ? 'SENT' : 'FAILED',
       confirmationEmailSentAt: isSuccess ? new Date() : null,
-      confirmationEmailMessageId: sendResult.messageId || '',
-      confirmationEmailError: isSuccess ? '' : (sendResult.error || 'Delivery failed'),
+      confirmationEmailMessageId: isSuccess ? (sendResult.messageId || '') : '',
+      confirmationEmailError: effectiveError,
     };
 
     if (sId) {
@@ -710,14 +763,14 @@ const sendOrderConfirmationEmail = async ({
     if (isSuccess) {
       logger.info(`[ORDER_CONFIRMATION_SEND_SUCCESS] Session: ${sessionId} | MessageId: ${sendResult.messageId || 'SENT'}`);
     } else {
-      logger.warn(`[ORDER_CONFIRMATION_SEND_FAILED] Session: ${sessionId} | Error: ${sendResult.error}`);
+      logger.warn(`[ORDER_CONFIRMATION_SEND_FAILED] Session: ${sessionId} | Error: ${effectiveError}`);
     }
 
     return {
       success: isSuccess,
       status: isSuccess ? 'SENT' : 'FAILED',
-      messageId: sendResult.messageId,
-      error: sendResult.error,
+      messageId: isSuccess ? sendResult.messageId : undefined,
+      error: effectiveError || undefined,
     };
   } catch (error) {
     logger.error(`[ORDER_CONFIRMATION_SEND_FAILED] Session: ${sessionId} | Unexpected Error: ${error.message}`);
@@ -783,5 +836,7 @@ module.exports = {
   generateOrderConfirmationTemplate,
   escapeHtml,
   getTransporter,
+  getSmtpConfig,
+  verifySmtpConnection,
 };
 
