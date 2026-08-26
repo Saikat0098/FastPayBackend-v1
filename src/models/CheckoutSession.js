@@ -92,6 +92,10 @@ const checkoutSessionSchema = new mongoose.Schema(
       default: false,
       index: true,
     },
+    sendingStartedAt: {
+      type: Date,
+      default: null,
+    },
     confirmationEmailSentAt: {
       type: Date,
       default: null,

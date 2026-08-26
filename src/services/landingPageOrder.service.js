@@ -6,7 +6,19 @@ const ApiError = require('../utils/apiError');
 const checkoutSessionService = require('./checkoutSession.service');
 const { checkBrandOperationalStatus } = require('../middlewares/brandGuard.middleware');
 
-const submitPublicOrder = async ({ slug, productId, quantity = 1, customerName, customerPhone, customerEmail, customerAddress, customFields = {}, returnUrl, cancelUrl }) => {
+const submitPublicOrder = async ({
+  slug,
+  items,
+  productId,
+  quantity = 1,
+  customerName,
+  customerPhone,
+  customerEmail,
+  customerAddress,
+  customFields = {},
+  returnUrl,
+  cancelUrl,
+}) => {
   if (!slug || !slug.trim()) throw new ApiError(400, 'Landing page slug is required');
   if (!customerName || !customerName.trim()) throw new ApiError(400, 'Customer name is required');
   if (!customerPhone || !customerPhone.trim()) throw new ApiError(400, 'Customer phone number is required');
@@ -30,36 +42,138 @@ const submitPublicOrder = async ({ slug, productId, quantity = 1, customerName, 
   // Guard against blocked/suspended brands
   await checkBrandOperationalStatus(brand);
 
-  // Validate and select product
-  let targetProduct = null;
-  if (productId) {
-    targetProduct = (page.products || []).find((p) => p.id === productId);
-  }
-  if (!targetProduct && page.products && page.products.length > 0) {
-    targetProduct = page.products.find((p) => p.isDefault) || page.products[0];
+  // Validate items list (multi-product cart) or fallback to single product
+  const validatedItems = [];
+
+  if (Array.isArray(items) && items.length > 0) {
+    for (const item of items) {
+      if (!item) continue;
+      const targetProdId = item.productId || item.id;
+      if (!targetProdId) {
+        throw new ApiError(400, 'Each cart item must contain a valid product ID');
+      }
+
+      const targetProduct = (page.products || []).find(
+        (p) => p.id === targetProdId || (p._id && p._id.toString() === targetProdId)
+      );
+
+      if (!targetProduct) {
+        throw new ApiError(400, `Product '${targetProdId}' does not exist on this landing page`);
+      }
+
+      if (targetProduct.inStock === false) {
+        throw new ApiError(400, `Product '${targetProduct.name}' is currently out of stock`);
+      }
+
+      const parsedQty = parseInt(item.quantity, 10);
+      if (isNaN(parsedQty) || parsedQty < 1) {
+        throw new ApiError(400, `Invalid quantity for product '${targetProduct.name}'. Must be at least 1.`);
+      }
+
+      const unitPrice =
+        typeof targetProduct.discountPrice === 'number' && targetProduct.discountPrice > 0
+          ? targetProduct.discountPrice
+          : targetProduct.price;
+
+      const itemTotal = unitPrice * parsedQty;
+
+      const targetInstantDelivery = targetProduct.instantDelivery && targetProduct.instantDelivery.enabled
+        ? {
+            enabled: true,
+            type: targetProduct.instantDelivery.type || 'LINK',
+            link: targetProduct.instantDelivery.link || (targetProduct.instantDelivery.type === 'LINK' ? targetProduct.instantDelivery.content || '' : ''),
+            text: targetProduct.instantDelivery.text || (targetProduct.instantDelivery.type === 'TEXT' ? targetProduct.instantDelivery.content || '' : ''),
+            image: targetProduct.instantDelivery.image || (targetProduct.instantDelivery.type === 'IMAGE' ? targetProduct.instantDelivery.content || '' : ''),
+            content: targetProduct.instantDelivery.content || '',
+          }
+        : { enabled: false, type: 'LINK', link: '', text: '', image: '', content: '' };
+
+      validatedItems.push({
+        productId: targetProduct.id,
+        name: targetProduct.name,
+        price: targetProduct.price,
+        discountPrice: targetProduct.discountPrice,
+        unitPrice,
+        quantity: parsedQty,
+        image: targetProduct.image || '',
+        total: itemTotal,
+        currency: targetProduct.currency || 'BDT',
+        instantDelivery: targetInstantDelivery,
+      });
+    }
+  } else {
+    // Single-product fallback
+    let targetProduct = null;
+    if (productId) {
+      targetProduct = (page.products || []).find((p) => p.id === productId || (p._id && p._id.toString() === productId));
+    }
+    if (!targetProduct && page.products && page.products.length > 0) {
+      targetProduct = page.products.find((p) => p.isDefault) || page.products[0];
+    }
+
+    if (!targetProduct) {
+      throw new ApiError(400, 'No product available on this landing page');
+    }
+
+    if (targetProduct.inStock === false) {
+      throw new ApiError(400, `Product '${targetProduct.name}' is currently out of stock`);
+    }
+
+    const parsedQty = Math.max(parseInt(quantity, 10) || 1, 1);
+    const unitPrice =
+      typeof targetProduct.discountPrice === 'number' && targetProduct.discountPrice > 0
+        ? targetProduct.discountPrice
+        : targetProduct.price;
+
+    const itemTotal = Math.max(unitPrice * parsedQty, 1);
+
+    const targetInstantDelivery = targetProduct.instantDelivery && targetProduct.instantDelivery.enabled
+      ? {
+          enabled: true,
+          type: targetProduct.instantDelivery.type || 'LINK',
+          link: targetProduct.instantDelivery.link || (targetProduct.instantDelivery.type === 'LINK' ? targetProduct.instantDelivery.content || '' : ''),
+          text: targetProduct.instantDelivery.text || (targetProduct.instantDelivery.type === 'TEXT' ? targetProduct.instantDelivery.content || '' : ''),
+          image: targetProduct.instantDelivery.image || (targetProduct.instantDelivery.type === 'IMAGE' ? targetProduct.instantDelivery.content || '' : ''),
+          content: targetProduct.instantDelivery.content || '',
+        }
+      : { enabled: false, type: 'LINK', link: '', text: '', image: '', content: '' };
+
+    validatedItems.push({
+      productId: targetProduct.id,
+      name: targetProduct.name,
+      price: targetProduct.price,
+      discountPrice: targetProduct.discountPrice,
+      unitPrice,
+      quantity: parsedQty,
+      image: targetProduct.image || '',
+      total: itemTotal,
+      currency: targetProduct.currency || 'BDT',
+      instantDelivery: targetInstantDelivery,
+    });
   }
 
-  if (!targetProduct) {
-    throw new ApiError(400, 'No product available on this landing page');
+  if (validatedItems.length === 0) {
+    throw new ApiError(400, 'Your order must contain at least one valid product');
   }
 
-  const parsedQty = Math.max(parseInt(quantity, 10) || 1, 1);
-  const unitPrice = typeof targetProduct.discountPrice === 'number' && targetProduct.discountPrice > 0
-    ? targetProduct.discountPrice
-    : targetProduct.price;
-
-  const totalAmount = Math.max(unitPrice * parsedQty, 1);
+  // Calculate authoritative server-side amount
+  const totalAmount = Math.max(
+    validatedItems.reduce((acc, it) => acc + it.total, 0),
+    1
+  );
+  const totalQuantity = validatedItems.reduce((acc, it) => acc + it.quantity, 0);
+  const primaryProduct = validatedItems[0];
 
   // Validate required custom fields from orderForm definition
   if (page.orderForm && Array.isArray(page.orderForm.customFields)) {
     for (const field of page.orderForm.customFields) {
-      if (field.isEnabled && field.required) {
-        let val = customFields[field.id] || customFields[field.label];
-        if (!val) {
-          if (field.id === 'f_name' || field.label.toLowerCase().includes('name')) val = customerName;
-          if (field.id === 'f_phone' || field.label.toLowerCase().includes('phone')) val = customerPhone;
-          if (field.id === 'f_email' || field.label.toLowerCase().includes('email')) val = customerEmail;
-          if (field.id === 'f_address' || field.label.toLowerCase().includes('address')) val = customerAddress;
+      if (field.isEnabled !== false && field.required) {
+        let val = customFields && (customFields[field.id] !== undefined ? customFields[field.id] : customFields[field.label]);
+        if (val === undefined || val === null || val === '') {
+          if (field.id === 'f_name' || (field.label && field.label.toLowerCase().includes('name'))) val = customerName;
+          else if (field.id === 'f_phone' || (field.label && field.label.toLowerCase().includes('phone'))) val = customerPhone;
+          else if (field.id === 'f_email' || (field.label && field.label.toLowerCase().includes('email'))) val = customerEmail;
+          else if (field.id === 'f_address' || (field.label && field.label.toLowerCase().includes('address'))) val = customerAddress;
         }
         if (val === undefined || val === null || val === '') {
           throw new ApiError(400, `Field '${field.label}' is required.`);
@@ -80,7 +194,7 @@ const submitPublicOrder = async ({ slug, productId, quantity = 1, customerName, 
     brandId: brand._id,
     orderId,
     amount: totalAmount,
-    currency: targetProduct.currency || 'BDT',
+    currency: primaryProduct.currency || 'BDT',
     returnUrl: defaultReturnUrl,
     cancelUrl: defaultCancelUrl,
     customerName: customerName.trim(),
@@ -92,8 +206,17 @@ const submitPublicOrder = async ({ slug, productId, quantity = 1, customerName, 
       source: 'landing_page',
       landingPageId: page._id.toString(),
       landingPageSlug: page.slug,
-      productName: targetProduct.name,
-      quantity: parsedQty,
+      productName: validatedItems.map((i) => `${i.name} (x${i.quantity})`).join(', '),
+      quantity: totalQuantity,
+      items: validatedItems.map((i) => ({
+        productId: i.productId,
+        name: i.name,
+        quantity: i.quantity,
+        unitPrice: i.unitPrice,
+        discountPrice: i.discountPrice,
+        total: i.total,
+        instantDelivery: i.instantDelivery,
+      })),
     },
     expiresInMinutes: 30,
   });
@@ -122,16 +245,27 @@ const submitPublicOrder = async ({ slug, productId, quantity = 1, customerName, 
     brand: page.brand?._id || page.brand,
     landingPage: page._id,
     orderId,
+    items: validatedItems.map((i) => ({
+      productId: i.productId,
+      name: i.name,
+      quantity: i.quantity,
+      unitPrice: i.unitPrice,
+      discountPrice: i.discountPrice,
+      image: i.image || '',
+      total: i.total,
+      instantDelivery: i.instantDelivery || { enabled: false, type: 'LINK', link: '', text: '', image: '', content: '' },
+    })),
     product: {
-      id: targetProduct.id,
-      name: targetProduct.name,
-      price: targetProduct.price,
-      discountPrice: targetProduct.discountPrice,
-      image: targetProduct.image || '',
+      id: primaryProduct.productId,
+      name: primaryProduct.name,
+      price: primaryProduct.price,
+      discountPrice: primaryProduct.discountPrice,
+      image: primaryProduct.image || '',
+      instantDelivery: primaryProduct.instantDelivery || { enabled: false, type: 'LINK', link: '', text: '', image: '', content: '' },
     },
-    quantity: parsedQty,
+    quantity: totalQuantity,
     amount: totalAmount,
-    currency: targetProduct.currency || 'BDT',
+    currency: primaryProduct.currency || 'BDT',
     customerName: customerName.trim(),
     customerPhone: customerPhone.trim(),
     customerEmail: customerEmail ? customerEmail.trim() : '',

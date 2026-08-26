@@ -18,12 +18,12 @@ let sentEmails = [];
 let forceTransportFail = false;
 
 // Mock nodemailer sending
-emailService.sendMail = async ({ to, subject, html, text }) => {
+emailService.sendMail = async ({ to, subject, html, text, fromName, replyTo }) => {
   if (forceTransportFail) {
     return { success: false, error: 'SMTP connection timeout (Simulated)' };
   }
   const msgId = `msg_test_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-  const record = { to, subject, html, text, messageId: msgId, timestamp: new Date() };
+  const record = { to, subject, html, text, fromName, replyTo, messageId: msgId, timestamp: new Date() };
   sentEmails.push(record);
   return { success: true, messageId: msgId };
 };
@@ -54,9 +54,12 @@ async function runTests() {
   await mongoose.connect(uri);
 
   // --- UNIT TESTS: HTML Sanitization & Template Generation ---
-  await test('HTML Sanitization prevents script injection in customer and product names', async () => {
+  await test('HTML Sanitization prevents script injection in customer, product, and brand fields', async () => {
     const maliciousName = '<script>alert("xss")</script>';
     const maliciousProduct = '<img src=x onerror=alert(1)>';
+    const maliciousBrand = 'Brand <script>alert("hack")</script>';
+    const maliciousLogo = 'javascript:alert("xss")';
+    const maliciousWebsite = 'javascript:steal()';
     const escaped = emailService.escapeHtml(maliciousName);
     assert(!escaped.includes('<script>'), 'Raw script tags must not exist');
     assert(escaped.includes('&lt;script&gt;'), 'Script tags must be HTML entity escaped');
@@ -69,42 +72,65 @@ async function runTests() {
       amount: 1500,
       currency: 'BDT',
       paymentMethod: 'bKash',
-      brandName: 'Test Brand',
+      brandName: maliciousBrand,
+      brandLogo: maliciousLogo,
+      brandWebsite: maliciousWebsite,
     });
 
     assert(!template.html.includes('<script>alert'), 'HTML email must not contain unescaped scripts');
     assert(!template.html.includes('<img src=x onerror'), 'HTML email must not contain unescaped onerror payloads');
+    assert(!template.html.includes('src="javascript:'), 'Malicious logo javascript: protocol rejected');
+    assert(!template.html.includes('href="javascript:'), 'Malicious website javascript: protocol rejected');
     assert(template.html.includes('&lt;script&gt;'), 'HTML email contains escaped customer name');
     assert(template.text.includes('ORD-TEST-001'), 'Plain text contains Order ID');
   });
 
-  await test('Template includes all required Order Confirmation fields', async () => {
+  await test('Template renders Brand Logo in header when logo is provided', async () => {
     const template = emailService.generateOrderConfirmationTemplate({
       customerName: 'Saikat Islam',
-      orderId: 'ORD-9999',
-      transactionId: 'TRX_BKASH_888',
-      productName: 'FastPay Pro Subscription',
-      quantity: 2,
-      amount: 2500,
+      orderId: 'ORD-LOGO-01',
+      transactionId: 'TRX_LOGO_123',
+      productName: 'SubAccess Membership',
+      amount: 1200,
       currency: 'BDT',
       paymentMethod: 'bKash',
-      paymentStatus: 'PAID / CONFIRMED',
-      customerPhone: '01711002233',
-      customerEmail: 'saikat@example.com',
-      brandName: 'SubAccess Store',
-      supportEmail: 'support@subaccess.com',
-      supportPhone: '01900000000',
+      brandName: 'SubAccess BD',
+      brandLogo: 'https://subaccessbd.com/logo.png',
+      brandWebsite: 'https://subaccessbd.com',
+      supportEmail: 'support@subaccessbd.com',
+      supportPhone: '01712345678',
+      brandWhatsapp: '01325210769',
     });
 
-    assert(template.html.includes('Saikat Islam'), 'Customer name present in HTML');
-    assert(template.html.includes('ORD-9999'), 'Order ID present in HTML');
-    assert(template.html.includes('TRX_BKASH_888'), 'Transaction ID present in HTML');
-    assert(template.html.includes('FastPay Pro Subscription'), 'Product name present in HTML');
-    assert(template.html.includes('2500.00 BDT'), 'Amount formatted in HTML');
-    assert(template.html.includes('bKash'), 'Payment method present in HTML');
-    assert(template.html.includes('SubAccess Store'), 'Brand name present in HTML');
-    assert(template.html.includes('support@subaccess.com'), 'Support email present in HTML');
-    assert(template.text.includes('saikat@example.com'), 'Customer email present in plain text');
+    assert(template.html.includes('<img src="https://subaccessbd.com/logo.png"'), 'Brand logo image rendered in HTML');
+    assert(template.html.includes('SubAccess BD'), 'Brand name rendered in HTML');
+    assert(template.html.includes('Official Order Confirmation'), 'Order Confirmation subtitle rendered');
+    assert(template.html.includes('https://subaccessbd.com'), 'Store website link rendered');
+    assert(template.html.includes('support@subaccessbd.com'), 'Support email link rendered');
+    assert(template.html.includes('01712345678'), 'Support phone rendered');
+    assert(template.html.includes('01325210769'), 'WhatsApp contact rendered');
+    assert(template.html.includes('Payments securely powered by <strong>FastPay</strong>'), 'FastPay co-branding in footer');
+    assert(template.text.startsWith('--------------------------------------------------\nSUBACCESS BD - ORDER CONFIRMATION'), 'Plain-text starts with Brand Name headline');
+  });
+
+  await test('Template falls back to clean typography header when brand logo is missing (no broken img)', async () => {
+    const template = emailService.generateOrderConfirmationTemplate({
+      customerName: 'Tanvir Hossain',
+      orderId: 'ORD-NOLOGO-02',
+      transactionId: 'TRX_NOLOGO_456',
+      productName: 'Digital Course',
+      amount: 500,
+      currency: 'BDT',
+      paymentMethod: 'Nagad',
+      brandName: 'TechAcademy BD',
+      brandLogo: '', // Missing logo
+      supportEmail: 'info@techacademy.com',
+    });
+
+    assert(!template.html.includes('<img'), 'HTML must not contain broken img tag when logo is empty');
+    assert(template.html.includes('TechAcademy BD'), 'Typography header contains Brand Name');
+    assert(template.html.includes('Official Order Confirmation'), 'Typography header contains subtitle');
+    assert(template.text.includes('TECHACADEMY BD - ORDER CONFIRMATION'), 'Plain-text contains brand headline');
   });
 
   // --- INTEGRATION TESTS WITH DATABASE ---

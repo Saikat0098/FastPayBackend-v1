@@ -17,6 +17,65 @@ const generateSlug = (text) => {
     .replace(/-+$/, '');
 };
 
+const normalizeProductInstantDelivery = (prod) => {
+  if (!prod || !prod.instantDelivery) return;
+
+  const id = prod.instantDelivery;
+  const legacyContent = typeof id.content === 'string' ? id.content.trim() : '';
+  const delType = (id.type || 'LINK').toUpperCase();
+
+  if (delType === 'LINK' && !id.link && legacyContent) {
+    id.link = legacyContent;
+  } else if (delType === 'TEXT' && !id.text && typeof id.content === 'string' && id.content) {
+    id.text = id.content;
+  } else if (delType === 'IMAGE' && !id.image && legacyContent) {
+    id.image = legacyContent;
+  }
+
+  id.link = typeof id.link === 'string' ? id.link.trim() : '';
+  id.text = typeof id.text === 'string' ? id.text : '';
+  id.image = typeof id.image === 'string' ? id.image.trim() : '';
+};
+
+const validateProductInstantDelivery = (products) => {
+  if (!Array.isArray(products)) return;
+
+  products.forEach((prod, index) => {
+    const pName = prod.name || `Product #${index + 1}`;
+    if (prod.instantDelivery && prod.instantDelivery.enabled === true) {
+      normalizeProductInstantDelivery(prod);
+
+      const delType = (prod.instantDelivery.type || 'LINK').toUpperCase();
+
+      if (delType === 'LINK') {
+        const link = prod.instantDelivery.link || '';
+        if (!link) {
+          throw new ApiError(400, `Product '${pName}': Delivery Link is required when Instant Digital Delivery is enabled.`);
+        }
+        // Strict URL validation: must start with http:// or https:// and be parseable
+        try {
+          const parsed = new URL(link);
+          if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+            throw new Error();
+          }
+        } catch (_) {
+          throw new ApiError(400, `Product '${pName}': Instant Digital Delivery (LINK) requires a valid HTTP or HTTPS URL (e.g. https://example.com/product).`);
+        }
+      } else if (delType === 'TEXT') {
+        const text = typeof prod.instantDelivery.text === 'string' ? prod.instantDelivery.text.trim() : '';
+        if (!text) {
+          throw new ApiError(400, `Product '${pName}': Delivery Instructions are required when Instant Digital Delivery is enabled.`);
+        }
+      } else if (delType === 'IMAGE') {
+        const image = prod.instantDelivery.image || '';
+        if (!image) {
+          throw new ApiError(400, `Product '${pName}': Delivery Image is required when Instant Digital Delivery is enabled.`);
+        }
+      }
+    }
+  });
+};
+
 const createLandingPage = async ({ merchantId, brandId, title, slug, templateData = {} }) => {
   if (!merchantId) throw new ApiError(401, 'Merchant ID required');
   if (!brandId) throw new ApiError(400, 'Brand ID is required to scope this landing page');
@@ -73,6 +132,11 @@ const createLandingPage = async ({ merchantId, brandId, title, slug, templateDat
     { id: 'f_note', label: 'Special Instructions (Optional)', placeholder: 'Any specific delivery note...', type: 'note', required: false, displayOrder: 4, isEnabled: true },
   ];
 
+  // Validate products instant delivery configuration if provided
+  if (templateData.products && Array.isArray(templateData.products)) {
+    validateProductInstantDelivery(templateData.products);
+  }
+
   const landingPage = await LandingPage.create({
     merchant: merchantId,
     brand: brand._id,
@@ -106,6 +170,7 @@ const createLandingPage = async ({ merchantId, brandId, title, slug, templateDat
       overlayOpacity: 0.6,
     },
     products: templateData.products && templateData.products.length > 0 ? templateData.products : [defaultProduct],
+    productCardPreset: templateData.productCardPreset || 'modern',
     orderForm: {
       isEnabled: true,
       title: 'Complete Your Order',
@@ -189,6 +254,10 @@ const getLandingPageById = async (pageId, merchantId) => {
     throw new ApiError(404, 'Landing Page not found or access denied');
   }
 
+  if (Array.isArray(page.products)) {
+    page.products.forEach(normalizeProductInstantDelivery);
+  }
+
   return page;
 };
 
@@ -226,6 +295,11 @@ const updateLandingPage = async (pageId, merchantId, updateData) => {
     page.slug = cleanSlug;
   }
 
+  // Validate products instant delivery configuration if provided in updates
+  if (updateData.products && Array.isArray(updateData.products)) {
+    validateProductInstantDelivery(updateData.products);
+  }
+
   const allowedFields = [
     'title',
     'status',
@@ -234,6 +308,7 @@ const updateLandingPage = async (pageId, merchantId, updateData) => {
     'navbar',
     'hero',
     'products',
+    'productCardPreset',
     'orderForm',
     'about',
     'features',
@@ -361,6 +436,21 @@ const getPublicLandingPage = async (slug) => {
 
   const pageObj = page.toObject ? page.toObject() : { ...page };
   pageObj.gateways = brandGateways;
+
+  // Sanitize products: Never leak instant delivery content before successful payment verification
+  if (Array.isArray(pageObj.products)) {
+    pageObj.products = pageObj.products.map((p) => {
+      const prod = { ...p };
+      if (prod.instantDelivery) {
+        prod.instantDelivery = {
+          enabled: Boolean(prod.instantDelivery.enabled),
+          type: prod.instantDelivery.type || 'LINK',
+          // content is omitted intentionally for pre-payment security
+        };
+      }
+      return prod;
+    });
+  }
 
   return pageObj;
 };

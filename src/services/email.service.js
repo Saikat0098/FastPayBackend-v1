@@ -11,8 +11,9 @@ const getSmtpConfig = () => {
   const host = process.env.SMTP_HOST || process.env.EMAIL_HOST || 'smtp.gmail.com';
   const port = parseInt(process.env.SMTP_PORT || process.env.EMAIL_PORT || '587', 10);
   const secure = process.env.SMTP_SECURE === 'true' || process.env.EMAIL_SECURE === 'true' || port === 465;
-  const user = process.env.SMTP_USER || process.env.EMAIL_USER || '';
-  const pass = process.env.SMTP_PASS || process.env.SMTP_PASSWORD || process.env.EMAIL_PASS || process.env.EMAIL_PASSWORD || '';
+  const user = (process.env.SMTP_USER || process.env.EMAIL_USER || '').trim();
+  const rawPass = process.env.SMTP_PASS || process.env.SMTP_PASSWORD || process.env.EMAIL_PASS || process.env.EMAIL_PASSWORD || '';
+  const pass = rawPass.replace(/\s+/g, '');
   const fromName = process.env.SMTP_FROM_NAME || process.env.EMAIL_FROM_NAME || 'FastPay';
   const fromEmail = process.env.SMTP_FROM || process.env.EMAIL_FROM || (user ? `"${fromName}" <${user}>` : '"FastPay" <noreply@fastpay.com>');
   const isConfigured = Boolean(user && pass && pass !== 'YOUR_GMAIL_APP_PASSWORD');
@@ -32,24 +33,44 @@ const getSmtpConfig = () => {
 // Singleton transporter instance
 let transporter = null;
 
+const createSmtpTransporter = (config) => {
+  return nodemailer.createTransport({
+    host: config.host,
+    port: config.port,
+    secure: config.secure,
+    auth: {
+      user: config.user,
+      pass: config.pass,
+    },
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000,
+    family: 4,
+    pool: true,
+    maxConnections: 5,
+    maxMessages: 100,
+    tls: {
+      rejectUnauthorized: false,
+    },
+  });
+};
+
 const getTransporter = () => {
   const config = getSmtpConfig();
   if (!transporter && config.isConfigured) {
-    transporter = nodemailer.createTransport({
-      host: config.host,
-      port: config.port,
-      secure: config.secure,
-      auth: {
-        user: config.user,
-        pass: config.pass,
-      },
-      tls: {
-        rejectUnauthorized: false,
-      },
-    });
-    logger.info(`[EmailService] SMTP transporter initialized with host: ${config.host}:${config.port}`);
+    transporter = createSmtpTransporter(config);
+    logger.info(`[ORDER_EMAIL_SMTP] Transporter initialized with host: ${config.host}:${config.port}`);
   }
   return transporter;
+};
+
+const resetTransporter = () => {
+  if (transporter && typeof transporter.close === 'function') {
+    try {
+      transporter.close();
+    } catch (_) {}
+  }
+  transporter = null;
 };
 
 /**
@@ -77,12 +98,12 @@ const verifySmtpConnection = async () => {
 };
 
 /**
- * Base email sending method
+ * Base email sending method with auto-recovery and single retry
  */
-const sendMail = async ({ to, subject, html, text }) => {
+const sendMail = async ({ to, subject, html, text, fromName, replyTo }) => {
   const maskedTo = maskEmail(to);
   const config = getSmtpConfig();
-  const activeTransporter = getTransporter();
+  let activeTransporter = getTransporter();
 
   // If SMTP is not configured
   if (!activeTransporter || !config.isConfigured) {
@@ -94,22 +115,45 @@ const sendMail = async ({ to, subject, html, text }) => {
     return { success: false, error: 'SMTP credentials missing or unconfigured in environment', mocked: false };
   }
 
-  try {
-    const fromHeader = config.fromEmail.includes('<') ? config.fromEmail : `"${config.fromName}" <${config.fromEmail}>`;
-    logger.info(`[ORDER_CONFIRMATION_SMTP_SEND_STARTED] Recipient: ${maskedTo}`);
-    const info = await activeTransporter.sendMail({
-      from: fromHeader,
-      to,
-      subject,
-      text: text || '',
-      html,
-    });
-    logger.info(`[ORDER_CONFIRMATION_SMTP_SEND_SUCCESS] Recipient: ${maskedTo} | MessageId: ${info.messageId}`);
-    return { success: true, messageId: info.messageId, mocked: false };
-  } catch (error) {
-    logger.error(`[EmailService] Failed to send email to ${maskedTo}: ${error.message}`);
-    return { success: false, error: error.message, mocked: false };
+  // Dynamic sender identity: "${brandName} via FastPay" <SMTP_USER>
+  let fromHeader = config.fromEmail.includes('<') ? config.fromEmail : `"${config.fromName}" <${config.fromEmail}>`;
+  if (fromName && typeof fromName === 'string' && fromName.trim()) {
+    const cleanFromName = fromName.trim().replace(/[\r\n"]/g, '');
+    const senderEmail = config.user || (config.fromEmail.includes('<') ? (config.fromEmail.match(/<([^>]+)>/)?.[1] || config.fromEmail) : config.fromEmail) || 'noreply@fastpay.com';
+    fromHeader = `"${cleanFromName}" <${senderEmail}>`;
   }
+
+  const mailOptions = {
+    from: fromHeader,
+    to,
+    subject,
+    text: text || '',
+    html,
+  };
+
+  if (replyTo && typeof replyTo === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(replyTo.trim())) {
+    mailOptions.replyTo = replyTo.trim();
+  }
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      logger.info(`[ORDER_EMAIL_SEND_STARTED] Recipient: ${maskedTo} | Attempt: ${attempt}`);
+      const info = await activeTransporter.sendMail(mailOptions);
+      logger.info(`[ORDER_EMAIL_SEND_SUCCESS] Recipient: ${maskedTo} | MessageId: ${info.messageId}`);
+      return { success: true, messageId: info.messageId, mocked: false };
+    } catch (error) {
+      logger.warn(`[ORDER_EMAIL_SEND_FAILED] Recipient: ${maskedTo} | Attempt ${attempt} error: ${error.message}`);
+      resetTransporter();
+      if (attempt === 1) {
+        activeTransporter = getTransporter();
+        if (!activeTransporter) break;
+      } else {
+        return { success: false, error: error.message, mocked: false };
+      }
+    }
+  }
+
+  return { success: false, error: 'SMTP delivery failed after retry', mocked: false };
 };
 
 /**
@@ -330,6 +374,7 @@ const generateOrderConfirmationTemplate = ({
   transactionId = '',
   productName = '',
   quantity = 1,
+  items = [],
   amount = 0,
   currency = 'BDT',
   paymentMethod = 'MFS',
@@ -338,6 +383,10 @@ const generateOrderConfirmationTemplate = ({
   customerEmail = '',
   orderDate = '',
   brandName = 'Store',
+  brandLogo = '',
+  brandWebsite = '',
+  brandSupportPage = '',
+  brandWhatsapp = '',
   supportEmail = '',
   supportPhone = '',
 }) => {
@@ -354,19 +403,74 @@ const generateOrderConfirmationTemplate = ({
   const safeCustomerEmail = escapeHtml(customerEmail || '');
   const safeOrderDate = escapeHtml(orderDate || new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }));
   const safeBrandName = escapeHtml(brandName || 'FastPay Merchant');
+
+  // Sanitize Logo URL (must be valid HTTP/HTTPS/data:image to prevent XSS/broken links)
+  const rawBrandLogo = (brandLogo || '').trim();
+  const safeBrandLogo = (rawBrandLogo.startsWith('http://') || rawBrandLogo.startsWith('https://') || rawBrandLogo.startsWith('data:image/'))
+    ? escapeHtml(rawBrandLogo)
+    : '';
+
+  // Sanitize Website and Links
+  const rawBrandWebsite = (brandWebsite || '').trim();
+  const safeBrandWebsite = (rawBrandWebsite.startsWith('http://') || rawBrandWebsite.startsWith('https://'))
+    ? escapeHtml(rawBrandWebsite)
+    : (rawBrandWebsite ? `https://${escapeHtml(rawBrandWebsite)}` : '');
+
+  const rawSupportPage = (brandSupportPage || '').trim();
+  const safeBrandSupportPage = (rawSupportPage.startsWith('http://') || rawSupportPage.startsWith('https://'))
+    ? escapeHtml(rawSupportPage)
+    : (rawSupportPage ? `https://${escapeHtml(rawSupportPage)}` : '');
+
+  const safeBrandWhatsapp = escapeHtml(brandWhatsapp || '');
   const safeSupportEmail = escapeHtml(supportEmail || '');
   const safeSupportPhone = escapeHtml(supportPhone || '');
 
-  const productRowHtml = safeProductName ? `
-    <tr>
-      <td style="padding: 10px 14px; color: #64748b; font-size: 13px; border-bottom: 1px solid #f1f5f9;">Product</td>
-      <td style="padding: 10px 14px; color: #0f172a; font-weight: 600; font-size: 13px; text-align: right; border-bottom: 1px solid #f1f5f9;">${safeProductName}</td>
-    </tr>
-    <tr>
-      <td style="padding: 10px 14px; color: #64748b; font-size: 13px; border-bottom: 1px solid #f1f5f9;">Quantity</td>
-      <td style="padding: 10px 14px; color: #0f172a; font-weight: 600; font-size: 13px; text-align: right; border-bottom: 1px solid #f1f5f9;">${safeQuantity}</td>
-    </tr>
-  ` : '';
+  let productRowHtml = '';
+  let productTextSummary = '';
+
+  if (Array.isArray(items) && items.length > 0) {
+    const itemsHtml = items
+      .map((item) => {
+        const iName = escapeHtml(item.name || 'Product');
+        const iQty = escapeHtml(String(item.quantity || 1));
+        const unitP = item.unitPrice !== undefined ? Number(item.unitPrice).toFixed(2) : (item.price !== undefined ? Number(item.price).toFixed(2) : '');
+        const lineTot = item.total !== undefined ? Number(item.total).toFixed(2) : (unitP ? (Number(unitP) * Number(iQty)).toFixed(2) : '');
+        return `
+          <tr>
+            <td style="padding: 10px 14px; color: #0f172a; font-size: 13px; font-weight: 600; border-bottom: 1px solid #f1f5f9;">
+              ${iName} <span style="color: #64748b; font-weight: normal; font-size: 12px;">× ${iQty}</span>
+            </td>
+            <td style="padding: 10px 14px; color: #0f172a; font-weight: 700; font-size: 13px; text-align: right; border-bottom: 1px solid #f1f5f9;">
+              ${lineTot ? `${lineTot} ${safeCurrency}` : ''}
+            </td>
+          </tr>
+        `;
+      })
+      .join('');
+
+    productRowHtml = `
+      <tr>
+        <td colspan="2" style="padding: 8px 14px; background-color: #f1f5f9; color: #475569; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #e2e8f0;">
+          Order Items (${items.length})
+        </td>
+      </tr>
+      ${itemsHtml}
+    `;
+
+    productTextSummary = `ORDER ITEMS:\n` + items.map((i) => `  - ${i.name} × ${i.quantity || 1}${i.unitPrice ? ` — ${i.unitPrice} ${safeCurrency}` : ''}`).join('\n') + '\n';
+  } else if (safeProductName) {
+    productRowHtml = `
+      <tr>
+        <td style="padding: 10px 14px; color: #64748b; font-size: 13px; border-bottom: 1px solid #f1f5f9;">Product</td>
+        <td style="padding: 10px 14px; color: #0f172a; font-weight: 600; font-size: 13px; text-align: right; border-bottom: 1px solid #f1f5f9;">${safeProductName}</td>
+      </tr>
+      <tr>
+        <td style="padding: 10px 14px; color: #64748b; font-size: 13px; border-bottom: 1px solid #f1f5f9;">Quantity</td>
+        <td style="padding: 10px 14px; color: #0f172a; font-weight: 600; font-size: 13px; text-align: right; border-bottom: 1px solid #f1f5f9;">${safeQuantity}</td>
+      </tr>
+    `;
+    productTextSummary = `Product: ${safeProductName}\nQuantity: ${safeQuantity}\n`;
+  }
 
   const phoneRowHtml = safeCustomerPhone ? `
     <tr>
@@ -375,13 +479,179 @@ const generateOrderConfirmationTemplate = ({
     </tr>
   ` : '';
 
-  const supportInfoHtml = (safeSupportEmail || safeSupportPhone) ? `
-    <div style="margin-top: 24px; padding: 14px 18px; background-color: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0; font-size: 12px; color: #475569; line-height: 1.6;">
-      <strong style="color: #0f172a;">Merchant Support Contact:</strong><br/>
-      ${safeSupportEmail ? `Email: <a href="mailto:${safeSupportEmail}" style="color: #4f46e5; text-decoration: none;">${safeSupportEmail}</a><br/>` : ''}
-      ${safeSupportPhone ? `Phone: <span style="color: #0f172a;">${safeSupportPhone}</span>` : ''}
+  // 4. Instant Digital Delivery Section (LINK, TEXT, IMAGE)
+  let digitalDeliveryItems = [];
+  if (Array.isArray(items) && items.length > 0) {
+    digitalDeliveryItems = items.filter((it) => {
+      if (!it?.instantDelivery?.enabled) return false;
+      const dType = (it.instantDelivery.type || 'LINK').toUpperCase();
+      if (dType === 'LINK') {
+        const val = it.instantDelivery.link || (it.instantDelivery.type === 'LINK' ? it.instantDelivery.content : '');
+        return Boolean(val && val.trim());
+      }
+      if (dType === 'TEXT') {
+        const val = it.instantDelivery.text !== undefined && it.instantDelivery.text !== ''
+          ? it.instantDelivery.text
+          : (it.instantDelivery.type === 'TEXT' ? it.instantDelivery.content : '');
+        return Boolean(val && (typeof val === 'string' ? val.trim() : val));
+      }
+      if (dType === 'IMAGE') {
+        const val = it.instantDelivery.image || (it.instantDelivery.type === 'IMAGE' ? it.instantDelivery.content : '');
+        return Boolean(val && val.trim());
+      }
+      return false;
+    });
+  }
+
+  let digitalDeliveryHtml = '';
+  let digitalDeliveryText = '';
+
+  if (digitalDeliveryItems.length > 0) {
+    const digitalCardsHtml = digitalDeliveryItems.map((item) => {
+      const pName = escapeHtml(item.name || safeProductName || 'Digital Product');
+      const delType = (item.instantDelivery?.type || 'LINK').toUpperCase();
+
+      if (delType === 'LINK') {
+        const rawLink = (item.instantDelivery?.link || (item.instantDelivery?.type === 'LINK' ? item.instantDelivery?.content : '') || '').trim();
+        const safeLink = escapeHtml(rawLink);
+        const href = (rawLink.startsWith('http://') || rawLink.startsWith('https://')) ? rawLink : (rawLink ? `https://${rawLink}` : '');
+
+        return `
+          <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px 18px; margin-bottom: 12px;">
+            <div style="font-size: 13px; font-weight: 700; color: #0f172a; margin-bottom: 8px;">${pName}</div>
+            <div style="font-size: 13px; color: #4f46e5; word-break: break-all; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+              ${href ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" style="color: #4f46e5; text-decoration: underline; font-weight: 600;">${safeLink}</a>` : safeLink}
+            </div>
+          </div>
+        `;
+      } else if (delType === 'TEXT') {
+        const rawText = item.instantDelivery?.text !== undefined && item.instantDelivery?.text !== ''
+          ? item.instantDelivery.text
+          : (item.instantDelivery?.type === 'TEXT' ? (item.instantDelivery?.content || '') : '');
+
+        const escapedText = escapeHtml(rawText);
+        const urlRegex = /(https?:\/\/[^\s<]+)/g;
+        const linkedText = escapedText.replace(urlRegex, '<a href="$1" target="_blank" rel="noopener noreferrer" style="color: #4f46e5; text-decoration: underline;">$1</a>');
+
+        return `
+          <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px 18px; margin-bottom: 12px;">
+            <div style="font-size: 13px; font-weight: 700; color: #0f172a; margin-bottom: 8px;">${pName}</div>
+            <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 14px 16px; font-size: 13px; color: #1e293b; line-height: 1.6; white-space: pre-wrap; word-break: break-word; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">${linkedText}</div>
+          </div>
+        `;
+      } else if (delType === 'IMAGE') {
+        const rawImg = (item.instantDelivery?.image || (item.instantDelivery?.type === 'IMAGE' ? item.instantDelivery?.content : '') || '').trim();
+        const safeImg = (rawImg.startsWith('http://') || rawImg.startsWith('https://') || rawImg.startsWith('data:image/'))
+          ? escapeHtml(rawImg)
+          : '';
+
+        return `
+          <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px 18px; margin-bottom: 12px;">
+            <div style="font-size: 13px; font-weight: 700; color: #0f172a; margin-bottom: 8px;">${pName}</div>
+            ${safeImg ? `
+              <div style="text-align: center; background: #f8fafc; padding: 12px; border-radius: 6px; border: 1px solid #e2e8f0;">
+                <img src="${safeImg}" alt="${pName}" style="max-width: 100%; height: auto; border-radius: 6px; display: inline-block;" />
+              </div>
+            ` : `<div style="font-size: 12px; color: #64748b;">(Image content delivered)</div>`}
+          </div>
+        `;
+      }
+      return '';
+    }).join('');
+
+    digitalDeliveryHtml = `
+      <!-- Instant Digital Delivery Section -->
+      <div style="margin-bottom: 24px; padding: 16px 18px; background-color: #f8fafc; border: 1px solid #c7d2fe; border-radius: 10px;">
+        <div style="font-size: 11px; font-weight: 800; letter-spacing: 1px; color: #4f46e5; text-transform: uppercase; margin-bottom: 12px;">
+          ⚡ Instant Digital Delivery
+        </div>
+        ${digitalCardsHtml}
+      </div>
+    `;
+
+    digitalDeliveryText = `\n==================================================\n⚡ INSTANT DIGITAL DELIVERY\n==================================================\n` +
+      digitalDeliveryItems.map((item) => {
+        const pName = item.name || safeProductName || 'Digital Product';
+        const delType = (item.instantDelivery?.type || 'LINK').toUpperCase();
+        let value = '';
+        if (delType === 'LINK') {
+          value = item.instantDelivery?.link || (item.instantDelivery?.type === 'LINK' ? item.instantDelivery?.content : '') || '';
+        } else if (delType === 'TEXT') {
+          value = item.instantDelivery?.text !== undefined && item.instantDelivery?.text !== ''
+            ? item.instantDelivery.text
+            : (item.instantDelivery?.type === 'TEXT' ? (item.instantDelivery?.content || '') : '');
+        } else if (delType === 'IMAGE') {
+          value = item.instantDelivery?.image || (item.instantDelivery?.type === 'IMAGE' ? item.instantDelivery?.content : '') || '';
+        }
+        return `Product: ${pName}\n${value}\n`;
+      }).join('\n') + `--------------------------------------------------\n`;
+  }
+
+  // Brand-Specific Support & Store Section
+  const hasSupportDetails = Boolean(safeBrandWebsite || safeSupportEmail || safeSupportPhone || safeBrandWhatsapp || safeBrandSupportPage);
+  const supportInfoHtml = hasSupportDetails ? `
+    <div style="margin-top: 24px; padding: 16px 20px; background-color: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0; font-size: 13px; color: #475569; line-height: 1.6;">
+      <div style="font-size: 11px; font-weight: 800; letter-spacing: 1px; color: #4f46e5; text-transform: uppercase; margin-bottom: 8px;">
+        ${safeBrandName} Support &amp; Store Details
+      </div>
+      <table style="width: 100%; border: none;">
+        ${safeBrandWebsite ? `
+          <tr>
+            <td style="padding: 4px 0; color: #64748b; font-size: 12px; width: 110px;">Website:</td>
+            <td style="padding: 4px 0; font-size: 12px;"><a href="${safeBrandWebsite}" target="_blank" rel="noopener noreferrer" style="color: #4f46e5; text-decoration: none; font-weight: 600;">${safeBrandWebsite}</a></td>
+          </tr>
+        ` : ''}
+        ${safeSupportEmail ? `
+          <tr>
+            <td style="padding: 4px 0; color: #64748b; font-size: 12px; width: 110px;">Support Email:</td>
+            <td style="padding: 4px 0; font-size: 12px;"><a href="mailto:${safeSupportEmail}" style="color: #4f46e5; text-decoration: none; font-weight: 600;">${safeSupportEmail}</a></td>
+          </tr>
+        ` : ''}
+        ${safeSupportPhone ? `
+          <tr>
+            <td style="padding: 4px 0; color: #64748b; font-size: 12px; width: 110px;">Support Phone:</td>
+            <td style="padding: 4px 0; color: #0f172a; font-weight: 600; font-size: 12px;">${safeSupportPhone}</td>
+          </tr>
+        ` : ''}
+        ${safeBrandWhatsapp ? `
+          <tr>
+            <td style="padding: 4px 0; color: #64748b; font-size: 12px; width: 110px;">WhatsApp:</td>
+            <td style="padding: 4px 0; color: #0f172a; font-weight: 600; font-size: 12px;">${safeBrandWhatsapp}</td>
+          </tr>
+        ` : ''}
+        ${safeBrandSupportPage ? `
+          <tr>
+            <td style="padding: 4px 0; color: #64748b; font-size: 12px; width: 110px;">Support Page:</td>
+            <td style="padding: 4px 0; font-size: 12px;"><a href="${safeBrandSupportPage}" target="_blank" rel="noopener noreferrer" style="color: #4f46e5; text-decoration: none; font-weight: 600;">${safeBrandSupportPage}</a></td>
+          </tr>
+        ` : ''}
+      </table>
     </div>
   ` : '';
+
+  // Top Header: Logo-based if brand logo exists, otherwise clean typography-based header
+  const headerHtml = safeBrandLogo ? `
+    <!-- Top Brand Header with Logo -->
+    <div style="background: #ffffff; padding: 28px 24px; text-align: center; border-bottom: 2px solid #f1f5f9;">
+      <img src="${safeBrandLogo}" alt="${safeBrandName}" style="max-height: 52px; max-width: 220px; height: auto; width: auto; object-fit: contain; display: inline-block; vertical-align: middle;" />
+      <h1 style="margin: 12px 0 0 0; font-size: 19px; font-weight: 700; color: #0f172a; letter-spacing: -0.3px;">
+        ${safeBrandName}
+      </h1>
+      <div style="font-size: 10px; font-weight: 700; letter-spacing: 1.5px; color: #64748b; text-transform: uppercase; margin-top: 4px;">
+        Official Order Confirmation
+      </div>
+    </div>
+  ` : `
+    <!-- Top Brand Header (Clean Typography Fallback) -->
+    <div style="background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%); padding: 28px 24px; text-align: center; border-bottom: 3px solid #6366f1;">
+      <h1 style="margin: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.5px; color: #ffffff;">
+        ${safeBrandName}
+      </h1>
+      <div style="font-size: 10px; font-weight: 700; letter-spacing: 1.5px; color: #a5b4fc; text-transform: uppercase; margin-top: 4px;">
+        Official Order Confirmation
+      </div>
+    </div>
+  `;
 
   const html = `
 <!DOCTYPE html>
@@ -419,15 +689,7 @@ const generateOrderConfirmationTemplate = ({
   <div class="wrapper" style="width: 100%; background-color: #f1f5f9; padding: 32px 0;">
     <div class="container" style="max-width: 580px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
       
-      <!-- Top Brand Header -->
-      <div style="background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%); padding: 28px 24px; text-align: center; border-bottom: 3px solid #6366f1;">
-        <h1 style="margin: 0; font-size: 26px; font-weight: 800; letter-spacing: -0.5px; color: #ffffff;">
-          Fast<span style="color: #818cf8;">Pay</span>
-        </h1>
-        <div style="font-size: 10px; font-weight: 700; letter-spacing: 1.5px; color: #a5b4fc; text-transform: uppercase; margin-top: 4px;">
-          Official Order Confirmation
-        </div>
-      </div>
+      ${headerHtml}
 
       <!-- Main Body -->
       <div style="padding: 32px 28px;">
@@ -475,6 +737,8 @@ const generateOrderConfirmationTemplate = ({
           </table>
         </div>
 
+        ${digitalDeliveryHtml}
+
         <!-- Customer & Merchant Information Table -->
         <div style="margin-bottom: 24px;">
           <div style="font-size: 11px; font-weight: 800; letter-spacing: 1px; color: #6366f1; text-transform: uppercase; margin-bottom: 8px;">
@@ -506,15 +770,15 @@ const generateOrderConfirmationTemplate = ({
         <!-- Thank you note -->
         <div style="margin-top: 28px; text-align: center; color: #64748b; font-size: 13px; line-height: 1.6;">
           <p style="margin: 0 0 6px 0; font-weight: 600; color: #0f172a;">Thank you for your purchase.</p>
-          <p style="margin: 0; font-size: 12px;">If you have any questions regarding this order, please contact the merchant/store.</p>
+          <p style="margin: 0; font-size: 12px;">If you have any questions regarding this order, please contact ${safeBrandName}.</p>
         </div>
 
       </div>
 
-      <!-- Footer -->
+      <!-- Footer: FastPay as Payment Infrastructure -->
       <div style="background-color: #f8fafc; border-top: 1px solid #e2e8f0; padding: 18px 24px; text-align: center; font-size: 11px; color: #94a3b8; line-height: 1.6;">
-        <p style="margin: 0 0 4px 0;">This is an automated order confirmation from FastPay on behalf of <strong>${safeBrandName}</strong>.</p>
-        <p style="margin: 0;">© ${new Date().getFullYear()} FastPay Payment Gateway. All rights reserved.</p>
+        <p style="margin: 0 0 4px 0;">This order confirmation was sent on behalf of <strong>${safeBrandName}</strong>.</p>
+        <p style="margin: 0;">Payments securely powered by <strong>FastPay</strong>.</p>
       </div>
 
     </div>
@@ -525,7 +789,7 @@ const generateOrderConfirmationTemplate = ({
 
   const text = `
 --------------------------------------------------
-FASTPAY - ORDER CONFIRMATION
+${safeBrandName.toUpperCase()} - ORDER CONFIRMATION
 --------------------------------------------------
 
 Hello ${safeCustomerName},
@@ -536,22 +800,22 @@ ORDER INFORMATION
 --------------------------------------------------
 Order ID: ${safeOrderId}
 Transaction ID: ${safeTransactionId}
-${safeProductName ? `Product: ${safeProductName}\nQuantity: ${safeQuantity}\n` : ''}Amount Paid: ${safeAmount} ${safeCurrency}
+${productTextSummary || ''}Amount Paid: ${safeAmount} ${safeCurrency}
 Payment Method: ${safePaymentMethod}
 Payment Status: ${safePaymentStatus}
-
+${digitalDeliveryText || ''}
 CUSTOMER & STORE INFORMATION
 --------------------------------------------------
 Name: ${safeCustomerName}
 ${safeCustomerPhone ? `Phone: ${safeCustomerPhone}\n` : ''}Email: ${safeCustomerEmail}
 Order Date: ${safeOrderDate}
 Merchant / Store: ${safeBrandName}
-${safeSupportEmail ? `Merchant Support: ${safeSupportEmail}\n` : ''}${safeSupportPhone ? `Merchant Phone: ${safeSupportPhone}\n` : ''}
---------------------------------------------------
+${safeBrandWebsite ? `Store Website: ${safeBrandWebsite}\n` : ''}${safeSupportEmail ? `Support Email: ${safeSupportEmail}\n` : ''}${safeSupportPhone ? `Support Phone: ${safeSupportPhone}\n` : ''}${safeBrandWhatsapp ? `WhatsApp: ${safeBrandWhatsapp}\n` : ''}${safeBrandSupportPage ? `Support Page: ${safeBrandSupportPage}\n` : ''}--------------------------------------------------
 Thank you for your purchase.
-If you have any questions regarding this order, please contact the merchant/store.
+If you have any questions regarding this order, please contact ${safeBrandName}.
 
-This is an automated confirmation from FastPay. Please do not reply directly to this email.
+This order confirmation was sent on behalf of ${safeBrandName}.
+Payments securely powered by FastPay.
   `.trim();
 
   return { html, text };
@@ -617,17 +881,26 @@ const sendOrderConfirmationEmail = async ({
     };
   }
 
-  // 2. ATOMIC LOCKING & IDEMPOTENCY
-  // Transition NOT_SENT or FAILED -> SENDING atomically. Only ONE worker wins the send lock!
+  // 2. ATOMIC LOCKING & IDEMPOTENCY WITH STALE SENDING RECOVERY
+  const staleThreshold = new Date(Date.now() - 45 * 1000); // 45s recovery threshold
   if (!forceRetry && sId) {
+    const lockFilter = {
+      _id: sId,
+      confirmationEmailSent: false,
+      $or: [
+        { confirmationEmailStatus: { $in: ['NOT_SENT', 'FAILED', 'PENDING'] } },
+        { confirmationEmailStatus: 'SENDING', sendingStartedAt: { $lt: staleThreshold } },
+        { confirmationEmailStatus: 'SENDING', sendingStartedAt: null, updatedAt: { $lt: staleThreshold } },
+      ],
+    };
+
     const lockAcquired = await CheckoutSession.findOneAndUpdate(
+      lockFilter,
       {
-        _id: sId,
-        confirmationEmailStatus: { $in: ['NOT_SENT', 'FAILED', 'PENDING'] },
-        confirmationEmailSent: false,
-      },
-      {
-        $set: { confirmationEmailStatus: 'SENDING' },
+        $set: {
+          confirmationEmailStatus: 'SENDING',
+          sendingStartedAt: new Date(),
+        },
         $inc: { confirmationEmailAttempts: 1 },
       },
       { new: true }
@@ -646,7 +919,10 @@ const sendOrderConfirmationEmail = async ({
     await CheckoutSession.updateOne(
       { _id: sId },
       {
-        $set: { confirmationEmailStatus: 'SENDING' },
+        $set: {
+          confirmationEmailStatus: 'SENDING',
+          sendingStartedAt: new Date(),
+        },
         $inc: { confirmationEmailAttempts: 1 },
       }
     ).catch(() => {});
@@ -674,11 +950,31 @@ const sendOrderConfirmationEmail = async ({
       } catch (_) {}
     }
 
+    // Dynamic Brand Values with Safe Fallbacks
     const brandName = resolvedBrand?.name || resolvedMerchant?.companyName || resolvedMerchant?.name || 'Store';
-    const supportEmail = resolvedBrand?.supportEmail || '';
-    const supportPhone = resolvedBrand?.supportPhone || '';
+    const brandLogo = resolvedBrand?.logo || resolvedMerchant?.logo || resolvedMerchant?.avatar || '';
+    const brandWebsite = resolvedBrand?.websiteUrl || resolvedBrand?.businessInfo?.businessWebsite || '';
+    const brandSupportPage = resolvedBrand?.supportPageUrl || '';
+    const brandWhatsapp = resolvedBrand?.whatsappNumber || '';
+    const supportEmail = resolvedBrand?.supportEmail || (resolvedBrand ? '' : (resolvedMerchant?.email || ''));
+    const supportPhone = resolvedBrand?.supportPhone || resolvedBrand?.paymentSettings?.supportPhone || '';
 
     // 4. Resolve Product Information
+    let items = [];
+    if (Array.isArray(order?.items) && order.items.length > 0) {
+      items = order.items;
+    } else if (Array.isArray(session?.customFields?.items) && session.customFields.items.length > 0) {
+      items = session.customFields.items;
+    } else if (order?.product) {
+      items = [{
+        name: order.product.name || '',
+        quantity: order.quantity || 1,
+        unitPrice: order.product.discountPrice || order.product.price || 0,
+        total: order.amount || 0,
+        instantDelivery: order.product.instantDelivery || { enabled: false, type: 'LINK', link: '', text: '', image: '', content: '' },
+      }];
+    }
+
     let productName = order?.product?.name || '';
     let quantity = order?.quantity || 1;
 
@@ -706,6 +1002,7 @@ const sendOrderConfirmationEmail = async ({
       transactionId,
       productName,
       quantity,
+      items,
       amount,
       currency,
       paymentMethod,
@@ -714,11 +1011,17 @@ const sendOrderConfirmationEmail = async ({
       customerEmail: rawEmail,
       orderDate,
       brandName,
+      brandLogo,
+      brandWebsite,
+      brandSupportPage,
+      brandWhatsapp,
       supportEmail,
       supportPhone,
     });
 
     const subject = `Order Confirmed: ${orderId} - ${brandName}`;
+    const dynamicFromName = `${brandName} via FastPay`;
+    const cleanReplyTo = (supportEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(supportEmail)) ? supportEmail : undefined;
 
     // 6. Transmit Email via Nodemailer
     const sendResult = await module.exports.sendMail({
@@ -726,6 +1029,8 @@ const sendOrderConfirmationEmail = async ({
       subject,
       html,
       text,
+      fromName: dynamicFromName,
+      replyTo: cleanReplyTo,
     });
 
     // In non-test mode, if mocked is true or messageId starts with mock_, reject as failure
@@ -745,6 +1050,7 @@ const sendOrderConfirmationEmail = async ({
       confirmationEmailSentAt: isSuccess ? new Date() : null,
       confirmationEmailMessageId: isSuccess ? (sendResult.messageId || '') : '',
       confirmationEmailError: effectiveError,
+      sendingStartedAt: null,
     };
 
     if (sId) {
@@ -782,6 +1088,7 @@ const sendOrderConfirmationEmail = async ({
             confirmationEmailSent: false,
             confirmationEmailStatus: 'FAILED',
             confirmationEmailError: error.message,
+            sendingStartedAt: null,
           },
         }
       ).catch(() => {});
@@ -827,16 +1134,48 @@ const retryOrderConfirmationEmail = async (sessionId) => {
   });
 };
 
+
+/**
+ * Automatically recover and retry any sessions stuck in SENDING state
+ */
+const retryStaleSendingConfirmationEmails = async (maxAgeMs = 45000) => {
+  const CheckoutSession = require('../models/CheckoutSession');
+  const threshold = new Date(Date.now() - maxAgeMs);
+  const staleSessions = await CheckoutSession.find({
+    status: 'VERIFIED',
+    confirmationEmailSent: false,
+    confirmationEmailStatus: 'SENDING',
+    $or: [
+      { sendingStartedAt: { $lt: threshold } },
+      { sendingStartedAt: null, updatedAt: { $lt: threshold } },
+    ],
+  }).limit(10);
+
+  const results = [];
+  for (const sess of staleSessions) {
+    logger.info(`[EmailService:StaleRecovery] Recovering stale SENDING session: ${sess.sessionId}`);
+    const res = await retryOrderConfirmationEmail(sess.sessionId).catch((e) => ({
+      success: false,
+      error: e.message,
+    }));
+    results.push({ sessionId: sess.sessionId, result: res });
+  }
+  return results;
+};
+
 module.exports = {
   sendMail,
   sendEmailVerificationOTP,
   sendPasswordResetOTP,
   sendOrderConfirmationEmail,
   retryOrderConfirmationEmail,
+  retryStaleSendingConfirmationEmails,
   generateOrderConfirmationTemplate,
   escapeHtml,
   getTransporter,
+  resetTransporter,
   getSmtpConfig,
   verifySmtpConnection,
 };
+
 

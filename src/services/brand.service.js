@@ -5,6 +5,28 @@ const AuditLog = require('../models/AuditLog');
 const ApiError = require('../utils/apiError');
 
 /**
+ * Validate Webhook URL (HTTP / HTTPS)
+ */
+const validateWebhookUrl = (urlStr) => {
+  if (!urlStr || typeof urlStr !== 'string') return '';
+  const trimmed = urlStr.trim();
+  if (!trimmed) return '';
+
+  let parsed = null;
+  try {
+    parsed = new URL(trimmed);
+  } catch (err) {
+    throw new ApiError(400, 'Invalid Webhook URL format. Must be a valid HTTP or HTTPS URL.');
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new ApiError(400, 'Invalid Webhook URL protocol. Only http:// and https:// URLs are allowed.');
+  }
+
+  return trimmed;
+};
+
+/**
  * Mask sensitive document numbers (e.g., NID, Passport, Trade License)
  */
 const maskDocumentNumber = (docNum) => {
@@ -81,6 +103,7 @@ const createBrand = async ({
   facebookPage,
   telegramUsername,
   metaDescription,
+  webhookUrl,
   businessInfo,
   verificationInfo,
   paymentSettings,
@@ -92,6 +115,8 @@ const createBrand = async ({
   if (!name || !name.trim()) {
     throw new ApiError(400, 'Brand name is required');
   }
+
+  const safeWebhookUrl = validateWebhookUrl(webhookUrl);
 
   const slug =
     name
@@ -154,6 +179,7 @@ const createBrand = async ({
     facebookPage: facebookPage ? facebookPage.trim() : '',
     telegramUsername: telegramUsername ? telegramUsername.trim() : '',
     metaDescription: metaDescription ? metaDescription.trim() : '',
+    webhookUrl: safeWebhookUrl,
     businessInfo: {
       companyName: businessInfo?.companyName || '',
       businessType: businessInfo?.businessType || '',
@@ -224,6 +250,10 @@ const updateBrand = async (merchantId, brandId, updateData) => {
 
   await checkSuspensionExpiry(brand);
 
+  if (updateData.webhookUrl !== undefined) {
+    brand.webhookUrl = validateWebhookUrl(updateData.webhookUrl);
+  }
+
   // Exclude security / review fields from standard merchant update
   const allowedFields = [
     'name',
@@ -236,10 +266,11 @@ const updateBrand = async (merchantId, brandId, updateData) => {
     'facebookPage',
     'telegramUsername',
     'metaDescription',
+    'webhookUrl',
   ];
 
   for (const key of allowedFields) {
-    if (updateData[key] !== undefined) {
+    if (key !== 'webhookUrl' && updateData[key] !== undefined) {
       brand[key] = updateData[key];
     }
   }
@@ -439,7 +470,7 @@ const updateBrandWebhookUrl = async (merchantId, brandId, webhookUrl, user = nul
     throw new ApiError(403, 'Cannot update webhook configuration for a blocked brand.');
   }
 
-  brand.webhookUrl = webhookUrl !== undefined ? String(webhookUrl).trim() : '';
+  brand.webhookUrl = validateWebhookUrl(webhookUrl);
   await brand.save();
 
   return {

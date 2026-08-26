@@ -139,6 +139,15 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
       if (merchant && merchant.webhookUrl) {
         targetUrl = merchant.webhookUrl;
       }
+      if (!targetUrl) {
+        try {
+          const Settings = require('../models/Settings');
+          const settings = await Settings.findOne({ merchant: effectiveMerchantId });
+          if (settings && settings.webhookUrl) {
+            targetUrl = settings.webhookUrl;
+          }
+        } catch (_) {}
+      }
     }
 
     if (!secret && effectiveMerchantId) {

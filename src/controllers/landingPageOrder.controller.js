@@ -5,6 +5,7 @@ const landingPageOrderService = require('../services/landingPageOrder.service');
 const submitPublicOrder = asyncHandler(async (req, res) => {
   const { slug } = req.params;
   const {
+    items,
     productId,
     quantity,
     customerName,
@@ -18,6 +19,7 @@ const submitPublicOrder = asyncHandler(async (req, res) => {
 
   const result = await landingPageOrderService.submitPublicOrder({
     slug,
+    items,
     productId,
     quantity,
     customerName,

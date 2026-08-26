@@ -16,6 +16,7 @@ const createBrand = asyncHandler(async (req, res) => {
     facebookPage: req.body.facebookPage,
     telegramUsername: req.body.telegramUsername,
     metaDescription: req.body.metaDescription,
+    webhookUrl: req.body.webhookUrl,
     businessInfo: req.body.businessInfo,
     verificationInfo: req.body.verificationInfo,
     paymentSettings: req.body.paymentSettings,

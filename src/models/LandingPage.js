@@ -90,6 +90,10 @@ const productSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    description: {
+      type: String,
+      default: '',
+    },
     price: {
       type: Number,
       required: true,
@@ -118,6 +122,36 @@ const productSchema = new mongoose.Schema(
     isDefault: {
       type: Boolean,
       default: false,
+    },
+    instantDelivery: {
+      enabled: {
+        type: Boolean,
+        default: false,
+      },
+      type: {
+        type: String,
+        enum: ['LINK', 'TEXT', 'IMAGE'],
+        default: 'LINK',
+      },
+      link: {
+        type: String,
+        default: '',
+        trim: true,
+      },
+      text: {
+        type: String,
+        default: '',
+      },
+      image: {
+        type: String,
+        default: '',
+        trim: true,
+      },
+      // Backward compatibility fallback
+      content: {
+        type: String,
+        default: '',
+      },
     },
   },
   { _id: false }
@@ -238,6 +272,11 @@ const landingPageSchema = new mongoose.Schema(
       overlayOpacity: { type: Number, default: 0.6 },
     },
     products: [productSchema],
+    productCardPreset: {
+      type: String,
+      enum: ['classic', 'modern', 'featured', 'minimal'],
+      default: 'modern',
+    },
     orderForm: {
       isEnabled: { type: Boolean, default: true },
       title: { type: String, default: 'Complete Your Order' },
