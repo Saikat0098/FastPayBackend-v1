@@ -3,6 +3,7 @@ const Device = require('../models/Device');
 const Payment = require('../models/Payment');
 const Subscription = require('../models/Subscription');
 const Merchant = require('../models/Merchant');
+const LivePaymentSession = require('../models/LivePaymentSession');
 const logger = require('../config/logger');
 
 const startCronJobs = () => {
@@ -56,7 +57,24 @@ const startCronJobs = () => {
     }
   });
 
+  // 4. Clean up expired Live Payment sessions every 5 minutes
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const now = new Date();
+      const result = await LivePaymentSession.updateMany(
+        { status: 'PENDING', expiresAt: { $lt: now } },
+        { $set: { status: 'EXPIRED', rejectionReason: 'SESSION_EXPIRED' } }
+      );
+      if (result.modifiedCount > 0) {
+        logger.info(`Cron: Marked ${result.modifiedCount} LivePaymentSession(s) as EXPIRED`);
+      }
+    } catch (error) {
+      logger.error(`Cron Error in LivePaymentSession expiry check: ${error.message}`);
+    }
+  });
+
   logger.info('Background Cron Jobs initialized');
 };
 
 module.exports = { startCronJobs };
+

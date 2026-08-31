@@ -20,5 +20,11 @@ router.post('/:id/credentials/rotate-key', enforceTenant, requireActiveSubscript
 router.post('/:id/credentials/rotate-webhook-secret', enforceTenant, requireActiveSubscription, brandController.rotateBrandWebhookSecret);
 router.put('/:id/webhook-url', enforceTenant, requireActiveSubscription, brandController.updateBrandWebhookUrl);
 
+// Brand-Scoped Live Payment Configuration
+router.get('/:id/live-payment/config', enforceTenant, brandController.getBrandLivePaymentConfig);
+router.get('/:id/live-payment', enforceTenant, brandController.getBrandLivePaymentConfig);
+router.put('/:id/live-payment/config', enforceTenant, requireActiveSubscription, brandController.updateBrandLivePaymentConfig);
+router.put('/:id/live-payment', enforceTenant, requireActiveSubscription, brandController.updateBrandLivePaymentConfig);
+
 module.exports = router;
 

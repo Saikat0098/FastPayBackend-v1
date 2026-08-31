@@ -72,6 +72,30 @@ const uploadLimiter = rateLimit({
   },
 });
 
+const liveSessionLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 60, // limit live session creation to 60 per minute
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    statusCode: 429,
+    success: false,
+    message: 'Too many live payment session requests, please try again later.',
+  },
+});
+
+const liveStatusLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 600, // accommodate continuous live polling (every 2-3s over 15 min = ~300-450 calls)
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    statusCode: 429,
+    success: false,
+    message: 'Too many live status polling requests. Please reduce polling frequency.',
+  },
+});
+
 module.exports = {
   apiLimiter,
   authLimiter,
@@ -79,4 +103,7 @@ module.exports = {
   sessionLimiter,
   otpLimiter,
   uploadLimiter,
+  liveSessionLimiter,
+  liveStatusLimiter,
 };
+

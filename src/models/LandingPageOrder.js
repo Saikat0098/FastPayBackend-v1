@@ -38,7 +38,7 @@ const landingPageOrderSchema = new mongoose.Schema(
         total: { type: Number, required: true, min: 0 },
         instantDelivery: {
           enabled: { type: Boolean, default: false },
-          type: { type: String, enum: ['LINK', 'TEXT', 'IMAGE'], default: 'LINK' },
+          type: { type: String, default: 'LINK' },
           link: { type: String, default: '' },
           text: { type: String, default: '' },
           image: { type: String, default: '' },
@@ -54,7 +54,7 @@ const landingPageOrderSchema = new mongoose.Schema(
       image: { type: String, default: '' },
       instantDelivery: {
         enabled: { type: Boolean, default: false },
-        type: { type: String, enum: ['LINK', 'TEXT', 'IMAGE'], default: 'LINK' },
+        type: { type: String, default: 'LINK' },
         link: { type: String, default: '' },
         text: { type: String, default: '' },
         image: { type: String, default: '' },

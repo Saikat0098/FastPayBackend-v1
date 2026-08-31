@@ -350,9 +350,10 @@ const getAllDevices = asyncHandler(async (req, res) => {
 
 const blockDevice = asyncHandler(async (req, res) => {
   const { deviceId } = req.params;
-  const { blockReason, blockType, blockedUntil } = req.body || {};
+  const { blockReason, reason, blockType, blockedUntil } = req.body || {};
+  const effectiveReason = (blockReason || reason || '').trim();
 
-  if (!blockReason || !blockReason.trim()) {
+  if (!effectiveReason) {
     throw new ApiError(400, 'Block reason is required');
   }
 
@@ -377,7 +378,7 @@ const blockDevice = asyncHandler(async (req, res) => {
   }
 
   device.isBlocked = true;
-  device.blockReason = blockReason.trim();
+  device.blockReason = effectiveReason;
   device.blockedAt = new Date();
   device.blockedBy = req.admin?._id || req.user?.id || null;
   device.isOnline = false;

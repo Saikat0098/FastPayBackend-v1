@@ -967,6 +967,112 @@ const revealBrandVerificationDoc = async (brandId, adminUser, ipAddress = '', us
   };
 };
 
+const getBrandLivePaymentConfig = async (merchantId, brandId) => {
+  if (!merchantId) throw new ApiError(403, 'Merchant context is required');
+  if (!brandId || !mongoose.Types.ObjectId.isValid(brandId)) {
+    throw new ApiError(400, 'Valid Brand ID is required');
+  }
+
+  const brand = await Brand.findOne({ _id: brandId, merchant: merchantId });
+  if (!brand) throw new ApiError(404, 'Brand not found');
+
+  const MerchantGateway = require('../models/MerchantGateway');
+  // Query active configured gateways specifically for this Brand
+  const activeBrandGateways = await MerchantGateway.find({
+    merchant: merchantId,
+    brand: brandId,
+    isActive: true,
+  });
+
+  const availableGateways = Array.from(
+    new Set(activeBrandGateways.map((g) => (g.provider || '').toString().trim().toUpperCase()))
+  ).filter(Boolean);
+
+  const liveConfig = brand.livePayment || { enabled: false, gateways: [] };
+
+  return {
+    brandId: brand._id,
+    brandName: brand.name,
+    enabled: Boolean(liveConfig.enabled),
+    gateways: Array.isArray(liveConfig.gateways)
+      ? liveConfig.gateways.map((g) => (g || '').toUpperCase())
+      : [],
+    availableGateways,
+  };
+};
+
+const updateBrandLivePaymentConfig = async (merchantId, brandId, { enabled, gateways }) => {
+  if (!merchantId) throw new ApiError(403, 'Merchant context is required');
+  if (!brandId || !mongoose.Types.ObjectId.isValid(brandId)) {
+    throw new ApiError(400, 'Valid Brand ID is required');
+  }
+
+  const brand = await Brand.findOne({ _id: brandId, merchant: merchantId });
+  if (!brand) throw new ApiError(404, 'Brand not found');
+
+  const isEnabled = Boolean(enabled);
+  let canonicalGateways = [];
+
+  const MerchantGateway = require('../models/MerchantGateway');
+  // Query active gateways configured for this Brand
+  const activeBrandGateways = await MerchantGateway.find({
+    merchant: merchantId,
+    brand: brandId,
+    isActive: true,
+  });
+
+  const activeProviders = Array.from(
+    new Set(activeBrandGateways.map((g) => (g.provider || '').toString().trim().toUpperCase()))
+  ).filter(Boolean);
+
+  if (isEnabled) {
+    if (!Array.isArray(gateways) || gateways.length === 0) {
+      throw new ApiError(
+        400,
+        'At least one active payment gateway must be selected when enabling Live Payment.',
+        [],
+        '',
+        { code: 'NO_GATEWAYS_SELECTED' }
+      );
+    }
+
+    // Deduplicate and canonicalize
+    canonicalGateways = Array.from(
+      new Set(gateways.map((g) => (g || '').toString().trim().toUpperCase()))
+    ).filter(Boolean);
+
+    // Validate that each gateway is configured and active for THIS Brand
+    for (const gw of canonicalGateways) {
+      if (!activeProviders.includes(gw)) {
+        throw new ApiError(
+          400,
+          `Cannot enable Live Payment for ${gw}: this gateway is not configured or active for ${brand.name}.`,
+          [],
+          '',
+          { code: 'GATEWAY_NOT_CONFIGURED' }
+        );
+      }
+    }
+  } else {
+    canonicalGateways = [];
+  }
+
+  brand.livePayment = {
+    enabled: isEnabled,
+    gateways: canonicalGateways,
+  };
+
+  await brand.save();
+
+  return {
+    brandId: brand._id,
+    brandName: brand.name,
+    enabled: brand.livePayment.enabled,
+    gateways: brand.livePayment.gateways,
+    availableGateways: activeProviders,
+  };
+};
+
 module.exports = {
   createBrand,
   getBrandsByMerchant,
@@ -990,5 +1096,7 @@ module.exports = {
   blockBrand,
   unblockBrand,
   revealBrandVerificationDoc,
+  getBrandLivePaymentConfig,
+  updateBrandLivePaymentConfig,
 };
 

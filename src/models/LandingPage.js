@@ -130,7 +130,6 @@ const productSchema = new mongoose.Schema(
       },
       type: {
         type: String,
-        enum: ['LINK', 'TEXT', 'IMAGE'],
         default: 'LINK',
       },
       link: {

@@ -94,6 +94,23 @@ const updateBrandWebhookUrl = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, result, 'Brand webhook URL updated successfully');
 });
 
+const getBrandLivePaymentConfig = asyncHandler(async (req, res) => {
+  const merchantId = req.merchantId || req.merchant?._id;
+  const config = await brandService.getBrandLivePaymentConfig(merchantId, req.params.id);
+
+  return ApiResponse.success(res, config, 'Brand Live Payment configuration retrieved successfully');
+});
+
+const updateBrandLivePaymentConfig = asyncHandler(async (req, res) => {
+  const merchantId = req.merchantId || req.merchant?._id;
+  const config = await brandService.updateBrandLivePaymentConfig(merchantId, req.params.id, {
+    enabled: req.body.enabled,
+    gateways: req.body.gateways,
+  });
+
+  return ApiResponse.success(res, config, 'Brand Live Payment configuration updated successfully');
+});
+
 module.exports = {
   createBrand,
   getBrands,
@@ -105,5 +122,7 @@ module.exports = {
   rotateBrandApiKey,
   rotateBrandWebhookSecret,
   updateBrandWebhookUrl,
+  getBrandLivePaymentConfig,
+  updateBrandLivePaymentConfig,
 };
 

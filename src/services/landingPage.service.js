@@ -45,13 +45,15 @@ const validateProductInstantDelivery = (products) => {
     if (prod.instantDelivery && prod.instantDelivery.enabled === true) {
       normalizeProductInstantDelivery(prod);
 
-      const delType = (prod.instantDelivery.type || 'LINK').toUpperCase();
+      const link = (prod.instantDelivery.link || '').trim();
+      const text = typeof prod.instantDelivery.text === 'string' ? prod.instantDelivery.text.trim() : (prod.instantDelivery.text || '');
+      const image = (prod.instantDelivery.image || '').trim();
 
-      if (delType === 'LINK') {
-        const link = prod.instantDelivery.link || '';
-        if (!link) {
-          throw new ApiError(400, `Product '${pName}': Delivery Link is required when Instant Digital Delivery is enabled.`);
-        }
+      if (!link && !text && !image) {
+        throw new ApiError(400, `Product '${pName}': Instant Digital Delivery requires at least one delivery asset (Link, Instructions, or Image).`);
+      }
+
+      if (link) {
         // Strict URL validation: must start with http:// or https:// and be parseable
         try {
           const parsed = new URL(link);
@@ -59,17 +61,7 @@ const validateProductInstantDelivery = (products) => {
             throw new Error();
           }
         } catch (_) {
-          throw new ApiError(400, `Product '${pName}': Instant Digital Delivery (LINK) requires a valid HTTP or HTTPS URL (e.g. https://example.com/product).`);
-        }
-      } else if (delType === 'TEXT') {
-        const text = typeof prod.instantDelivery.text === 'string' ? prod.instantDelivery.text.trim() : '';
-        if (!text) {
-          throw new ApiError(400, `Product '${pName}': Delivery Instructions are required when Instant Digital Delivery is enabled.`);
-        }
-      } else if (delType === 'IMAGE') {
-        const image = prod.instantDelivery.image || '';
-        if (!image) {
-          throw new ApiError(400, `Product '${pName}': Delivery Image is required when Instant Digital Delivery is enabled.`);
+          throw new ApiError(400, `Product '${pName}': Instant Digital Delivery Link requires a valid HTTP or HTTPS URL (e.g. https://example.com/product).`);
         }
       }
     }

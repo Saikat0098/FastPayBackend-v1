@@ -145,10 +145,121 @@ const regenerateWebhookSecret = asyncHandler(async (req, res) => {
   }, 'Webhook secret rotated successfully');
 });
 
+const getLivePaymentConfig = asyncHandler(async (req, res) => {
+  const merchantId = req.merchantId || req.merchant?._id;
+  if (!merchantId) throw new ApiError(403, 'Tenant context missing');
+
+  const { brandId } = req.query;
+  const brandService = require('../services/brand.service');
+
+  if (brandId && brandId !== 'ALL') {
+    const config = await brandService.getBrandLivePaymentConfig(merchantId, brandId);
+    return ApiResponse.success(res, config, 'Brand Live Payment configuration fetched successfully');
+  }
+
+  // Fallback / legacy merchant-level retrieval
+  const MerchantGateway = require('../models/MerchantGateway');
+  const [merchant, activeGateways] = await Promise.all([
+    Merchant.findById(merchantId),
+    MerchantGateway.find({ merchant: merchantId, isActive: true }),
+  ]);
+
+  if (!merchant) throw new ApiError(404, 'Merchant profile not found');
+
+  const availableGateways = [...new Set(activeGateways.map((g) => (g.provider || '').toUpperCase()))].filter(Boolean);
+
+  const liveConfig = merchant.livePayment || { enabled: false, gateways: [] };
+
+  return ApiResponse.success(
+    res,
+    {
+      enabled: Boolean(liveConfig.enabled),
+      gateways: Array.isArray(liveConfig.gateways) ? liveConfig.gateways.map((g) => g.toUpperCase()) : [],
+      availableGateways,
+    },
+    'Live payment configuration fetched successfully'
+  );
+});
+
+const updateLivePaymentConfig = asyncHandler(async (req, res) => {
+  const merchantId = req.merchantId || req.merchant?._id;
+  if (!merchantId) throw new ApiError(403, 'Tenant context missing');
+
+  const { enabled, gateways, brandId } = req.body;
+  const brandService = require('../services/brand.service');
+
+  if (brandId && brandId !== 'ALL') {
+    const config = await brandService.updateBrandLivePaymentConfig(merchantId, brandId, { enabled, gateways });
+    return ApiResponse.success(res, config, 'Brand Live Payment configuration updated successfully');
+  }
+
+  if (typeof enabled !== 'boolean') {
+    throw new ApiError(400, 'enabled field is required and must be a boolean (true or false)');
+  }
+
+  const MerchantGateway = require('../models/MerchantGateway');
+  const [merchant, activeGateways] = await Promise.all([
+    Merchant.findById(merchantId),
+    MerchantGateway.find({ merchant: merchantId, isActive: true }),
+  ]);
+
+  if (!merchant) throw new ApiError(404, 'Merchant profile not found');
+
+  const activeProviders = [...new Set(activeGateways.map((g) => (g.provider || '').toUpperCase()))].filter(Boolean);
+
+  let normalizedGateways = [];
+  if (Array.isArray(gateways)) {
+    normalizedGateways = [...new Set(
+      gateways
+        .map((g) => (typeof g === 'string' ? g.trim().toUpperCase() : ''))
+        .filter(Boolean)
+    )];
+  }
+
+  if (enabled === true) {
+    if (normalizedGateways.length === 0) {
+      throw new ApiError(400, 'At least one payment gateway must be selected when enabling Live Payment');
+    }
+
+    // Verify all requested gateways are active for this merchant
+    for (const gw of normalizedGateways) {
+      if (!activeProviders.includes(gw)) {
+        throw new ApiError(
+          400,
+          `Cannot enable Live Payment for ${gw}: this gateway is not configured or active in your account.`,
+          [],
+          '',
+          { code: 'GATEWAY_NOT_CONFIGURED' }
+        );
+      }
+    }
+  }
+
+  merchant.livePayment = {
+    enabled,
+    gateways: normalizedGateways,
+  };
+
+  await merchant.save();
+
+  return ApiResponse.success(
+    res,
+    {
+      enabled: merchant.livePayment.enabled,
+      gateways: merchant.livePayment.gateways,
+      availableGateways: activeProviders,
+    },
+    'Live payment configuration updated successfully'
+  );
+});
+
 module.exports = {
   getDashboardStats,
   getCredentials,
   updateProfile,
   regenerateApiKey,
   regenerateWebhookSecret,
+  getLivePaymentConfig,
+  updateLivePaymentConfig,
 };
+

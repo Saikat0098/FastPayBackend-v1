@@ -68,6 +68,19 @@ const merchantSchema = new mongoose.Schema(
       enum: ['active', 'suspended', 'pending'],
       default: 'active',
     },
+    livePayment: {
+      enabled: {
+        type: Boolean,
+        default: false,
+      },
+      gateways: [
+        {
+          type: String,
+          uppercase: true,
+          trim: true,
+        },
+      ],
+    },
   },
   {
     timestamps: true,

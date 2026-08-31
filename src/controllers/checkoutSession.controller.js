@@ -80,6 +80,8 @@ const createSession = asyncHandler(async (req, res) => {
       currency: session.currency,
       brandId: session.brand,
       status: session.status,
+      returnUrl: session.returnUrl,
+      cancelUrl: session.cancelUrl,
       expiresAt: session.expiresAt,
     },
     'Checkout session created successfully',

@@ -61,10 +61,12 @@ const checkoutSessionSchema = new mongoose.Schema(
     returnUrl: {
       type: String,
       required: [true, 'Return URL is required'],
+      trim: true,
     },
     cancelUrl: {
       type: String,
       default: '',
+      trim: true,
     },
     status: {
       type: String,

@@ -11,9 +11,14 @@ const logger = require('../config/logger');
 const crypto = require('crypto');
 
 
+// ============================================================
+// REQUIRED RETURN URL VALIDATION — START
+// ============================================================
 const validateReturnUrl = (urlStr) => {
-  if (!urlStr || typeof urlStr !== 'string') {
-    throw new ApiError(400, 'Return URL is required');
+  if (!urlStr || typeof urlStr !== 'string' || !urlStr.trim()) {
+    const err = new ApiError(400, 'returnUrl is required', [], '', { code: 'RETURN_URL_REQUIRED' });
+    err.code = 'RETURN_URL_REQUIRED';
+    throw err;
   }
 
   const trimmed = urlStr.trim();
@@ -21,15 +26,52 @@ const validateReturnUrl = (urlStr) => {
   try {
     parsed = new URL(trimmed);
   } catch (err) {
-    throw new ApiError(400, 'Invalid Return URL format. Must be a valid HTTP or HTTPS URL.');
+    const error = new ApiError(400, 'returnUrl must be a valid HTTP or HTTPS URL', [], '', { code: 'INVALID_RETURN_URL' });
+    error.code = 'INVALID_RETURN_URL';
+    throw error;
   }
 
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new ApiError(400, 'Invalid Return URL protocol. Only http:// and https:// URLs are allowed.');
+    const error = new ApiError(400, 'returnUrl must be a valid HTTP or HTTPS URL', [], '', { code: 'INVALID_RETURN_URL' });
+    error.code = 'INVALID_RETURN_URL';
+    throw error;
+  }
+
+  if (!parsed.hostname) {
+    const error = new ApiError(400, 'returnUrl must be a valid HTTP or HTTPS URL', [], '', { code: 'INVALID_RETURN_URL' });
+    error.code = 'INVALID_RETURN_URL';
+    throw error;
   }
 
   return trimmed;
 };
+
+const validateCancelUrl = (urlStr) => {
+  if (!urlStr || typeof urlStr !== 'string' || !urlStr.trim()) {
+    return '';
+  }
+
+  const trimmed = urlStr.trim();
+  let parsed = null;
+  try {
+    parsed = new URL(trimmed);
+  } catch (err) {
+    const error = new ApiError(400, 'cancelUrl must be a valid HTTP or HTTPS URL', [], '', { code: 'INVALID_CANCEL_URL' });
+    error.code = 'INVALID_CANCEL_URL';
+    throw error;
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    const error = new ApiError(400, 'cancelUrl must be a valid HTTP or HTTPS URL', [], '', { code: 'INVALID_CANCEL_URL' });
+    error.code = 'INVALID_CANCEL_URL';
+    throw error;
+  }
+
+  return trimmed;
+};
+// ============================================================
+// REQUIRED RETURN URL VALIDATION — END
+// ============================================================
 
 const createCheckoutSession = async ({
   merchantId,
@@ -58,11 +100,14 @@ const createCheckoutSession = async ({
     throw new ApiError(400, 'Amount must be greater than 0');
   }
 
+  // ============================================================
+  // REQUIRED RETURN URL VALIDATION — START
+  // ============================================================
   const safeReturnUrl = validateReturnUrl(returnUrl);
-  let safeCancelUrl = '';
-  if (cancelUrl && cancelUrl.trim()) {
-    safeCancelUrl = validateReturnUrl(cancelUrl);
-  }
+  const safeCancelUrl = validateCancelUrl(cancelUrl);
+  // ============================================================
+  // REQUIRED RETURN URL VALIDATION — END
+  // ============================================================
 
   const merchant = await Merchant.findById(merchantId);
   if (!merchant || merchant.status !== 'active') {
@@ -154,10 +199,10 @@ const getPublicCheckoutSession = async (sessionId) => {
 
   const session = await CheckoutSession.findOne({ sessionId }).populate({
     path: 'merchant',
-    select: 'companyName name logo status',
+    select: 'companyName name logo status livePayment',
   }).populate({
     path: 'brand',
-    select: 'name logo status suspension blockedReason',
+    select: 'name logo status suspension blockedReason livePayment',
   });
 
   if (!session) {
@@ -193,7 +238,31 @@ const getPublicCheckoutSession = async (sessionId) => {
     }).sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
 
     sessionObj.gateways = brandGateways;
+  } else if (session.merchant) {
+    const mId = session.merchant._id || session.merchant;
+    const merchantGateways = await MerchantGateway.find({
+      merchant: mId,
+      isActive: true,
+    }).sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
+
+    sessionObj.gateways = merchantGateways;
   }
+
+  // Authoritatively resolve Brand-scoped Live Payment configuration
+  let brandLivePayment = { enabled: false, gateways: [] };
+  if (session.brand && session.brand.livePayment) {
+    brandLivePayment = session.brand.livePayment;
+  } else if (!session.brand && session.merchant && session.merchant.livePayment) {
+    // Backward compatibility fallback for legacy unassigned merchant sessions
+    brandLivePayment = session.merchant.livePayment;
+  }
+
+  sessionObj.livePayment = {
+    enabled: Boolean(brandLivePayment?.enabled),
+    gateways: Array.isArray(brandLivePayment?.gateways)
+      ? brandLivePayment.gateways.map((g) => (g || '').toUpperCase())
+      : [],
+  };
 
   return sessionObj;
 };

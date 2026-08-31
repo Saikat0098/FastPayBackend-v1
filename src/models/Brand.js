@@ -169,6 +169,20 @@ const brandSchema = new mongoose.Schema(
       merchantName: { type: String, default: '' },
       supportPhone: { type: String, default: '' },
     },
+    // Brand-Scoped Live Payment Auto-Verification Settings
+    livePayment: {
+      enabled: {
+        type: Boolean,
+        default: false,
+      },
+      gateways: [
+        {
+          type: String,
+          uppercase: true,
+          trim: true,
+        },
+      ],
+    },
     status: {
       type: String,
       enum: ['ACTIVE', 'INACTIVE', 'SUSPENDED', 'BLOCKED', 'UNDER_REVIEW', 'REJECTED'],

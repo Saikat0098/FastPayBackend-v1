@@ -208,6 +208,21 @@ const emitDeviceEvent = (merchantId, eventName, deviceData) => {
   }
 };
 
+const emitLivePaymentUpdated = (merchantId, liveSessionData) => {
+  if (io && merchantId) {
+    const mId = merchantId.toString();
+    const payload = liveSessionData && liveSessionData.toObject ? liveSessionData.toObject() : { ...liveSessionData };
+
+    io.to(`merchant:${mId}`).to(`merchant_${mId}`).emit('livePayment:updated', payload);
+    io.to(`merchant:${mId}`).to(`merchant_${mId}`).emit('live-payment:updated', payload);
+    if (payload.status === 'VERIFIED') {
+      io.to(`merchant:${mId}`).to(`merchant_${mId}`).emit('livePayment:verified', payload);
+      io.to(`merchant:${mId}`).to(`merchant_${mId}`).emit('live-payment:verified', payload);
+    }
+    io.to('admin').emit('livePayment:updated', payload);
+  }
+};
+
 const getIO = () => io;
 
 module.exports = {
@@ -215,7 +230,9 @@ module.exports = {
   emitPaymentCreated,
   emitPaymentUpdated,
   emitDeviceEvent,
+  emitLivePaymentUpdated,
   getIO,
 };
+
 
 

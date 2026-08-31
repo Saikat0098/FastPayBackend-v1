@@ -12,8 +12,13 @@ router.use(authorizeRoles('merchant', 'superadmin', 'admin', 'USER'));
 router.get('/dashboard', merchantController.getDashboardStats);
 router.get('/credentials', merchantController.getCredentials);
 router.put('/profile', requireActiveSubscription, merchantController.updateProfile);
+router.get('/live-payment/config', merchantController.getLivePaymentConfig);
+router.put('/live-payment/config', requireActiveSubscription, merchantController.updateLivePaymentConfig);
+router.get('/live-payment-config', merchantController.getLivePaymentConfig);
+router.put('/live-payment-config', requireActiveSubscription, merchantController.updateLivePaymentConfig);
 router.post('/api-key/rotate', requireActiveSubscription, merchantController.regenerateApiKey);
 router.post('/api-key/reset', requireActiveSubscription, merchantController.regenerateApiKey);
 router.post('/webhook-secret/rotate', requireActiveSubscription, merchantController.regenerateWebhookSecret);
 
 module.exports = router;
+

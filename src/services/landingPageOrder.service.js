@@ -81,9 +81,11 @@ const submitPublicOrder = async ({
         ? {
             enabled: true,
             type: targetProduct.instantDelivery.type || 'LINK',
-            link: targetProduct.instantDelivery.link || (targetProduct.instantDelivery.type === 'LINK' ? targetProduct.instantDelivery.content || '' : ''),
-            text: targetProduct.instantDelivery.text || (targetProduct.instantDelivery.type === 'TEXT' ? targetProduct.instantDelivery.content || '' : ''),
-            image: targetProduct.instantDelivery.image || (targetProduct.instantDelivery.type === 'IMAGE' ? targetProduct.instantDelivery.content || '' : ''),
+            link: (targetProduct.instantDelivery.link || (targetProduct.instantDelivery.type === 'LINK' ? targetProduct.instantDelivery.content || '' : '') || '').trim(),
+            text: targetProduct.instantDelivery.text !== undefined && targetProduct.instantDelivery.text !== ''
+              ? targetProduct.instantDelivery.text
+              : (targetProduct.instantDelivery.type === 'TEXT' ? targetProduct.instantDelivery.content || '' : ''),
+            image: (targetProduct.instantDelivery.image || (targetProduct.instantDelivery.type === 'IMAGE' ? targetProduct.instantDelivery.content || '' : '') || '').trim(),
             content: targetProduct.instantDelivery.content || '',
           }
         : { enabled: false, type: 'LINK', link: '', text: '', image: '', content: '' };
@@ -131,9 +133,11 @@ const submitPublicOrder = async ({
       ? {
           enabled: true,
           type: targetProduct.instantDelivery.type || 'LINK',
-          link: targetProduct.instantDelivery.link || (targetProduct.instantDelivery.type === 'LINK' ? targetProduct.instantDelivery.content || '' : ''),
-          text: targetProduct.instantDelivery.text || (targetProduct.instantDelivery.type === 'TEXT' ? targetProduct.instantDelivery.content || '' : ''),
-          image: targetProduct.instantDelivery.image || (targetProduct.instantDelivery.type === 'IMAGE' ? targetProduct.instantDelivery.content || '' : ''),
+          link: (targetProduct.instantDelivery.link || (targetProduct.instantDelivery.type === 'LINK' ? targetProduct.instantDelivery.content || '' : '') || '').trim(),
+          text: targetProduct.instantDelivery.text !== undefined && targetProduct.instantDelivery.text !== ''
+            ? targetProduct.instantDelivery.text
+            : (targetProduct.instantDelivery.type === 'TEXT' ? targetProduct.instantDelivery.content || '' : ''),
+          image: (targetProduct.instantDelivery.image || (targetProduct.instantDelivery.type === 'IMAGE' ? targetProduct.instantDelivery.content || '' : '') || '').trim(),
           content: targetProduct.instantDelivery.content || '',
         }
       : { enabled: false, type: 'LINK', link: '', text: '', image: '', content: '' };

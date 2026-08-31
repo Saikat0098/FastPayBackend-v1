@@ -468,7 +468,24 @@ const processTransactionSync = async ({
     }).catch((err) => logger.error(`[Customer Sync Error] ${err.message}`));
   }
 
-  // 7. Return success response
+  // 7. Live Payment Session Matching Hook (Additive, non-blocking)
+  try {
+    const { matchAndVerifyLivePayment } = require('./livePaymentSession.service');
+    const liveMatchResult = await matchAndVerifyLivePayment({
+      payment,
+      merchantId: resolvedMerchantId,
+    });
+    if (liveMatchResult && liveMatchResult.matched) {
+      payment.status = 'VERIFIED';
+      payment.paymentStatus = 'VERIFIED';
+      payment.verificationState = 'VERIFIED';
+      payment.isUsed = true;
+    }
+  } catch (liveMatchErr) {
+    logger.warn(`[LivePayment Hook Error] ${liveMatchErr.message}`);
+  }
+
+  // 8. Return success response
   return {
     success: true,
     transactionId: payment.transactionId,
@@ -478,6 +495,7 @@ const processTransactionSync = async ({
     payment,
   };
 };
+
 
 const processBatchSync = async ({ deviceId, merchantId, transactions }) => {
   if (deviceId) {

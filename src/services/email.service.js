@@ -479,27 +479,21 @@ const generateOrderConfirmationTemplate = ({
     </tr>
   ` : '';
 
-  // 4. Instant Digital Delivery Section (LINK, TEXT, IMAGE)
+  // 4. Instant Digital Delivery Section (LINK, TEXT, IMAGE - all supported concurrently)
   let digitalDeliveryItems = [];
   if (Array.isArray(items) && items.length > 0) {
     digitalDeliveryItems = items.filter((it) => {
       if (!it?.instantDelivery?.enabled) return false;
-      const dType = (it.instantDelivery.type || 'LINK').toUpperCase();
-      if (dType === 'LINK') {
-        const val = it.instantDelivery.link || (it.instantDelivery.type === 'LINK' ? it.instantDelivery.content : '');
-        return Boolean(val && val.trim());
-      }
-      if (dType === 'TEXT') {
-        const val = it.instantDelivery.text !== undefined && it.instantDelivery.text !== ''
-          ? it.instantDelivery.text
-          : (it.instantDelivery.type === 'TEXT' ? it.instantDelivery.content : '');
-        return Boolean(val && (typeof val === 'string' ? val.trim() : val));
-      }
-      if (dType === 'IMAGE') {
-        const val = it.instantDelivery.image || (it.instantDelivery.type === 'IMAGE' ? it.instantDelivery.content : '');
-        return Boolean(val && val.trim());
-      }
-      return false;
+      const id = it.instantDelivery;
+      const legacyContent = typeof id.content === 'string' ? id.content.trim() : '';
+      const hasLink = Boolean((id.link || (id.type === 'LINK' ? legacyContent : '') || '').trim());
+      const hasText = Boolean(
+        id.text !== undefined && id.text !== ''
+          ? (typeof id.text === 'string' ? id.text.trim() : id.text)
+          : (id.type === 'TEXT' ? legacyContent : '')
+      );
+      const hasImage = Boolean((id.image || (id.type === 'IMAGE' ? legacyContent : '') || '').trim());
+      return hasLink || hasText || hasImage;
     });
   }
 
@@ -509,82 +503,96 @@ const generateOrderConfirmationTemplate = ({
   if (digitalDeliveryItems.length > 0) {
     const digitalCardsHtml = digitalDeliveryItems.map((item) => {
       const pName = escapeHtml(item.name || safeProductName || 'Digital Product');
-      const delType = (item.instantDelivery?.type || 'LINK').toUpperCase();
+      const id = item.instantDelivery || {};
+      const legacyContent = typeof id.content === 'string' ? id.content.trim() : '';
+      const delType = (id.type || 'LINK').toUpperCase();
 
-      if (delType === 'LINK') {
-        const rawLink = (item.instantDelivery?.link || (item.instantDelivery?.type === 'LINK' ? item.instantDelivery?.content : '') || '').trim();
+      const rawLink = (id.link || (delType === 'LINK' ? legacyContent : '') || '').trim();
+      const rawText = id.text !== undefined && id.text !== ''
+        ? id.text
+        : (delType === 'TEXT' ? (id.content || '') : '');
+      const rawImg = (id.image || (delType === 'IMAGE' ? legacyContent : '') || '').trim();
+
+      const sectionsHtml = [];
+
+      // 1. Delivery Link
+      if (rawLink) {
         const safeLink = escapeHtml(rawLink);
         const href = (rawLink.startsWith('http://') || rawLink.startsWith('https://')) ? rawLink : (rawLink ? `https://${rawLink}` : '');
-
-        return `
-          <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px 18px; margin-bottom: 12px;">
-            <div style="font-size: 13px; font-weight: 700; color: #0f172a; margin-bottom: 8px;">${pName}</div>
-            <div style="font-size: 13px; color: #4f46e5; word-break: break-all; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
-              ${href ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" style="color: #4f46e5; text-decoration: underline; font-weight: 600;">${safeLink}</a>` : safeLink}
-            </div>
+        sectionsHtml.push(`
+          <div style="font-size: 13px; color: #4f46e5; word-break: break-all; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin-bottom: 10px;">
+            ${href ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" style="color: #4f46e5; text-decoration: underline; font-weight: 600;">${safeLink}</a>` : safeLink}
           </div>
-        `;
-      } else if (delType === 'TEXT') {
-        const rawText = item.instantDelivery?.text !== undefined && item.instantDelivery?.text !== ''
-          ? item.instantDelivery.text
-          : (item.instantDelivery?.type === 'TEXT' ? (item.instantDelivery?.content || '') : '');
+        `);
+      }
 
+      // 2. Delivery Instructions / Text
+      if (rawText && (typeof rawText === 'string' ? rawText.trim() : rawText)) {
         const escapedText = escapeHtml(rawText);
         const urlRegex = /(https?:\/\/[^\s<]+)/g;
         const linkedText = escapedText.replace(urlRegex, '<a href="$1" target="_blank" rel="noopener noreferrer" style="color: #4f46e5; text-decoration: underline;">$1</a>');
+        sectionsHtml.push(`
+          <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 14px 16px; font-size: 13px; color: #1e293b; line-height: 1.6; white-space: pre-wrap; word-break: break-word; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin-bottom: 10px;">${linkedText}</div>
+        `);
+      }
 
-        return `
-          <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px 18px; margin-bottom: 12px;">
-            <div style="font-size: 13px; font-weight: 700; color: #0f172a; margin-bottom: 8px;">${pName}</div>
-            <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 14px 16px; font-size: 13px; color: #1e293b; line-height: 1.6; white-space: pre-wrap; word-break: break-word; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">${linkedText}</div>
-          </div>
-        `;
-      } else if (delType === 'IMAGE') {
-        const rawImg = (item.instantDelivery?.image || (item.instantDelivery?.type === 'IMAGE' ? item.instantDelivery?.content : '') || '').trim();
+      // 3. Delivery Image
+      if (rawImg) {
         const safeImg = (rawImg.startsWith('http://') || rawImg.startsWith('https://') || rawImg.startsWith('data:image/'))
           ? escapeHtml(rawImg)
           : '';
-
-        return `
-          <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px 18px; margin-bottom: 12px;">
-            <div style="font-size: 13px; font-weight: 700; color: #0f172a; margin-bottom: 8px;">${pName}</div>
-            ${safeImg ? `
-              <div style="text-align: center; background: #f8fafc; padding: 12px; border-radius: 6px; border: 1px solid #e2e8f0;">
-                <img src="${safeImg}" alt="${pName}" style="max-width: 100%; height: auto; border-radius: 6px; display: inline-block;" />
-              </div>
-            ` : `<div style="font-size: 12px; color: #64748b;">(Image content delivered)</div>`}
-          </div>
-        `;
+        sectionsHtml.push(`
+          ${safeImg ? `
+            <div style="text-align: center; background: #f8fafc; padding: 12px; border-radius: 6px; border: 1px solid #e2e8f0; margin-bottom: 6px;">
+              <img src="${safeImg}" alt="${pName}" style="max-width: 100%; height: auto; border-radius: 6px; display: inline-block;" />
+            </div>
+          ` : `<div style="font-size: 12px; color: #64748b; margin-bottom: 6px;">(Image content delivered)</div>`}
+        `);
       }
-      return '';
-    }).join('');
 
-    digitalDeliveryHtml = `
-      <!-- Instant Digital Delivery Section -->
-      <div style="margin-bottom: 24px; padding: 16px 18px; background-color: #f8fafc; border: 1px solid #c7d2fe; border-radius: 10px;">
-        <div style="font-size: 11px; font-weight: 800; letter-spacing: 1px; color: #4f46e5; text-transform: uppercase; margin-bottom: 12px;">
-          ⚡ Instant Digital Delivery
+      if (sectionsHtml.length === 0) return '';
+
+      return `
+        <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px 18px; margin-bottom: 12px;">
+          <div style="font-size: 13px; font-weight: 700; color: #0f172a; margin-bottom: 8px;">${pName}</div>
+          ${sectionsHtml.join('')}
         </div>
-        ${digitalCardsHtml}
-      </div>
-    `;
+      `;
+    }).filter(Boolean).join('');
 
-    digitalDeliveryText = `\n==================================================\n⚡ INSTANT DIGITAL DELIVERY\n==================================================\n` +
-      digitalDeliveryItems.map((item) => {
-        const pName = item.name || safeProductName || 'Digital Product';
-        const delType = (item.instantDelivery?.type || 'LINK').toUpperCase();
-        let value = '';
-        if (delType === 'LINK') {
-          value = item.instantDelivery?.link || (item.instantDelivery?.type === 'LINK' ? item.instantDelivery?.content : '') || '';
-        } else if (delType === 'TEXT') {
-          value = item.instantDelivery?.text !== undefined && item.instantDelivery?.text !== ''
-            ? item.instantDelivery.text
-            : (item.instantDelivery?.type === 'TEXT' ? (item.instantDelivery?.content || '') : '');
-        } else if (delType === 'IMAGE') {
-          value = item.instantDelivery?.image || (item.instantDelivery?.type === 'IMAGE' ? item.instantDelivery?.content : '') || '';
-        }
-        return `Product: ${pName}\n${value}\n`;
-      }).join('\n') + `--------------------------------------------------\n`;
+    if (digitalCardsHtml.trim()) {
+      digitalDeliveryHtml = `
+        <!-- Instant Digital Delivery Section -->
+        <div style="margin-bottom: 24px; padding: 16px 18px; background-color: #f8fafc; border: 1px solid #c7d2fe; border-radius: 10px;">
+          <div style="font-size: 11px; font-weight: 800; letter-spacing: 1px; color: #4f46e5; text-transform: uppercase; margin-bottom: 12px;">
+            ⚡ Instant Digital Delivery
+          </div>
+          ${digitalCardsHtml}
+        </div>
+      `;
+
+      digitalDeliveryText = `\n==================================================\n⚡ INSTANT DIGITAL DELIVERY\n==================================================\n` +
+        digitalDeliveryItems.map((item) => {
+          const pName = item.name || safeProductName || 'Digital Product';
+          const id = item.instantDelivery || {};
+          const legacyContent = typeof id.content === 'string' ? id.content.trim() : '';
+          const delType = (id.type || 'LINK').toUpperCase();
+
+          const rawLink = (id.link || (delType === 'LINK' ? legacyContent : '') || '').trim();
+          const rawText = id.text !== undefined && id.text !== ''
+            ? id.text
+            : (delType === 'TEXT' ? (id.content || '') : '');
+          const rawImg = (id.image || (delType === 'IMAGE' ? legacyContent : '') || '').trim();
+
+          const parts = [];
+          if (rawLink) parts.push(`Link: ${rawLink}`);
+          if (rawText && (typeof rawText === 'string' ? rawText.trim() : rawText)) parts.push(`Instructions:\n${rawText}`);
+          if (rawImg) parts.push(`Image: ${rawImg}`);
+
+          if (parts.length === 0) return '';
+          return `Product: ${pName}\n${parts.join('\n\n')}\n`;
+        }).filter(Boolean).join('\n') + `--------------------------------------------------\n`;
+    }
   }
 
   // Brand-Specific Support & Store Section

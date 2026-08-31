@@ -27,6 +27,7 @@ const checkoutSessionRoutes = require('./checkoutSession.routes');
 const uploadRoutes = require('./upload.routes');
 const landingPageRoutes = require('./landingPage.routes');
 const landingPageOrderRoutes = require('./landingPageOrder.routes');
+const livePaymentRoutes = require('./livePayment.routes');
 
 // Android Controller for direct legacy compatibility routes
 const androidController = require('../controllers/android.controller');
@@ -72,6 +73,11 @@ router.use('/audit-logs', auditRoutes);
 router.use('/payment-methods', paymentMethodRoutes);
 router.use('/payment-method', paymentMethodRoutes);
 router.use('/checkout/sessions', checkoutSessionRoutes);
+router.use('/checkout/live-payment', livePaymentRoutes);
+router.use('/checkout/live', livePaymentRoutes);
 router.use('/checkout', checkoutSessionRoutes);
+router.use('/live-payment', livePaymentRoutes);
+router.use('/live-payments', livePaymentRoutes);
 
 module.exports = router;
+
