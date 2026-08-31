@@ -210,43 +210,56 @@ const verifySmtpConnection = async () => {
   const config = getSmtpConfig();
   if (config.isHttpApiConfigured) {
     const provider = config.resendApiKey ? 'Resend API' : config.brevoApiKey ? 'Brevo API' : 'SendGrid API';
-    logger.info(`[EMAIL_SERVICE_READY] Email service configured via ${provider} (HTTPS port 443)`);
+    logger.info(`[EMAIL_CONFIG] provider: ${provider} | transport: HTTPS/443 | configured: true`);
     return { success: true, provider };
   }
 
   if (!config.isConfigured) {
-    logger.warn('[EMAIL_SMTP_FAILED] SMTP credentials missing or incomplete in environment');
+    logger.warn('[EMAIL_CONFIG] provider: SMTP | configured: false | error: SMTP credentials missing or incomplete in environment');
     return { success: false, error: 'SMTP credentials missing or incomplete' };
   }
 
   const activeTransporter = getTransporter();
   if (!activeTransporter) {
-    logger.warn('[EMAIL_SMTP_FAILED] Failed to initialize SMTP transporter');
+    logger.warn('[EMAIL_CONFIG] provider: SMTP | configured: false | error: Failed to initialize SMTP transporter');
     return { success: false, error: 'Failed to initialize SMTP transporter' };
   }
   try {
     await activeTransporter.verify();
-    logger.info('[EMAIL_SMTP_READY] SMTP connection verified successfully');
+    logger.info(`[EMAIL_CONFIG] provider: SMTP | host: ${config.host} | port: ${config.port} | configured: true`);
     return { success: true, provider: 'smtp' };
   } catch (err) {
-    logger.error(`[EMAIL_SMTP_FAILED] SMTP connection verification failed: ${err.message}`);
+    logger.error(`[EMAIL_CONFIG] provider: SMTP | host: ${config.host} | port: ${config.port} | configured: false | error: ${err.message}`);
     return { success: false, error: err.message };
   }
 };
 
 /**
- * Base email sending method with auto-recovery, HTTP REST API support, and safe timeout handling
+ * Base email sending method with auto-recovery, HTTP REST API support, safe fallback, and timeout handling
  */
-const sendMail = async ({ to, subject, html, text, fromName, replyTo }) => {
+const sendMail = async ({ to, subject, html, text, fromName, replyTo, emailType = 'GENERAL' }) => {
   try {
     const maskedTo = maskEmail(to);
     const config = getSmtpConfig();
 
     // 1. Try HTTP REST API first if configured (Port 443 / HTTPS - Render Free compatible)
     if (config.isHttpApiConfigured) {
+      const httpProvider = config.resendApiKey ? 'Resend' : config.brevoApiKey ? 'Brevo' : 'SendGrid';
+      logger.info(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: ${httpProvider} (HTTPS) | status: STARTED`);
       const httpResult = await sendViaHttpApi({ to, subject, html, text, fromName, replyTo });
-      if (httpResult !== null) {
+      
+      if (httpResult && httpResult.success) {
+        logger.info(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: ${httpProvider} | status: SENT | messageId: ${httpResult.messageId}`);
         return httpResult;
+      }
+
+      logger.warn(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: ${httpProvider} | status: FAILED | error: ${httpResult?.error || 'Unknown HTTP API error'}`);
+
+      // If HTTP API failed and SMTP is configured, attempt fallback to SMTP
+      if (config.isConfigured) {
+        logger.info(`[${emailType}_EMAIL] Attempting fallback transport to SMTP for ${maskedTo}...`);
+      } else {
+        return httpResult || { success: false, error: 'HTTP API delivery failed and no SMTP fallback configured', provider: 'http', mocked: false };
       }
     }
 
@@ -255,10 +268,10 @@ const sendMail = async ({ to, subject, html, text, fromName, replyTo }) => {
     // 2. If SMTP is not configured
     if (!activeTransporter || !config.isConfigured) {
       if (process.env.NODE_ENV === 'test' || process.env.ALLOW_MOCK_EMAIL === 'true') {
-        logger.info(`[EmailService:Mock] Test mode mock email to: ${maskedTo} | Subject: "${subject}"`);
+        logger.info(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: Mock | status: SENT (Mock Test Mode)`);
         return { success: true, mocked: true, messageId: `mock_${Date.now()}` };
       }
-      logger.error(`[EMAIL_SMTP_FAILED] Cannot send email to ${maskedTo}: No valid email transport (HTTP API or SMTP) configured in ${process.env.NODE_ENV || 'production'}`);
+      logger.error(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: None | status: FAILED | error: No valid email transport (HTTP API or SMTP) configured in ${process.env.NODE_ENV || 'production'}`);
       return { success: false, error: 'Email service credentials missing or unconfigured in environment', mocked: false };
     }
 
@@ -287,20 +300,20 @@ const sendMail = async ({ to, subject, html, text, fromName, replyTo }) => {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        logger.info(`[ORDER_EMAIL_SEND_STARTED] Recipient: ${maskedTo} | Attempt: ${attempt}`);
+        logger.info(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: SMTP (${config.host}:${config.port}) | status: STARTED | attempt: ${attempt}`);
         // Wrap with a hard 6.5s timeout promise to guarantee event loop execution
         const info = await Promise.race([
           activeTransporter.sendMail(mailOptions),
           new Promise((_, reject) => setTimeout(() => reject(new Error(`SMTP connection timed out after 6500ms`)), 6500)),
         ]);
-        logger.info(`[ORDER_EMAIL_SEND_SUCCESS] Recipient: ${maskedTo} | MessageId: ${info.messageId}`);
+        logger.info(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: SMTP | status: SENT | messageId: ${info.messageId}`);
         return { success: true, messageId: info.messageId, provider: 'smtp', mocked: false };
       } catch (error) {
         const isTimeout = /timeout|timed out|ETIMEDOUT|ECONNREFUSED|ENETUNREACH/i.test(error.message);
         if (isTimeout && isBlockedPort) {
-          logger.warn(`[ORDER_EMAIL_SEND_FAILED] Recipient: ${maskedTo} | Port ${config.port} connection failed: ${error.message}. (Note: Render Free blocks ports 25, 465, 587. Configure RESEND_API_KEY or use port 2525 for production email delivery.)`);
+          logger.warn(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: SMTP | status: FAILED | error: Port ${config.port} connection blocked/timed out (${error.message}). (Note: Render Free blocks ports 25, 465, 587. Configure RESEND_API_KEY or use port 2525 for production email delivery.)`);
         } else {
-          logger.warn(`[ORDER_EMAIL_SEND_FAILED] Recipient: ${maskedTo} | Attempt ${attempt} error: ${error.message}`);
+          logger.warn(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: SMTP | status: FAILED | attempt: ${attempt} | error: ${error.message}`);
         }
         resetTransporter();
         if (attempt === 1 && maxAttempts > 1) {
@@ -493,9 +506,9 @@ const sendEmailVerificationOTP = async (email, otp) => {
     });
     const text = `FastPay Email Verification Code: ${otp}. This code is valid for 5 minutes. Do not share it with anyone.`;
 
-    return await module.exports.sendMail({ to: email, subject, html, text });
+    return await module.exports.sendMail({ to: email, subject, html, text, emailType: 'OTP' });
   } catch (err) {
-    logger.error(`[EmailService:VerificationOTP] Unexpected error for ${maskEmail(email)}: ${err.message}`);
+    logger.error(`[OTP_EMAIL] recipient: ${maskEmail(email)} | status: FAILED | error: ${err.message}`);
     return { success: false, error: err.message, mocked: false };
   }
 };
@@ -518,9 +531,9 @@ const sendPasswordResetOTP = async (email, otp) => {
     });
     const text = `FastPay Password Reset Code: ${otp}. This code is valid for 5 minutes. If you did not request this, ignore this email.`;
 
-    return await module.exports.sendMail({ to: email, subject, html, text });
+    return await module.exports.sendMail({ to: email, subject, html, text, emailType: 'OTP' });
   } catch (err) {
-    logger.error(`[EmailService:PasswordResetOTP] Unexpected error for ${maskEmail(email)}: ${err.message}`);
+    logger.error(`[OTP_EMAIL] recipient: ${maskEmail(email)} | status: FAILED | error: ${err.message}`);
     return { success: false, error: err.message, mocked: false };
   }
 };
@@ -1204,7 +1217,7 @@ const sendOrderConfirmationEmail = async ({
     const dynamicFromName = `${brandName} via FastPay`;
     const cleanReplyTo = (supportEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(supportEmail)) ? supportEmail : undefined;
 
-    // 6. Transmit Email via Nodemailer
+    // 6. Transmit Email via Nodemailer or HTTP API
     const sendResult = await module.exports.sendMail({
       to: rawEmail,
       subject,
@@ -1212,6 +1225,7 @@ const sendOrderConfirmationEmail = async ({
       text,
       fromName: dynamicFromName,
       replyTo: cleanReplyTo,
+      emailType: 'ORDER_CONFIRMATION',
     });
 
     // In non-test mode, if mocked is true or messageId starts with mock_, reject as failure
