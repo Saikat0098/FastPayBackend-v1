@@ -1,11 +1,12 @@
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '../../.env') });
 const nodemailer = require('nodemailer');
+const axios = require('axios');
 const logger = require('../config/logger');
 const { maskEmail } = require('../utils/otp');
 
 /**
- * Dynamic runtime SMTP configuration reader
+ * Dynamic runtime SMTP and Email provider configuration reader
  */
 const getSmtpConfig = () => {
   const host = process.env.SMTP_HOST || process.env.EMAIL_HOST || 'smtp.gmail.com';
@@ -18,6 +19,12 @@ const getSmtpConfig = () => {
   const fromEmail = process.env.SMTP_FROM || process.env.EMAIL_FROM || (user ? `"${fromName}" <${user}>` : '"FastPay" <noreply@fastpay.com>');
   const isConfigured = Boolean(user && pass && pass !== 'YOUR_GMAIL_APP_PASSWORD');
 
+  // HTTP REST API configurations (Ports 443 / HTTPS - 100% Compatible with Render Free)
+  const resendApiKey = (process.env.RESEND_API_KEY || '').trim();
+  const brevoApiKey = (process.env.BREVO_API_KEY || process.env.SENDINBLUE_API_KEY || '').trim();
+  const sendgridApiKey = (process.env.SENDGRID_API_KEY || '').trim();
+  const isHttpApiConfigured = Boolean(resendApiKey || brevoApiKey || sendgridApiKey);
+
   return {
     host,
     port,
@@ -27,6 +34,10 @@ const getSmtpConfig = () => {
     fromName,
     fromEmail,
     isConfigured,
+    resendApiKey,
+    brevoApiKey,
+    sendgridApiKey,
+    isHttpApiConfigured,
   };
 };
 
@@ -42,9 +53,9 @@ const createSmtpTransporter = (config) => {
       user: config.user,
       pass: config.pass,
     },
-    connectionTimeout: 10000,
-    greetingTimeout: 10000,
-    socketTimeout: 15000,
+    connectionTimeout: 5000, // 5s connection timeout (fast failure on blocked ports)
+    greetingTimeout: 5000,
+    socketTimeout: 7500,
     family: 4,
     pool: true,
     maxConnections: 5,
@@ -74,14 +85,140 @@ const resetTransporter = () => {
 };
 
 /**
- * Safe diagnostic to verify SMTP connectivity
+ * Send email via HTTP REST API (HTTPS port 443 - Compatible with Render Free & Serverless)
+ */
+const sendViaHttpApi = async ({ to, subject, html, text, fromName, replyTo }) => {
+  const config = getSmtpConfig();
+  const maskedTo = maskEmail(to);
+
+  // 1. Resend API
+  if (config.resendApiKey) {
+    try {
+      logger.info(`[EmailService:Resend] Dispatching email to ${maskedTo} via Resend REST API (HTTPS port 443)...`);
+      const defaultFrom = config.fromEmail.includes('<')
+        ? config.fromEmail
+        : (config.user ? `"${config.fromName}" <${config.user}>` : `"${config.fromName}" <onboarding@resend.dev>`);
+      const fromHeader = fromName ? `"${fromName}" <${config.user || 'onboarding@resend.dev'}>` : defaultFrom;
+
+      const payload = {
+        from: fromHeader,
+        to: [to],
+        subject,
+        html,
+        text: text || '',
+      };
+      if (replyTo) payload.reply_to = replyTo;
+
+      const response = await axios.post('https://api.resend.com/emails', payload, {
+        headers: {
+          Authorization: `Bearer ${config.resendApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 8000,
+      });
+
+      const messageId = response.data?.id || `resend_${Date.now()}`;
+      logger.info(`[EmailService:Resend] Email delivered successfully to ${maskedTo} | ID: ${messageId}`);
+      return { success: true, messageId, provider: 'resend', mocked: false };
+    } catch (apiErr) {
+      const errDetail = apiErr.response?.data?.message || apiErr.message;
+      logger.error(`[EmailService:Resend] Delivery failed for ${maskedTo}: ${errDetail}`);
+      return { success: false, error: `Resend API error: ${errDetail}`, provider: 'resend', mocked: false };
+    }
+  }
+
+  // 2. Brevo API
+  if (config.brevoApiKey) {
+    try {
+      logger.info(`[EmailService:Brevo] Dispatching email to ${maskedTo} via Brevo REST API (HTTPS port 443)...`);
+      const senderEmailClean = (config.fromEmail || config.user || '').includes('<')
+        ? (config.fromEmail.match(/<([^>]+)>/)?.[1] || config.user)
+        : (config.fromEmail || config.user || 'noreply@fastpay.com');
+
+      const payload = {
+        sender: { name: fromName || config.fromName || 'FastPay', email: senderEmailClean },
+        to: [{ email: to }],
+        subject,
+        htmlContent: html,
+        textContent: text || '',
+      };
+      if (replyTo) payload.replyTo = { email: replyTo };
+
+      const response = await axios.post('https://api.brevo.com/v3/smtp/email', payload, {
+        headers: {
+          'api-key': config.brevoApiKey,
+          'Content-Type': 'application/json',
+          accept: 'application/json',
+        },
+        timeout: 8000,
+      });
+
+      const messageId = response.data?.messageId || `brevo_${Date.now()}`;
+      logger.info(`[EmailService:Brevo] Email delivered successfully to ${maskedTo} | ID: ${messageId}`);
+      return { success: true, messageId, provider: 'brevo', mocked: false };
+    } catch (apiErr) {
+      const errDetail = apiErr.response?.data?.message || apiErr.message;
+      logger.error(`[EmailService:Brevo] Delivery failed for ${maskedTo}: ${errDetail}`);
+      return { success: false, error: `Brevo API error: ${errDetail}`, provider: 'brevo', mocked: false };
+    }
+  }
+
+  // 3. SendGrid API
+  if (config.sendgridApiKey) {
+    try {
+      logger.info(`[EmailService:SendGrid] Dispatching email to ${maskedTo} via SendGrid REST API (HTTPS port 443)...`);
+      const senderEmailClean = (config.fromEmail || config.user || '').includes('<')
+        ? (config.fromEmail.match(/<([^>]+)>/)?.[1] || config.user)
+        : (config.fromEmail || config.user || 'noreply@fastpay.com');
+
+      const payload = {
+        personalizations: [{ to: [{ email: to }] }],
+        from: { email: senderEmailClean, name: fromName || config.fromName || 'FastPay' },
+        subject,
+        content: [
+          { type: 'text/plain', value: text || ' ' },
+          { type: 'text/html', value: html },
+        ],
+      };
+      if (replyTo) payload.reply_to = replyTo;
+
+      const response = await axios.post('https://api.sendgrid.com/v3/mail/send', payload, {
+        headers: {
+          Authorization: `Bearer ${config.sendgridApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 8000,
+      });
+
+      const messageId = response.headers?.['x-message-id'] || `sendgrid_${Date.now()}`;
+      logger.info(`[EmailService:SendGrid] Email delivered successfully to ${maskedTo} | ID: ${messageId}`);
+      return { success: true, messageId, provider: 'sendgrid', mocked: false };
+    } catch (apiErr) {
+      const errDetail = apiErr.response?.data?.errors?.[0]?.message || apiErr.message;
+      logger.error(`[EmailService:SendGrid] Delivery failed for ${maskedTo}: ${errDetail}`);
+      return { success: false, error: `SendGrid API error: ${errDetail}`, provider: 'sendgrid', mocked: false };
+    }
+  }
+
+  return null;
+};
+
+/**
+ * Safe diagnostic to verify Email connectivity (HTTP API or SMTP)
  */
 const verifySmtpConnection = async () => {
   const config = getSmtpConfig();
+  if (config.isHttpApiConfigured) {
+    const provider = config.resendApiKey ? 'Resend API' : config.brevoApiKey ? 'Brevo API' : 'SendGrid API';
+    logger.info(`[EMAIL_SERVICE_READY] Email service configured via ${provider} (HTTPS port 443)`);
+    return { success: true, provider };
+  }
+
   if (!config.isConfigured) {
     logger.warn('[EMAIL_SMTP_FAILED] SMTP credentials missing or incomplete in environment');
     return { success: false, error: 'SMTP credentials missing or incomplete' };
   }
+
   const activeTransporter = getTransporter();
   if (!activeTransporter) {
     logger.warn('[EMAIL_SMTP_FAILED] Failed to initialize SMTP transporter');
@@ -90,7 +227,7 @@ const verifySmtpConnection = async () => {
   try {
     await activeTransporter.verify();
     logger.info('[EMAIL_SMTP_READY] SMTP connection verified successfully');
-    return { success: true };
+    return { success: true, provider: 'smtp' };
   } catch (err) {
     logger.error(`[EMAIL_SMTP_FAILED] SMTP connection verification failed: ${err.message}`);
     return { success: false, error: err.message };
@@ -98,62 +235,88 @@ const verifySmtpConnection = async () => {
 };
 
 /**
- * Base email sending method with auto-recovery and single retry
+ * Base email sending method with auto-recovery, HTTP REST API support, and safe timeout handling
  */
 const sendMail = async ({ to, subject, html, text, fromName, replyTo }) => {
-  const maskedTo = maskEmail(to);
-  const config = getSmtpConfig();
-  let activeTransporter = getTransporter();
+  try {
+    const maskedTo = maskEmail(to);
+    const config = getSmtpConfig();
 
-  // If SMTP is not configured
-  if (!activeTransporter || !config.isConfigured) {
-    if (process.env.NODE_ENV === 'test' || process.env.ALLOW_MOCK_EMAIL === 'true') {
-      logger.info(`[EmailService:Mock] Test mode mock email to: ${maskedTo} | Subject: "${subject}"`);
-      return { success: true, mocked: true, messageId: `mock_${Date.now()}` };
-    }
-    logger.error(`[EMAIL_SMTP_FAILED] Cannot send email to ${maskedTo}: SMTP credentials missing or unconfigured in ${process.env.NODE_ENV || 'production'} environment`);
-    return { success: false, error: 'SMTP credentials missing or unconfigured in environment', mocked: false };
-  }
-
-  // Dynamic sender identity: "${brandName} via FastPay" <SMTP_USER>
-  let fromHeader = config.fromEmail.includes('<') ? config.fromEmail : `"${config.fromName}" <${config.fromEmail}>`;
-  if (fromName && typeof fromName === 'string' && fromName.trim()) {
-    const cleanFromName = fromName.trim().replace(/[\r\n"]/g, '');
-    const senderEmail = config.user || (config.fromEmail.includes('<') ? (config.fromEmail.match(/<([^>]+)>/)?.[1] || config.fromEmail) : config.fromEmail) || 'noreply@fastpay.com';
-    fromHeader = `"${cleanFromName}" <${senderEmail}>`;
-  }
-
-  const mailOptions = {
-    from: fromHeader,
-    to,
-    subject,
-    text: text || '',
-    html,
-  };
-
-  if (replyTo && typeof replyTo === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(replyTo.trim())) {
-    mailOptions.replyTo = replyTo.trim();
-  }
-
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      logger.info(`[ORDER_EMAIL_SEND_STARTED] Recipient: ${maskedTo} | Attempt: ${attempt}`);
-      const info = await activeTransporter.sendMail(mailOptions);
-      logger.info(`[ORDER_EMAIL_SEND_SUCCESS] Recipient: ${maskedTo} | MessageId: ${info.messageId}`);
-      return { success: true, messageId: info.messageId, mocked: false };
-    } catch (error) {
-      logger.warn(`[ORDER_EMAIL_SEND_FAILED] Recipient: ${maskedTo} | Attempt ${attempt} error: ${error.message}`);
-      resetTransporter();
-      if (attempt === 1) {
-        activeTransporter = getTransporter();
-        if (!activeTransporter) break;
-      } else {
-        return { success: false, error: error.message, mocked: false };
+    // 1. Try HTTP REST API first if configured (Port 443 / HTTPS - Render Free compatible)
+    if (config.isHttpApiConfigured) {
+      const httpResult = await sendViaHttpApi({ to, subject, html, text, fromName, replyTo });
+      if (httpResult !== null) {
+        return httpResult;
       }
     }
-  }
 
-  return { success: false, error: 'SMTP delivery failed after retry', mocked: false };
+    let activeTransporter = getTransporter();
+
+    // 2. If SMTP is not configured
+    if (!activeTransporter || !config.isConfigured) {
+      if (process.env.NODE_ENV === 'test' || process.env.ALLOW_MOCK_EMAIL === 'true') {
+        logger.info(`[EmailService:Mock] Test mode mock email to: ${maskedTo} | Subject: "${subject}"`);
+        return { success: true, mocked: true, messageId: `mock_${Date.now()}` };
+      }
+      logger.error(`[EMAIL_SMTP_FAILED] Cannot send email to ${maskedTo}: No valid email transport (HTTP API or SMTP) configured in ${process.env.NODE_ENV || 'production'}`);
+      return { success: false, error: 'Email service credentials missing or unconfigured in environment', mocked: false };
+    }
+
+    // Dynamic sender identity: "${brandName} via FastPay" <SMTP_USER>
+    let fromHeader = config.fromEmail.includes('<') ? config.fromEmail : `"${config.fromName}" <${config.fromEmail}>`;
+    if (fromName && typeof fromName === 'string' && fromName.trim()) {
+      const cleanFromName = fromName.trim().replace(/[\r\n"]/g, '');
+      const senderEmail = config.user || (config.fromEmail.includes('<') ? (config.fromEmail.match(/<([^>]+)>/)?.[1] || config.fromEmail) : config.fromEmail) || 'noreply@fastpay.com';
+      fromHeader = `"${cleanFromName}" <${senderEmail}>`;
+    }
+
+    const mailOptions = {
+      from: fromHeader,
+      to,
+      subject,
+      text: text || '',
+      html,
+    };
+
+    if (replyTo && typeof replyTo === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(replyTo.trim())) {
+      mailOptions.replyTo = replyTo.trim();
+    }
+
+    const isBlockedPort = [25, 465, 587].includes(config.port);
+    const maxAttempts = isBlockedPort ? 1 : 2;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        logger.info(`[ORDER_EMAIL_SEND_STARTED] Recipient: ${maskedTo} | Attempt: ${attempt}`);
+        // Wrap with a hard 6.5s timeout promise to guarantee event loop execution
+        const info = await Promise.race([
+          activeTransporter.sendMail(mailOptions),
+          new Promise((_, reject) => setTimeout(() => reject(new Error(`SMTP connection timed out after 6500ms`)), 6500)),
+        ]);
+        logger.info(`[ORDER_EMAIL_SEND_SUCCESS] Recipient: ${maskedTo} | MessageId: ${info.messageId}`);
+        return { success: true, messageId: info.messageId, provider: 'smtp', mocked: false };
+      } catch (error) {
+        const isTimeout = /timeout|timed out|ETIMEDOUT|ECONNREFUSED|ENETUNREACH/i.test(error.message);
+        if (isTimeout && isBlockedPort) {
+          logger.warn(`[ORDER_EMAIL_SEND_FAILED] Recipient: ${maskedTo} | Port ${config.port} connection failed: ${error.message}. (Note: Render Free blocks ports 25, 465, 587. Configure RESEND_API_KEY or use port 2525 for production email delivery.)`);
+        } else {
+          logger.warn(`[ORDER_EMAIL_SEND_FAILED] Recipient: ${maskedTo} | Attempt ${attempt} error: ${error.message}`);
+        }
+        resetTransporter();
+        if (attempt === 1 && maxAttempts > 1) {
+          activeTransporter = getTransporter();
+          if (!activeTransporter) break;
+        } else {
+          return { success: false, error: error.message, provider: 'smtp', mocked: false };
+        }
+      }
+    }
+
+    return { success: false, error: 'SMTP delivery failed', provider: 'smtp', mocked: false };
+  } catch (uncaughtErr) {
+    logger.error(`[EmailService] Uncaught error during sendMail: ${uncaughtErr.message}`);
+    return { success: false, error: uncaughtErr.message, mocked: false };
+  }
 };
 
 /**
@@ -318,18 +481,23 @@ const generateEmailTemplate = ({ title, subtitle, otp, expiryMinutes = 5, action
  * @param {string} otp 
  */
 const sendEmailVerificationOTP = async (email, otp) => {
-  const subject = 'FastPay Email Verification Code';
-  const html = generateEmailTemplate({
-    title: 'Verify Your Email Address',
-    subtitle: 'Thank you for registering with FastPay. Please use the 6-digit verification code below to activate your account.',
-    otp,
-    expiryMinutes: 5,
-    actionText: 'Your Verification Code',
-    warningText: 'Never share this code with anyone. FastPay employees will never ask for your verification code or password.',
-  });
-  const text = `FastPay Email Verification Code: ${otp}. This code is valid for 5 minutes. Do not share it with anyone.`;
+  try {
+    const subject = 'FastPay Email Verification Code';
+    const html = generateEmailTemplate({
+      title: 'Verify Your Email Address',
+      subtitle: 'Thank you for registering with FastPay. Please use the 6-digit verification code below to activate your account.',
+      otp,
+      expiryMinutes: 5,
+      actionText: 'Your Verification Code',
+      warningText: 'Never share this code with anyone. FastPay employees will never ask for your verification code or password.',
+    });
+    const text = `FastPay Email Verification Code: ${otp}. This code is valid for 5 minutes. Do not share it with anyone.`;
 
-  return await sendMail({ to: email, subject, html, text });
+    return await module.exports.sendMail({ to: email, subject, html, text });
+  } catch (err) {
+    logger.error(`[EmailService:VerificationOTP] Unexpected error for ${maskEmail(email)}: ${err.message}`);
+    return { success: false, error: err.message, mocked: false };
+  }
 };
 
 /**
@@ -338,18 +506,23 @@ const sendEmailVerificationOTP = async (email, otp) => {
  * @param {string} otp 
  */
 const sendPasswordResetOTP = async (email, otp) => {
-  const subject = 'FastPay Password Reset Code';
-  const html = generateEmailTemplate({
-    title: 'Reset Your FastPay Password',
-    subtitle: 'We received a request to reset your FastPay account password. Enter the 6-digit code below to proceed.',
-    otp,
-    expiryMinutes: 5,
-    actionText: 'Password Reset Code',
-    warningText: 'If you did not request a password reset, please ignore this email or contact support immediately. Your account remains secure.',
-  });
-  const text = `FastPay Password Reset Code: ${otp}. This code is valid for 5 minutes. If you did not request this, ignore this email.`;
+  try {
+    const subject = 'FastPay Password Reset Code';
+    const html = generateEmailTemplate({
+      title: 'Reset Your FastPay Password',
+      subtitle: 'We received a request to reset your FastPay account password. Enter the 6-digit code below to proceed.',
+      otp,
+      expiryMinutes: 5,
+      actionText: 'Password Reset Code',
+      warningText: 'If you did not request a password reset, please ignore this email or contact support immediately. Your account remains secure.',
+    });
+    const text = `FastPay Password Reset Code: ${otp}. This code is valid for 5 minutes. If you did not request this, ignore this email.`;
 
-  return await sendMail({ to: email, subject, html, text });
+    return await module.exports.sendMail({ to: email, subject, html, text });
+  } catch (err) {
+    logger.error(`[EmailService:PasswordResetOTP] Unexpected error for ${maskEmail(email)}: ${err.message}`);
+    return { success: false, error: err.message, mocked: false };
+  }
 };
 
 /**

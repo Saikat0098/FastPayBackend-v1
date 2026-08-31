@@ -66,11 +66,16 @@ const registerUser = async ({ name, email, password, phone }) => {
     verified: false,
   });
 
-  // Send verification email via Nodemailer service
-  const emailSent = await emailService.sendEmailVerificationOTP(loginEmail, rawOtp);
-  if (!emailSent.success && !emailSent.mocked) {
-    logger.warn(`[RegisterUser] Email sending failed for ${maskEmail(loginEmail)}: ${emailSent.error}`);
-  }
+  // Safely dispatch verification email asynchronously (Isolated & Non-blocking)
+  emailService.sendEmailVerificationOTP(loginEmail, rawOtp)
+    .then((emailSent) => {
+      if (emailSent && !emailSent.success && !emailSent.mocked) {
+        logger.warn(`[RegisterUser] Background email delivery failed for ${maskEmail(loginEmail)}: ${emailSent.error}`);
+      }
+    })
+    .catch((err) => {
+      logger.warn(`[RegisterUser] Background email delivery error for ${maskEmail(loginEmail)}: ${err.message}`);
+    });
 
   return {
     success: true,
@@ -224,11 +229,27 @@ const resendOtp = async ({ email, purpose = 'EMAIL_VERIFICATION' }) => {
     verified: false,
   });
 
-  // Send appropriate email
+  // Send appropriate email asynchronously in background
   if (cleanPurpose === 'PASSWORD_RESET') {
-    await emailService.sendPasswordResetOTP(loginEmail, rawOtp);
+    emailService.sendPasswordResetOTP(loginEmail, rawOtp)
+      .then((emailSent) => {
+        if (emailSent && !emailSent.success && !emailSent.mocked) {
+          logger.warn(`[ResendOTP:Reset] Background email delivery failed for ${maskEmail(loginEmail)}: ${emailSent.error}`);
+        }
+      })
+      .catch((err) => {
+        logger.warn(`[ResendOTP:Reset] Background email delivery error for ${maskEmail(loginEmail)}: ${err.message}`);
+      });
   } else {
-    await emailService.sendEmailVerificationOTP(loginEmail, rawOtp);
+    emailService.sendEmailVerificationOTP(loginEmail, rawOtp)
+      .then((emailSent) => {
+        if (emailSent && !emailSent.success && !emailSent.mocked) {
+          logger.warn(`[ResendOTP:Verify] Background email delivery failed for ${maskEmail(loginEmail)}: ${emailSent.error}`);
+        }
+      })
+      .catch((err) => {
+        logger.warn(`[ResendOTP:Verify] Background email delivery error for ${maskEmail(loginEmail)}: ${err.message}`);
+      });
   }
 
   return {
@@ -293,8 +314,16 @@ const forgotPassword = async ({ email }) => {
     verified: false,
   });
 
-  // Dispatch password reset email
-  await emailService.sendPasswordResetOTP(loginEmail, rawOtp);
+  // Dispatch password reset email asynchronously in background
+  emailService.sendPasswordResetOTP(loginEmail, rawOtp)
+    .then((emailSent) => {
+      if (emailSent && !emailSent.success && !emailSent.mocked) {
+        logger.warn(`[ForgotPassword] Background email delivery failed for ${maskEmail(loginEmail)}: ${emailSent.error}`);
+      }
+    })
+    .catch((err) => {
+      logger.warn(`[ForgotPassword] Background email delivery error for ${maskEmail(loginEmail)}: ${err.message}`);
+    });
 
   return {
     success: true,
