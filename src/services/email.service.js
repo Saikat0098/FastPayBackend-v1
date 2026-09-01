@@ -1,12 +1,11 @@
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '../../.env') });
 const nodemailer = require('nodemailer');
-const axios = require('axios');
 const logger = require('../config/logger');
 const { maskEmail } = require('../utils/otp');
 
 /**
- * Dynamic runtime SMTP and Email provider configuration reader
+ * Dynamic runtime SMTP configuration reader
  */
 const getSmtpConfig = () => {
   const host = process.env.SMTP_HOST || process.env.EMAIL_HOST || 'smtp.gmail.com';
@@ -16,14 +15,16 @@ const getSmtpConfig = () => {
   const rawPass = process.env.SMTP_PASS || process.env.SMTP_PASSWORD || process.env.EMAIL_PASS || process.env.EMAIL_PASSWORD || '';
   const pass = rawPass.replace(/\s+/g, '');
   const fromName = process.env.SMTP_FROM_NAME || process.env.EMAIL_FROM_NAME || 'FastPay';
-  const fromEmail = process.env.SMTP_FROM || process.env.EMAIL_FROM || (user ? `"${fromName}" <${user}>` : '"FastPay" <noreply@fastpay.com>');
-  const isConfigured = Boolean(user && pass && pass !== 'YOUR_GMAIL_APP_PASSWORD');
 
-  // HTTP REST API configurations (Ports 443 / HTTPS - 100% Compatible with Render Free)
-  const resendApiKey = (process.env.RESEND_API_KEY || '').trim();
-  const brevoApiKey = (process.env.BREVO_API_KEY || process.env.SENDINBLUE_API_KEY || '').trim();
-  const sendgridApiKey = (process.env.SENDGRID_API_KEY || '').trim();
-  const isHttpApiConfigured = Boolean(resendApiKey || brevoApiKey || sendgridApiKey);
+  let fromEmailAddress = user;
+  if (process.env.SMTP_FROM || process.env.EMAIL_FROM) {
+    const rawFrom = (process.env.SMTP_FROM || process.env.EMAIL_FROM).trim();
+    const match = rawFrom.match(/<([^>]+)>/);
+    fromEmailAddress = match ? match[1].trim() : rawFrom;
+  }
+
+  const fromEmail = `"${fromName}" <${fromEmailAddress || user || 'noreply@fastpay.com'}>`;
+  const isConfigured = Boolean(user && pass && pass !== 'YOUR_GMAIL_APP_PASSWORD');
 
   return {
     host,
@@ -33,11 +34,8 @@ const getSmtpConfig = () => {
     pass,
     fromName,
     fromEmail,
+    fromEmailAddress,
     isConfigured,
-    resendApiKey,
-    brevoApiKey,
-    sendgridApiKey,
-    isHttpApiConfigured,
   };
 };
 
@@ -53,13 +51,11 @@ const createSmtpTransporter = (config) => {
       user: config.user,
       pass: config.pass,
     },
-    connectionTimeout: 5000, // 5s connection timeout (fast failure on blocked ports)
-    greetingTimeout: 5000,
-    socketTimeout: 7500,
+    connectionTimeout: 20000,
+    greetingTimeout: 20000,
+    socketTimeout: 30000,
     family: 4,
-    pool: true,
-    maxConnections: 5,
-    maxMessages: 100,
+    pool: false,
     tls: {
       rejectUnauthorized: false,
     },
@@ -85,203 +81,56 @@ const resetTransporter = () => {
 };
 
 /**
- * Send email via HTTP REST API (HTTPS port 443 - Compatible with Render Free & Serverless)
- */
-const sendViaHttpApi = async ({ to, subject, html, text, fromName, replyTo }) => {
-  const config = getSmtpConfig();
-  const maskedTo = maskEmail(to);
-
-  // 1. Resend API
-  if (config.resendApiKey) {
-    try {
-      logger.info(`[EmailService:Resend] Dispatching email to ${maskedTo} via Resend REST API (HTTPS port 443)...`);
-      const defaultFrom = config.fromEmail.includes('<')
-        ? config.fromEmail
-        : (config.user ? `"${config.fromName}" <${config.user}>` : `"${config.fromName}" <onboarding@resend.dev>`);
-      const fromHeader = fromName ? `"${fromName}" <${config.user || 'onboarding@resend.dev'}>` : defaultFrom;
-
-      const payload = {
-        from: fromHeader,
-        to: [to],
-        subject,
-        html,
-        text: text || '',
-      };
-      if (replyTo) payload.reply_to = replyTo;
-
-      const response = await axios.post('https://api.resend.com/emails', payload, {
-        headers: {
-          Authorization: `Bearer ${config.resendApiKey}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 8000,
-      });
-
-      const messageId = response.data?.id || `resend_${Date.now()}`;
-      logger.info(`[EmailService:Resend] Email delivered successfully to ${maskedTo} | ID: ${messageId}`);
-      return { success: true, messageId, provider: 'resend', mocked: false };
-    } catch (apiErr) {
-      const errDetail = apiErr.response?.data?.message || apiErr.message;
-      logger.error(`[EmailService:Resend] Delivery failed for ${maskedTo}: ${errDetail}`);
-      return { success: false, error: `Resend API error: ${errDetail}`, provider: 'resend', mocked: false };
-    }
-  }
-
-  // 2. Brevo API
-  if (config.brevoApiKey) {
-    try {
-      logger.info(`[EmailService:Brevo] Dispatching email to ${maskedTo} via Brevo REST API (HTTPS port 443)...`);
-      const senderEmailClean = (config.fromEmail || config.user || '').includes('<')
-        ? (config.fromEmail.match(/<([^>]+)>/)?.[1] || config.user)
-        : (config.fromEmail || config.user || 'noreply@fastpay.com');
-
-      const payload = {
-        sender: { name: fromName || config.fromName || 'FastPay', email: senderEmailClean },
-        to: [{ email: to }],
-        subject,
-        htmlContent: html,
-        textContent: text || '',
-      };
-      if (replyTo) payload.replyTo = { email: replyTo };
-
-      const response = await axios.post('https://api.brevo.com/v3/smtp/email', payload, {
-        headers: {
-          'api-key': config.brevoApiKey,
-          'Content-Type': 'application/json',
-          accept: 'application/json',
-        },
-        timeout: 8000,
-      });
-
-      const messageId = response.data?.messageId || `brevo_${Date.now()}`;
-      logger.info(`[EmailService:Brevo] Email delivered successfully to ${maskedTo} | ID: ${messageId}`);
-      return { success: true, messageId, provider: 'brevo', mocked: false };
-    } catch (apiErr) {
-      const errDetail = apiErr.response?.data?.message || apiErr.message;
-      logger.error(`[EmailService:Brevo] Delivery failed for ${maskedTo}: ${errDetail}`);
-      return { success: false, error: `Brevo API error: ${errDetail}`, provider: 'brevo', mocked: false };
-    }
-  }
-
-  // 3. SendGrid API
-  if (config.sendgridApiKey) {
-    try {
-      logger.info(`[EmailService:SendGrid] Dispatching email to ${maskedTo} via SendGrid REST API (HTTPS port 443)...`);
-      const senderEmailClean = (config.fromEmail || config.user || '').includes('<')
-        ? (config.fromEmail.match(/<([^>]+)>/)?.[1] || config.user)
-        : (config.fromEmail || config.user || 'noreply@fastpay.com');
-
-      const payload = {
-        personalizations: [{ to: [{ email: to }] }],
-        from: { email: senderEmailClean, name: fromName || config.fromName || 'FastPay' },
-        subject,
-        content: [
-          { type: 'text/plain', value: text || ' ' },
-          { type: 'text/html', value: html },
-        ],
-      };
-      if (replyTo) payload.reply_to = replyTo;
-
-      const response = await axios.post('https://api.sendgrid.com/v3/mail/send', payload, {
-        headers: {
-          Authorization: `Bearer ${config.sendgridApiKey}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 8000,
-      });
-
-      const messageId = response.headers?.['x-message-id'] || `sendgrid_${Date.now()}`;
-      logger.info(`[EmailService:SendGrid] Email delivered successfully to ${maskedTo} | ID: ${messageId}`);
-      return { success: true, messageId, provider: 'sendgrid', mocked: false };
-    } catch (apiErr) {
-      const errDetail = apiErr.response?.data?.errors?.[0]?.message || apiErr.message;
-      logger.error(`[EmailService:SendGrid] Delivery failed for ${maskedTo}: ${errDetail}`);
-      return { success: false, error: `SendGrid API error: ${errDetail}`, provider: 'sendgrid', mocked: false };
-    }
-  }
-
-  return null;
-};
-
-/**
- * Safe diagnostic to verify Email connectivity (HTTP API or SMTP)
+ * Safe diagnostic to verify Nodemailer SMTP connectivity
  */
 const verifySmtpConnection = async () => {
   const config = getSmtpConfig();
-  if (config.isHttpApiConfigured) {
-    const provider = config.resendApiKey ? 'Resend API' : config.brevoApiKey ? 'Brevo API' : 'SendGrid API';
-    logger.info(`[EMAIL_CONFIG] provider: ${provider} | transport: HTTPS/443 | configured: true`);
-    return { success: true, provider };
-  }
 
   if (!config.isConfigured) {
-    logger.warn('[EMAIL_CONFIG] provider: SMTP | configured: false | error: SMTP credentials missing or incomplete in environment');
+    logger.warn(`[EMAIL_CONFIG] provider: SMTP | host: ${config.host} | port: ${config.port} | secure: ${config.secure} | configured: false | error: SMTP credentials missing or incomplete in environment`);
     return { success: false, error: 'SMTP credentials missing or incomplete' };
   }
 
   const activeTransporter = getTransporter();
   if (!activeTransporter) {
-    logger.warn('[EMAIL_CONFIG] provider: SMTP | configured: false | error: Failed to initialize SMTP transporter');
+    logger.warn(`[EMAIL_CONFIG] provider: SMTP | host: ${config.host} | port: ${config.port} | secure: ${config.secure} | configured: false | error: Failed to initialize SMTP transporter`);
     return { success: false, error: 'Failed to initialize SMTP transporter' };
   }
   try {
     await activeTransporter.verify();
-    logger.info(`[EMAIL_CONFIG] provider: SMTP | host: ${config.host} | port: ${config.port} | configured: true`);
+    logger.info(`[EMAIL_CONFIG] provider: SMTP | host: ${config.host} | port: ${config.port} | secure: ${config.secure} | configured: true`);
     return { success: true, provider: 'smtp' };
   } catch (err) {
-    logger.error(`[EMAIL_CONFIG] provider: SMTP | host: ${config.host} | port: ${config.port} | configured: false | error: ${err.message}`);
+    logger.error(`[EMAIL_CONFIG] provider: SMTP | host: ${config.host} | port: ${config.port} | secure: ${config.secure} | configured: false | error: ${err.message}`);
     return { success: false, error: err.message };
   }
 };
 
 /**
- * Base email sending method with auto-recovery, HTTP REST API support, safe fallback, and timeout handling
+ * Base email sending method with auto-recovery and reliable Nodemailer transport
  */
 const sendMail = async ({ to, subject, html, text, fromName, replyTo, emailType = 'GENERAL' }) => {
   try {
     const maskedTo = maskEmail(to);
     const config = getSmtpConfig();
-
-    // 1. Try HTTP REST API first if configured (Port 443 / HTTPS - Render Free compatible)
-    if (config.isHttpApiConfigured) {
-      const httpProvider = config.resendApiKey ? 'Resend' : config.brevoApiKey ? 'Brevo' : 'SendGrid';
-      logger.info(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: ${httpProvider} (HTTPS) | status: STARTED`);
-      const httpResult = await sendViaHttpApi({ to, subject, html, text, fromName, replyTo });
-      
-      if (httpResult && httpResult.success) {
-        logger.info(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: ${httpProvider} | status: SENT | messageId: ${httpResult.messageId}`);
-        return httpResult;
-      }
-
-      logger.warn(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: ${httpProvider} | status: FAILED | error: ${httpResult?.error || 'Unknown HTTP API error'}`);
-
-      // If HTTP API failed and SMTP is configured, attempt fallback to SMTP
-      if (config.isConfigured) {
-        logger.info(`[${emailType}_EMAIL] Attempting fallback transport to SMTP for ${maskedTo}...`);
-      } else {
-        return httpResult || { success: false, error: 'HTTP API delivery failed and no SMTP fallback configured', provider: 'http', mocked: false };
-      }
-    }
-
     let activeTransporter = getTransporter();
 
-    // 2. If SMTP is not configured
+    // If SMTP is not configured
     if (!activeTransporter || !config.isConfigured) {
       if (process.env.NODE_ENV === 'test' || process.env.ALLOW_MOCK_EMAIL === 'true') {
         logger.info(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: Mock | status: SENT (Mock Test Mode)`);
         return { success: true, mocked: true, messageId: `mock_${Date.now()}` };
       }
-      logger.error(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: None | status: FAILED | error: No valid email transport (HTTP API or SMTP) configured in ${process.env.NODE_ENV || 'production'}`);
-      return { success: false, error: 'Email service credentials missing or unconfigured in environment', mocked: false };
+      logger.error(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: SMTP | status: FAILED | error: SMTP credentials missing or unconfigured in environment`);
+      return { success: false, error: 'SMTP credentials missing or unconfigured in environment', mocked: false };
     }
 
-    // Dynamic sender identity: "${brandName} via FastPay" <SMTP_USER>
-    let fromHeader = config.fromEmail.includes('<') ? config.fromEmail : `"${config.fromName}" <${config.fromEmail}>`;
-    if (fromName && typeof fromName === 'string' && fromName.trim()) {
-      const cleanFromName = fromName.trim().replace(/[\r\n"]/g, '');
-      const senderEmail = config.user || (config.fromEmail.includes('<') ? (config.fromEmail.match(/<([^>]+)>/)?.[1] || config.fromEmail) : config.fromEmail) || 'noreply@fastpay.com';
-      fromHeader = `"${cleanFromName}" <${senderEmail}>`;
-    }
+    // Dynamic sender identity: "${brandName || fromName}" <SMTP_USER>
+    const senderEmail = config.fromEmailAddress || config.user || 'noreply@fastpay.com';
+    const effectiveFromName = (fromName && typeof fromName === 'string' && fromName.trim())
+      ? fromName.trim().replace(/[\r\n"]/g, '')
+      : config.fromName;
+    const fromHeader = `"${effectiveFromName}" <${senderEmail}>`;
 
     const mailOptions = {
       from: fromHeader,
@@ -295,28 +144,24 @@ const sendMail = async ({ to, subject, html, text, fromName, replyTo, emailType 
       mailOptions.replyTo = replyTo.trim();
     }
 
-    const isBlockedPort = [25, 465, 587].includes(config.port);
-    const maxAttempts = isBlockedPort ? 1 : 2;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         logger.info(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: SMTP (${config.host}:${config.port}) | status: STARTED | attempt: ${attempt}`);
-        // Wrap with a hard 6.5s timeout promise to guarantee event loop execution
-        const info = await Promise.race([
-          activeTransporter.sendMail(mailOptions),
-          new Promise((_, reject) => setTimeout(() => reject(new Error(`SMTP connection timed out after 6500ms`)), 6500)),
-        ]);
+        const info = await activeTransporter.sendMail(mailOptions);
         logger.info(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: SMTP | status: SENT | messageId: ${info.messageId}`);
-        return { success: true, messageId: info.messageId, provider: 'smtp', mocked: false };
+        return {
+          success: true,
+          messageId: info.messageId,
+          provider: 'smtp',
+          response: info.response,
+          accepted: info.accepted,
+          rejected: info.rejected,
+          mocked: false,
+        };
       } catch (error) {
-        const isTimeout = /timeout|timed out|ETIMEDOUT|ECONNREFUSED|ENETUNREACH/i.test(error.message);
-        if (isTimeout && isBlockedPort) {
-          logger.warn(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: SMTP | status: FAILED | error: Port ${config.port} connection blocked/timed out (${error.message}). (Note: Render Free blocks ports 25, 465, 587. Configure RESEND_API_KEY or use port 2525 for production email delivery.)`);
-        } else {
-          logger.warn(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: SMTP | status: FAILED | attempt: ${attempt} | error: ${error.message}`);
-        }
+        logger.warn(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: SMTP | status: FAILED | attempt: ${attempt} | error: ${error.message}`);
         resetTransporter();
-        if (attempt === 1 && maxAttempts > 1) {
+        if (attempt === 1) {
           activeTransporter = getTransporter();
           if (!activeTransporter) break;
         } else {
@@ -325,9 +170,9 @@ const sendMail = async ({ to, subject, html, text, fromName, replyTo, emailType 
       }
     }
 
-    return { success: false, error: 'SMTP delivery failed', provider: 'smtp', mocked: false };
+    return { success: false, error: 'SMTP delivery failed after retry', provider: 'smtp', mocked: false };
   } catch (uncaughtErr) {
-    logger.error(`[EmailService] Uncaught error during sendMail: ${uncaughtErr.message}`);
+    logger.error(`[${emailType}_EMAIL] recipient: ${maskEmail(to)} | transport: SMTP | status: FAILED | error: ${uncaughtErr.message}`);
     return { success: false, error: uncaughtErr.message, mocked: false };
   }
 };

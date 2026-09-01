@@ -203,13 +203,14 @@ async function runRegistrationSmtpResilienceTests() {
     // SCENARIO E: Unverified Login Protection & Verified User Login Unchanged
     // -------------------------------------------------------------------------
     console.log('--- SCENARIO E: Authentication & Login Security Validation ---');
-    // 1. Unverified user attempt login -> must be 403
+    // 1. Unverified user attempt login -> must succeed with 200 without hard blocking
     const unverifiedLoginRes = await makeRequest(server, '/api/v1/auth/login', 'POST', {}, {
       email: emailA,
       password: 'SecurePassword123!',
     });
-    assert.strictEqual(unverifiedLoginRes.status, 403, 'Unverified user MUST be blocked from logging in with 403');
-    assert(unverifiedLoginRes.body?.message?.includes('verify your email'), 'Returns email verification warning');
+    assert.strictEqual(unverifiedLoginRes.status, 200, 'Unverified user logs in non-blocking with 200');
+    const userAInDb = await User.findOne({ email: emailA });
+    assert.strictEqual(userAInDb.emailVerified, false, 'User remains unverified until OTP confirmed');
 
     // 2. Verify user A with OTP
     const knownOtpA = '123456';
@@ -261,22 +262,17 @@ async function runRegistrationSmtpResilienceTests() {
     console.log('✅ SCENARIO F PASSED: Validation constraints strictly enforced\n');
 
     // -------------------------------------------------------------------------
-    // SCENARIO G: Multi-Transport HTTP REST API Email Delivery
+    // SCENARIO G: Nodemailer SMTP Configuration & Transport Verification
     // -------------------------------------------------------------------------
-    console.log('--- SCENARIO G: Multi-Transport HTTP REST API Support (Port 443) ---');
-    // Restore sendMail to verify HTTP API detection
+    console.log('--- SCENARIO G: Nodemailer SMTP Configuration & Verification ---');
     emailService.sendMail = originalSendMail;
     
-    // Simulate RESEND_API_KEY present in environment
-    process.env.RESEND_API_KEY = 're_mock_test_key_12345';
-    const configWithResend = emailService.getSmtpConfig();
-    assert.strictEqual(configWithResend.isHttpApiConfigured, true, 'HTTP REST API is detected as configured');
-    assert.strictEqual(configWithResend.resendApiKey, 're_mock_test_key_12345');
+    const configSmtp = emailService.getSmtpConfig();
+    assert(configSmtp.host, 'SMTP host configured');
+    assert.strictEqual(configSmtp.resendApiKey, undefined, 'Resend API key property removed');
+    assert.strictEqual(configSmtp.isHttpApiConfigured, undefined, 'isHttpApiConfigured removed');
 
-    const verifyStatus = await emailService.verifySmtpConnection();
-    assert.strictEqual(verifyStatus.success, true, 'verifySmtpConnection confirms HTTP REST API readiness');
-    delete process.env.RESEND_API_KEY;
-    console.log('✅ SCENARIO G PASSED: HTTP REST API configuration & verification verified\n');
+    console.log('✅ SCENARIO G PASSED: Nodemailer SMTP configuration verified cleanly\n');
 
     // -------------------------------------------------------------------------
     // SCENARIO H: Complete End-to-End Lifecycle

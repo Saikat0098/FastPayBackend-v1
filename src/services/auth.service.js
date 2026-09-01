@@ -540,19 +540,6 @@ const loginMerchant = async ({ email, username, password, apiKey, ipAddress = ''
       throw new ApiError(401, 'Invalid email or password');
     }
 
-    // Check email verification status:
-    // Only block if emailVerified is EXPLICITLY false (preserves backwards compatibility for existing users where emailVerified is undefined or true)
-    if (user.emailVerified === false) {
-      await LoginHistory.create({ user: user._id, userType: 'user', email: loginEmail, ipAddress, userAgent, status: 'FAILED', failReason: 'Email not verified' });
-      const err = new ApiError(403, 'Please verify your email address before logging in.', [], '', {
-        code: 'EMAIL_NOT_VERIFIED',
-        userMessage: 'Please verify your email address before logging in.',
-        email: user.email,
-        requiresVerification: true,
-      });
-      throw err;
-    }
-
     const normRole = (user.role || 'USER').toUpperCase();
     const loginUserType = normRole === 'MERCHANT' ? 'merchant' : 'user';
 

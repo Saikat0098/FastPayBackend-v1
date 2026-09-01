@@ -107,17 +107,18 @@ async function runOtpAuthTests() {
     }
 
     // ----------------------------------------------------
-    // TEST 4: Normal Login is Blocked for Unverified User
+    // TEST 4: Non-blocking Login for Unverified User (HTTP 200 with emailVerified: false)
     // ----------------------------------------------------
     const unverifiedLoginRes = await makeRequest(server, '/api/v1/auth/login', 'POST', {}, {
       email: testUserEmail,
       password: testPassword,
     });
 
-    if (unverifiedLoginRes.status === 403 && unverifiedLoginRes.body?.message?.includes('verify your email')) {
-      console.log('TEST 4: Unverified user login blocked with 403 & verify email prompt -> ✅ PASS');
+    const userDbRecord = await User.findOne({ email: testUserEmail });
+    if (unverifiedLoginRes.status === 200 && userDbRecord.emailVerified === false) {
+      console.log('TEST 4: Unverified user logs in non-blocking (HTTP 200, emailVerified: false) -> ✅ PASS');
     } else {
-      throw new Error(`TEST 4 FAILED: Expected 403 blocked login, got status ${unverifiedLoginRes.status}`);
+      throw new Error(`TEST 4 FAILED: Expected 200 non-blocking login, got status ${unverifiedLoginRes.status}`);
     }
 
     // ----------------------------------------------------

@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "node src/tests/run_otp_email_delivery_diagnosis_tests.js && node src/tests/test_registration_smtp_resilience.js && node src/tests/run_image_upload_tests.js && node src/tests/run_otp_auth_tests.js && node src/tests/run_developer_tests.js && node src/tests/run_security_tests.js && node src/tests/run_live_payment_tests.js",
+    "test": "node src/tests/run_nonblocking_otp_tests.js && node src/tests/run_otp_email_delivery_diagnosis_tests.js && node src/tests/test_registration_smtp_resilience.js && node src/tests/test_otp_smtp_complete_pipeline.js && node src/tests/run_image_upload_tests.js && node src/tests/run_otp_auth_tests.js && node src/tests/run_developer_tests.js && node src/tests/run_security_tests.js && node src/tests/run_live_payment_tests.js",
     "lint": "echo \"Linting clean\""
   },
   "keywords": [
