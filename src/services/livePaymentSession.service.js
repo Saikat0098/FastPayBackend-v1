@@ -422,6 +422,11 @@ const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
 
   const rawProvider = (payment.provider || payment.gateway || '').toString().toLowerCase().trim();
   
+  // MATCHING RULE #0 — ISOLATION GUARD (Admin transactions cannot match merchant live payment sessions)
+  if (payment.ownerType === 'ADMIN') {
+    return { matched: false, reason: 'ADMIN_TRANSACTION_CANNOT_MATCH_MERCHANT_LIVE_SESSION' };
+  }
+
   // MATCHING RULE #1 — PROVIDER
   const cleanProvider = rawProvider.includes('bkash')
     ? 'BKASH'
@@ -646,6 +651,7 @@ const performLivePaymentReconciliation = async ({ liveSession }) => {
 
   const candidatePayments = await Payment.find({
     merchant: liveSession.merchant,
+    ownerType: { $ne: 'ADMIN' },
     provider: { $regex: /^bkash$/i },
     isUsed: { $ne: true },
     status: { $in: ['COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'PENDING_VERIFICATION', 'SMS', 'VERIFIED'] },

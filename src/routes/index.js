@@ -52,6 +52,7 @@ router.use('/sms', smsRoutes);
 router.use('/activation', activationRoutes);
 router.use('/settings', settingsRoutes);
 router.use('/subscriptions', subscriptionRoutes);
+router.use('/subscription', subscriptionRoutes);
 router.use('/sandbox', sandboxRoutes);
 router.use('/brands', brandRoutes);
 router.use('/brand', brandRoutes);

@@ -52,6 +52,18 @@ const paymentSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    ownerType: {
+      type: String,
+      enum: ['MERCHANT', 'ADMIN', 'PLATFORM'],
+      default: 'MERCHANT',
+      index: true,
+    },
+    admin: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Admin',
+      required: false,
+      index: true,
+    },
     merchant: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Merchant',
@@ -152,6 +164,9 @@ const paymentSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    usedAt: {
+      type: Date,
+    },
     isUsedForSubscription: {
       type: Boolean,
       default: false,
@@ -185,6 +200,9 @@ const paymentSchema = new mongoose.Schema(
 
 paymentSchema.index({ transactionId: 1 }, { unique: true });
 paymentSchema.index({ provider: 1, transactionId: 1 });
+paymentSchema.index({ ownerType: 1, transactionId: 1 });
+paymentSchema.index({ ownerType: 1, merchant: 1, createdAt: -1 });
+paymentSchema.index({ ownerType: 1, admin: 1, createdAt: -1 });
 paymentSchema.index({ merchant: 1, createdAt: -1 });
 paymentSchema.index({ merchant: 1, brand: 1, createdAt: -1 });
 paymentSchema.index({ brand: 1, createdAt: -1 });

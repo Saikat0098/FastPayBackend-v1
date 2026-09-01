@@ -319,26 +319,34 @@ const deletePlan = asyncHandler(async (req, res) => {
 
 // 5. All Transactions Management
 const getAllTransactions = asyncHandler(async (req, res) => {
-  const { q, status, provider, merchant } = req.query;
+  const { q, status, provider, merchant, ownerType } = req.query;
   const query = {};
 
-  if (status) query.status = status.toUpperCase();
-  if (provider) query.provider = { $regex: provider, $options: 'i' };
-  if (merchant) query.merchant = merchant;
+  if (ownerType && ownerType.toUpperCase() === 'ADMIN') {
+    query.ownerType = 'ADMIN';
+  } else if (ownerType && ownerType.toUpperCase() === 'MERCHANT') {
+    query.ownerType = { $ne: 'ADMIN' };
+  }
+
+  if (status && status !== 'ALL') query.status = status.toUpperCase();
+  if (provider && provider !== 'ALL') query.provider = { $regex: provider, $options: 'i' };
+  if (merchant && merchant !== 'ALL' && mongoose.Types.ObjectId.isValid(merchant)) query.merchant = merchant;
   if (q) {
     query.$or = [
       { transactionId: { $regex: q, $options: 'i' } },
-      { sender: { $regex: q, $options: 'i' } }
+      { sender: { $regex: q, $options: 'i' } },
+      { accountNumber: { $regex: q, $options: 'i' } },
     ];
   }
 
   const payments = await Payment.find(query)
     .populate('merchant', 'name companyName email')
-    .populate('device', 'androidId deviceModel')
+    .populate('admin', 'name email role')
+    .populate('brand', 'name slug logo')
+    .populate('device', 'androidId deviceModel ownerType')
     .sort({ createdAt: -1 })
     .limit(100);
 
-  console.log("Admin transactions query count:", payments.length);
   return ApiResponse.success(res, payments, 'Transactions list retrieved');
 });
 

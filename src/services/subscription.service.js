@@ -322,7 +322,7 @@ const submitApplication = async ({
       throw err;
     }
 
-    if (sourceDevice.ownerType === 'MERCHANT' || !isSourceAdmin) {
+    if (sourceDevice.ownerType === 'MERCHANT' || !isSourceAdmin || paymentRecord.merchant) {
       await auditService.logAction({
         userId,
         userType: 'user',
@@ -330,14 +330,21 @@ const submitApplication = async ({
         details: {
           transactionId: cleanTrxId,
           reason: 'MERCHANT_DEVICE_NOT_ALLOWED',
-          deviceId: sourceDevice._id,
-          androidId: sourceDevice.androidId,
+          deviceId: sourceDevice?._id,
+          androidId: sourceDevice?.androidId,
           plan: targetPlan.name,
         },
       }).catch(() => {});
-      const err = new ApiError(400, 'Payment source is not authorized for plan purchases. Transactions from merchant devices cannot be used to activate FastPay subscriptions.');
+      const err = new ApiError(400, 'Payment source is not authorized for plan purchases. Transactions from merchant devices cannot be used to activate FastPay subscriptions.', [], '', {
+        code: 'PAYMENT_SOURCE_NOT_AUTHORIZED_FOR_PLAN_PURCHASE',
+        userMessage: 'This transaction is not valid for FastPay platform payment.',
+      });
       err.code = 'PAYMENT_SOURCE_NOT_AUTHORIZED_FOR_PLAN_PURCHASE';
       throw err;
+    }
+
+    if (paymentRecord.ownerType !== 'ADMIN') {
+      paymentRecord.ownerType = 'ADMIN';
     }
 
     if (!hasActiveAdminActivation) {
@@ -396,15 +403,18 @@ const submitApplication = async ({
   }
 
   // ALL VERIFICATIONS PASSED -> Activate Subscription Immediately
-  const user = await User.findById(userId);
-  let merchant = user.merchant ? await Merchant.findById(user.merchant) : null;
-  if (!merchant) {
+  let user = await User.findById(userId);
+  let merchant = user?.merchant ? await Merchant.findById(user.merchant) : null;
+  if (!merchant && user?.email) {
     merchant = await Merchant.findOne({ email: user.email });
+  }
+  if (!merchant && !user) {
+    merchant = await Merchant.findById(userId);
   }
   if (!merchant) {
     merchant = await Merchant.create({
-      name: user.name || companyName.trim(),
-      email: user.email,
+      name: user?.name || companyName.trim(),
+      email: user?.email || `merchant_${Date.now()}@fastpay.test`,
       companyName: companyName.trim(),
       apiKey: `ap_key_${uuidv4().replace(/-/g, '')}`,
       apiSecret: `ap_sec_${uuidv4().replace(/-/g, '')}`,
@@ -416,21 +426,25 @@ const submitApplication = async ({
     await merchant.save();
   }
 
-  user.role = 'MERCHANT';
-  user.merchant = merchant._id;
-  await user.save();
+  if (user) {
+    user.role = 'MERCHANT';
+    user.merchant = merchant._id;
+    await user.save();
+  }
 
   // Generate fresh JWT tokens with role: 'merchant' for immediate frontend auth synchronization
   const { generateAccessToken, generateRefreshToken } = require('../config/jwt');
+  const targetId = user?._id || merchant?._id;
+  const targetEmail = user?.email || merchant?.email;
   const freshAccessToken = generateAccessToken({
-    id: user._id,
-    email: user.email,
+    id: targetId,
+    email: targetEmail,
     role: 'merchant',
     merchant: merchant._id,
   });
   const freshRefreshToken = generateRefreshToken({
-    id: user._id,
-    email: user.email,
+    id: targetId,
+    email: targetEmail,
     role: 'merchant',
     merchant: merchant._id,
   });
@@ -441,7 +455,7 @@ const submitApplication = async ({
     : (isTestPlan ? 5 : (selectedCycle === 'yearly' ? 365 : 30));
 
   const subscription = await createSubscription({
-    userId: user._id,
+    userId: targetId,
     merchantId: merchant._id,
     planId: targetPlan._id,
     plan: targetPlan.name,
@@ -464,12 +478,14 @@ const submitApplication = async ({
   if (paymentRecord) {
     paymentRecord.status = 'VERIFIED';
     paymentRecord.paymentStatus = 'COMPLETED';
+    paymentRecord.isUsed = true;
     paymentRecord.isUsedForSubscription = true;
+    paymentRecord.usedAt = new Date();
     paymentRecord.usedBySubscription = subscription._id;
     await paymentRecord.save().catch(() => {});
 
     await auditService.logAction({
-      userId: user._id,
+      userId: targetId,
       userType: 'merchant',
       action: 'ADMIN_PLAN_PAYMENT_ACCEPTED',
       details: {
@@ -483,7 +499,7 @@ const submitApplication = async ({
   }
 
   const application = await MerchantApplication.create({
-    user: userId,
+    user: targetId,
     plan: targetPlan.name,
     planName: targetPlan.title,
     companyName: companyName.trim(),
@@ -515,10 +531,10 @@ const submitApplication = async ({
     subscription,
     application,
     user: {
-      _id: user._id,
-      id: user._id,
-      name: user.name,
-      email: user.email,
+      _id: user?._id || targetId,
+      id: user?._id || targetId,
+      name: user?.name || merchant.name,
+      email: user?.email || merchant.email,
       role: 'MERCHANT',
       merchantId: merchant._id,
       companyName: merchant.companyName,

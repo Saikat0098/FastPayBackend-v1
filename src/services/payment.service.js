@@ -110,37 +110,55 @@ const processTransactionSync = async ({
 
   // 1. Validate Activation Key (if provided)
   let keyDoc = null;
-  let resolvedMerchantId = merchantId;
-
   if (activationKey) {
     keyDoc = await ActivationKey.findOne({ key: activationKey.toUpperCase().trim() });
     if (!keyDoc) {
       throw new ApiError(400, 'Invalid Activation Key');
     }
-    resolvedMerchantId = keyDoc.merchant;
   }
 
   // 2. Validate Device & Enforce Block Check
   const devDoc = await verifyDeviceNotBlocked({ deviceId, activationKey });
   if (devDoc) {
-    if (!resolvedMerchantId) resolvedMerchantId = devDoc.merchant;
     devDoc.lastOnline = new Date();
     devDoc.status = 'ACTIVE';
     await devDoc.save();
   }
 
-  // Fallback to default merchant if unresolved
-  if (!resolvedMerchantId) {
-    let defaultMerchant = await Merchant.findOne();
-    if (!defaultMerchant) {
-      defaultMerchant = await Merchant.create({
-        name: 'Auto Payment Gateway Merchant',
-        email: 'admin@autopayment.com',
-        password: 'adminpassword123',
-        status: 'active',
-      }).catch(() => null);
+  // 3. Authoritative Ownership Resolution (Never leak stale merchant data to Admin devices)
+  const isDevAdmin = (devDoc && devDoc.ownerType === 'ADMIN') || (keyDoc && keyDoc.ownerType === 'ADMIN');
+  let finalOwnerType = isDevAdmin ? 'ADMIN' : 'MERCHANT';
+  let finalAdminId = null;
+  let finalMerchantId = null;
+  let finalBrandId = null;
+
+  if (isDevAdmin) {
+    finalOwnerType = 'ADMIN';
+    const Admin = require('../models/Admin');
+    const User = require('../models/User');
+    const defaultAdmin = (await Admin.findOne()) || (await User.findOne({ role: { $in: ['superadmin', 'admin'] } }));
+    finalAdminId = devDoc?.admin || keyDoc?.admin || defaultAdmin?._id || null;
+    finalMerchantId = null;
+    finalBrandId = devDoc?.brand || null;
+  } else {
+    finalOwnerType = 'MERCHANT';
+    finalMerchantId = devDoc?.merchant || keyDoc?.merchant || merchantId || null;
+    finalBrandId = devDoc?.brand || keyDoc?.brand || null;
+    finalAdminId = null;
+
+    // Only fallback for merchant devices if unresolved
+    if (!finalMerchantId) {
+      let defaultMerchant = await Merchant.findOne();
+      if (!defaultMerchant) {
+        defaultMerchant = await Merchant.create({
+          name: 'Auto Payment Gateway Merchant',
+          email: 'admin@autopayment.com',
+          password: 'adminpassword123',
+          status: 'active',
+        }).catch(() => null);
+      }
+      if (defaultMerchant) finalMerchantId = defaultMerchant._id;
     }
-    if (defaultMerchant) resolvedMerchantId = defaultMerchant._id;
   }
 
   const rawProvider = gateway || provider || 'bKash';
@@ -284,10 +302,31 @@ const processTransactionSync = async ({
         existing.evidenceUpdatedAt = new Date();
         existing.verificationReason = 'Correlated with official notification evidence';
         if (devDoc && !existing.device) existing.device = devDoc._id;
-        if (resolvedMerchantId && !existing.merchant) existing.merchant = resolvedMerchantId;
+        if (finalOwnerType === 'ADMIN') {
+          existing.ownerType = 'ADMIN';
+          existing.admin = finalAdminId || existing.admin;
+          existing.merchant = null;
+        } else {
+          existing.ownerType = 'MERCHANT';
+          if (finalMerchantId && !existing.merchant) existing.merchant = finalMerchantId;
+        }
         await existing.save();
 
-        emitPaymentUpdated(existing.merchant, {
+        if (existing.merchant) {
+          emitPaymentUpdated(existing.merchant, {
+            _id: existing._id,
+            id: existing._id,
+            gateway: existing.gateway,
+            provider: existing.provider,
+            transactionId: existing.transactionId,
+            amount: existing.amount,
+            sender: existing.sender,
+            status: existing.status,
+            verificationState: existing.verificationState,
+            updatedAt: existing.updatedAt,
+          });
+        }
+        emitPaymentUpdated('admin', {
           _id: existing._id,
           id: existing._id,
           gateway: existing.gateway,
@@ -297,6 +336,7 @@ const processTransactionSync = async ({
           sender: existing.sender,
           status: existing.status,
           verificationState: existing.verificationState,
+          ownerType: existing.ownerType,
           updatedAt: existing.updatedAt,
         });
 
@@ -319,12 +359,14 @@ const processTransactionSync = async ({
         existing.verificationReason = 'Mismatched amount or provider between notification and SMS';
         await existing.save();
 
-        emitPaymentUpdated(existing.merchant, {
-          _id: existing._id,
-          transactionId: existing.transactionId,
-          status: existing.status,
-          verificationState: existing.verificationState,
-        });
+        if (existing.merchant) {
+          emitPaymentUpdated(existing.merchant, {
+            _id: existing._id,
+            transactionId: existing.transactionId,
+            status: existing.status,
+            verificationState: existing.verificationState,
+          });
+        }
 
         logger.warn(`[Payment Mismatch Alert] TxID: ${txId} flagged as MISMATCH_SUSPICIOUS`);
         return {
@@ -358,13 +400,30 @@ const processTransactionSync = async ({
           existing.rawBody = selectedSms;
         }
         existing.verificationReason = 'Correlated with SMS evidence';
+        if (finalOwnerType === 'ADMIN') {
+          existing.ownerType = 'ADMIN';
+          existing.admin = finalAdminId || existing.admin;
+          existing.merchant = null;
+        } else if (finalMerchantId && !existing.merchant) {
+          existing.ownerType = 'MERCHANT';
+          existing.merchant = finalMerchantId;
+        }
         await existing.save();
 
-        emitPaymentUpdated(existing.merchant, {
+        if (existing.merchant) {
+          emitPaymentUpdated(existing.merchant, {
+            _id: existing._id,
+            transactionId: existing.transactionId,
+            status: existing.status,
+            verificationState: existing.verificationState,
+          });
+        }
+        emitPaymentUpdated('admin', {
           _id: existing._id,
           transactionId: existing.transactionId,
           status: existing.status,
           verificationState: existing.verificationState,
+          ownerType: existing.ownerType,
         });
 
         logger.info(`[Payment Correlation] Upgraded ${existing.transactionId} from NOTIFICATION_ONLY to CORRELATED_MATCH`);
@@ -391,7 +450,10 @@ const processTransactionSync = async ({
 
   // 4. Save into MongoDB
   const payment = await Payment.create({
-    merchant: resolvedMerchantId || null,
+    ownerType: finalOwnerType,
+    admin: finalAdminId,
+    merchant: finalMerchantId,
+    brand: finalBrandId,
     device: devDoc ? devDoc._id : null,
     deviceId: deviceId || (devDoc ? devDoc.androidId : ''),
     activationKey: activationKey || (keyDoc ? keyDoc.key : ''),
@@ -426,7 +488,7 @@ const processTransactionSync = async ({
     await SyncLog.create({
       payment: payment._id,
       device: devDoc._id,
-      merchant: resolvedMerchantId,
+      merchant: finalMerchantId,
       syncStatus: 'SUCCESS',
       responseCode: 200,
       responseBody: 'Sync success',
@@ -455,12 +517,15 @@ const processTransactionSync = async ({
     createdAt: payment.createdAt,
   };
 
-  emitPaymentCreated(resolvedMerchantId ? resolvedMerchantId.toString() : null, eventPayload);
+  if (finalMerchantId) {
+    emitPaymentCreated(finalMerchantId.toString(), eventPayload);
+  }
+  emitPaymentCreated('admin', { ...eventPayload, ownerType: finalOwnerType });
 
   // 6. Record Customer payment details asynchronously
-  if (resolvedMerchantId) {
+  if (finalMerchantId) {
     recordCustomerPayment({
-      merchantId: resolvedMerchantId,
+      merchantId: finalMerchantId,
       brandId: payment.brand || null,
       phone: payment.sender || payment.phone || payment.senderPhone || payment.accountNumber,
       amount: payment.amount,
@@ -473,7 +538,7 @@ const processTransactionSync = async ({
     const { matchAndVerifyLivePayment } = require('./livePaymentSession.service');
     const liveMatchResult = await matchAndVerifyLivePayment({
       payment,
-      merchantId: resolvedMerchantId,
+      merchantId: finalMerchantId,
     });
     if (liveMatchResult && liveMatchResult.matched) {
       payment.status = 'VERIFIED';
@@ -594,6 +659,7 @@ const getPayments = async ({ merchantId, brandId, isSuperAdmin = false, provider
     } else {
       query.merchant = merchantId;
     }
+    query.ownerType = { $ne: 'ADMIN' };
   } else if (merchantId) {
     query.merchant = merchantId;
   }
@@ -621,11 +687,10 @@ const getPayments = async ({ merchantId, brandId, isSuperAdmin = false, provider
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit))
-      .populate('device', 'deviceModel androidId deviceBrand')
+      .populate('device', 'deviceModel androidId deviceBrand ownerType')
       .populate('brand', 'name slug logo status'),
     Payment.countDocuments(query),
   ]);
-
 
   return {
     payments,
@@ -651,6 +716,7 @@ const verifyOrUpdatePaymentStatus = async ({ paymentId, trxId, merchantId, statu
   if (!isSuperAdmin) {
     if (!merchantId) throw new ApiError(403, 'Tenant context missing');
     query.merchant = merchantId;
+    query.ownerType = { $ne: 'ADMIN' };
   }
 
   const payment = await Payment.findOne(query);
@@ -663,6 +729,8 @@ const verifyOrUpdatePaymentStatus = async ({ paymentId, trxId, merchantId, statu
   payment.paymentStatus = normStatus;
   if (normStatus === 'VERIFIED') {
     payment.verificationState = 'VERIFIED';
+    payment.isUsed = true;
+    payment.usedAt = new Date();
   }
   await payment.save();
 
@@ -680,7 +748,9 @@ const verifyOrUpdatePaymentStatus = async ({ paymentId, trxId, merchantId, statu
     updatedAt: payment.updatedAt,
   };
 
-  emitPaymentUpdated(payment.merchant, eventPayload);
+  if (payment.merchant) {
+    emitPaymentUpdated(payment.merchant, eventPayload);
+  }
 
   return payment;
 };
@@ -696,73 +766,113 @@ const verifyCustomerCheckoutPayment = async ({
   customerName,
 }) => {
   if (!trxId || !trxId.trim()) {
-    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.', [], '', {
+      code: 'TRANSACTION_NOT_FOUND',
+      userMessage: 'Transaction ID is incorrect. We could not find a matching payment. Please check your Transaction ID and try again.',
+    });
+  }
+
+  if (!merchantId) {
+    throw new ApiError(400, 'Merchant context is required for checkout verification.', [], '', {
+      code: 'MERCHANT_REQUIRED',
+      userMessage: 'Payment account context is missing.',
+    });
   }
 
   const cleanTrx = trxId.trim();
   const targetProvider = (provider || gateway || '').toLowerCase().trim();
 
-  const query = {
+  // Find transaction across database by transactionId
+  const payment = await Payment.findOne({
     transactionId: { $regex: new RegExp(`^${cleanTrx}$`, 'i') },
-  };
+  }).sort({ updatedAt: -1, createdAt: -1 });
 
-  if (merchantId && mongoose.Types.ObjectId.isValid(merchantId)) {
-    query.merchant = merchantId;
-  }
-
-  const payment = await Payment.findOne(query).sort({ updatedAt: -1, createdAt: -1 });
   if (!payment) {
-    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.', [], '', {
+      code: 'TRANSACTION_NOT_FOUND',
+      userMessage: 'Transaction ID is incorrect. We could not find a matching payment. Please check your Transaction ID and try again.',
+    });
   }
 
-  // 2. Correct merchant/tenant check
-  if (merchantId && payment.merchant && payment.merchant.toString() !== merchantId.toString()) {
-    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+  // 1. ADMIN TO MERCHANT ISOLATION: Admin/Platform transactions can NEVER be consumed by a merchant checkout
+  if (payment.ownerType === 'ADMIN' || (!payment.merchant && payment.admin)) {
+    throw new ApiError(400, 'This transaction does not belong to this payment account.', [], '', {
+      code: 'TRANSACTION_OWNER_MISMATCH',
+      userMessage: 'This transaction does not belong to this payment account.',
+    });
   }
 
-  // 2b. Correct brand isolation check (payment already claimed by another brand cannot be verified)
+  // 2. MERCHANT TO MERCHANT ISOLATION: Merchant A cannot consume Merchant B's transaction
+  if (!payment.merchant || payment.merchant.toString() !== merchantId.toString()) {
+    throw new ApiError(400, 'This transaction does not belong to this payment account.', [], '', {
+      code: 'TRANSACTION_OWNER_MISMATCH',
+      userMessage: 'This transaction does not belong to this payment account.',
+    });
+  }
+
+  // 3. BRAND ISOLATION: Payment already claimed by another brand cannot be verified
   if (brandId && payment.brand && payment.brand.toString() !== brandId.toString()) {
-    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+    throw new ApiError(400, 'This transaction does not belong to this payment account.', [], '', {
+      code: 'TRANSACTION_OWNER_MISMATCH',
+      userMessage: 'This transaction does not belong to this payment account.',
+    });
   }
 
-  // 3. Correct provider
+  // 4. Correct Provider Check
   if (targetProvider) {
     const payProvider = (payment.provider || payment.gateway || '').toLowerCase().trim();
     if (payProvider !== targetProvider) {
-      throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+      throw new ApiError(400, 'Payment provider mismatch for this transaction.', [], '', {
+        code: 'PAYMENT_PROVIDER_MISMATCH',
+        userMessage: 'Payment provider mismatch. Please ensure you selected the correct payment method.',
+      });
     }
   }
 
-  // 4. Evidence Security & State Validation
+  // 5. Evidence Security & State Validation
   if (
     payment.verificationState === 'MISMATCH_SUSPICIOUS' ||
     payment.status === 'REJECTED' ||
     payment.isSuspicious
   ) {
-    throw new ApiError(400, 'Transaction ID flagged as suspicious evidence and cannot be verified.');
+    throw new ApiError(400, 'Transaction ID flagged as suspicious evidence and cannot be verified.', [], '', {
+      code: 'TRANSACTION_INVALID',
+      userMessage: 'This transaction has been flagged and cannot be verified.',
+    });
   }
 
-  // 5. Payment completed/successful status check
+  // 6. Payment completed/successful status check
   const validStatuses = ['COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'VERIFIED', 'PENDING_VERIFICATION', 'PENDING'];
   if (!validStatuses.includes((payment.status || '').toUpperCase())) {
-    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+    throw new ApiError(400, 'Transaction status is not eligible for verification.', [], '', {
+      code: 'TRANSACTION_INVALID',
+      userMessage: 'This transaction cannot be verified at this time.',
+    });
   }
 
-  // 6. Correct amount matching (authoritative)
+  // 7. Correct amount matching (authoritative)
   if (amount && Number(amount) > 0) {
     if (payment.amount < Number(amount)) {
-      throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+      throw new ApiError(400, 'The payment amount does not match the required amount.', [], '', {
+        code: 'TRANSACTION_AMOUNT_MISMATCH',
+        userMessage: 'The payment amount does not match the required amount.',
+      });
     }
   }
 
-  // 7. Transaction has not already been used
+  // 8. Transaction Replay Protection (Payment not already consumed/used)
   if (payment.isUsed || payment.status === 'USED' || payment.status === 'CLAIMED') {
-    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+    throw new ApiError(400, 'This transaction has already been used for another order.', [], '', {
+      code: 'TRANSACTION_ALREADY_USED',
+      userMessage: 'This transaction has already been used for another order.',
+    });
   }
 
   // Mark as verified & used atomically to prevent concurrent race conditions
   const claimFilter = {
     _id: payment._id,
+    ownerType: { $ne: 'ADMIN' },
+    merchant: merchantId,
     isUsed: { $ne: true },
     status: { $nin: ['USED', 'CLAIMED', 'REJECTED'] },
     verificationState: { $nin: ['MISMATCH_SUSPICIOUS'] },
@@ -789,18 +899,22 @@ const verifyCustomerCheckoutPayment = async ({
     { new: true }
   );
 
-
   if (!claimedPayment) {
-    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.');
+    throw new ApiError(400, 'This transaction has already been used for another order.', [], '', {
+      code: 'TRANSACTION_ALREADY_USED',
+      userMessage: 'This transaction has already been used for another order.',
+    });
   }
 
-  emitPaymentUpdated(claimedPayment.merchant, {
-    _id: claimedPayment._id,
-    transactionId: claimedPayment.transactionId,
-    status: claimedPayment.status,
-    verificationState: claimedPayment.verificationState,
-    amount: claimedPayment.amount,
-  });
+  if (claimedPayment.merchant) {
+    emitPaymentUpdated(claimedPayment.merchant, {
+      _id: claimedPayment._id,
+      transactionId: claimedPayment.transactionId,
+      status: claimedPayment.status,
+      verificationState: claimedPayment.verificationState,
+      amount: claimedPayment.amount,
+    });
+  }
 
   return claimedPayment;
 };
