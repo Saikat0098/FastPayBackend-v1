@@ -55,16 +55,19 @@ const androidActivate = asyncHandler(async (req, res) => {
     fcmToken,
   });
 
-  const merchant = await Merchant.findById(device.merchant || keyDoc.merchant).select('name companyName apiKey');
+  const merchant = (device.merchant || keyDoc.merchant)
+    ? await Merchant.findById(device.merchant || keyDoc.merchant).select('name companyName apiKey')
+    : null;
 
   const token = generateAccessToken({
     id: device._id,
     androidId: device.androidId,
-    merchantId: device.merchant,
+    merchantId: device.merchant || null,
+    ownerType: device.ownerType || 'MERCHANT',
     role: 'device',
   });
 
-  const merchantId = merchant?._id || device.merchant;
+  const merchantId = merchant?._id || device.merchant || null;
 
   if (merchantId) {
     emitDeviceEvent(merchantId, 'device:activated', device);
@@ -73,15 +76,21 @@ const androidActivate = asyncHandler(async (req, res) => {
     emitDeviceEvent(merchantId, 'deviceConnected', device);
     emitDeviceEvent(merchantId, 'device:updated', device);
   }
+  emitDeviceEvent('all', 'device:activated', device);
+  emitDeviceEvent('all', 'device:connected', device);
 
-  logger.info(`[API Android Activate] Key: ${activationKey}, AndroidId: ${androidId}, Brand: ${device.deviceBrand}, Model: ${device.deviceModel}, Merchant: ${merchantId}`);
+  const cleanKeyStr = (activationKey || '').toString().trim().toUpperCase();
+  const maskedKeyLog = cleanKeyStr.length >= 8 ? `${cleanKeyStr.slice(0, 6)}••••${cleanKeyStr.slice(-4)}` : '••••';
+  logger.info(`[API Android Activate] Key: ${maskedKeyLog}, AndroidId: ${androidId}, Brand: ${device.deviceBrand}, Model: ${device.deviceModel}, Owner: ${device.ownerType}`);
 
   return res.status(200).json({
     success: true,
     message: 'Device activated successfully',
+    userMessage: 'Device activated successfully',
     token,
-    merchantId: merchant?._id || device.merchant,
-    merchantName: merchant?.companyName || merchant?.name || 'Merchant Gateway',
+    accessToken: token,
+    merchantId: merchant?._id || device.merchant || null,
+    merchantName: merchant?.companyName || merchant?.name || (device.ownerType === 'ADMIN' ? 'FastPay Admin Gateway' : 'Merchant Gateway'),
     apiKey: merchant?.apiKey || '',
     expireDate: keyDoc.expireDate,
     deviceId: device._id,
@@ -93,9 +102,10 @@ const androidActivate = asyncHandler(async (req, res) => {
     status: device.status,
     isOnline: device.isOnline,
     lastOnline: device.lastOnline,
+    ownerType: device.ownerType,
     device: {
-      id: device._id,
-      _id: device._id,
+      id: device._id.toString(),
+      _id: device._id.toString(),
       androidId: device.androidId,
       deviceBrand: device.deviceBrand,
       deviceModel: device.deviceModel,
@@ -104,6 +114,7 @@ const androidActivate = asyncHandler(async (req, res) => {
       status: device.status,
       isOnline: device.isOnline,
       lastOnline: device.lastOnline,
+      ownerType: device.ownerType,
     },
   });
 });

@@ -7,6 +7,7 @@ const Brand = require('../models/Brand');
 const Payment = require('../models/Payment');
 const PaymentMethod = require('../models/PaymentMethod');
 const ApiError = require('../utils/apiError');
+const auditService = require('./audit.service');
 const logger = require('../config/logger');
 
 /**
@@ -462,11 +463,97 @@ const upgradeMerchantSubscription = async ({
   if (!paymentRecord) {
     const err = new ApiError(400, 'Transaction ID is incorrect. No matching payment found. Please verify your payment and try again.');
     err.code = 'INVALID_TRANSACTION';
+    await auditService.logAction({
+      userId: mId,
+      userType: 'merchant',
+      action: 'ADMIN_PLAN_PAYMENT_REJECTED',
+      details: { transactionId: cleanTrxId, reason: 'TRANSACTION_NOT_FOUND', plan: targetPlan.name, isUpgrade: true },
+    }).catch(() => {});
+    throw err;
+  }
+
+  // 3.1 Authoritative Admin Device Ownership Verification
+  let sourceDevice = null;
+  if (paymentRecord.device) {
+    sourceDevice = await Device.findById(paymentRecord.device).populate('activationKey');
+  } else if (paymentRecord.deviceId) {
+    const isMongoId = mongoose.Types.ObjectId.isValid(paymentRecord.deviceId);
+    sourceDevice = await Device.findOne({
+      $or: [
+        { androidId: paymentRecord.deviceId },
+        ...(isMongoId ? [{ _id: paymentRecord.deviceId }] : []),
+      ],
+    }).populate('activationKey');
+  }
+
+  const isSourceAdmin = sourceDevice && sourceDevice.ownerType === 'ADMIN';
+  const hasActiveAdminActivation = isSourceAdmin && sourceDevice.status === 'ACTIVE' && sourceDevice.activationKey && sourceDevice.activationKey.ownerType === 'ADMIN' && sourceDevice.activationKey.status === 'ACTIVE';
+
+  if (!sourceDevice) {
+    await auditService.logAction({
+      userId: mId,
+      userType: 'merchant',
+      action: 'ADMIN_PLAN_PAYMENT_REJECTED',
+      details: { transactionId: cleanTrxId, reason: 'DEVICE_NOT_FOUND', plan: targetPlan.name, isUpgrade: true },
+    }).catch(() => {});
+    const err = new ApiError(400, 'Payment source device not recognized or unauthorized for plan purchases.');
+    err.code = 'PAYMENT_SOURCE_NOT_AUTHORIZED_FOR_PLAN_PURCHASE';
+    throw err;
+  }
+
+  if (sourceDevice.ownerType === 'MERCHANT' || !isSourceAdmin) {
+    await auditService.logAction({
+      userId: mId,
+      userType: 'merchant',
+      action: 'ADMIN_PLAN_PAYMENT_REJECTED',
+      details: {
+        transactionId: cleanTrxId,
+        reason: 'MERCHANT_DEVICE_NOT_ALLOWED',
+        deviceId: sourceDevice._id,
+        androidId: sourceDevice.androidId,
+        plan: targetPlan.name,
+        isUpgrade: true,
+      },
+    }).catch(() => {});
+    const err = new ApiError(400, 'Payment source is not authorized for plan purchases. Transactions from merchant devices cannot be used to activate FastPay subscriptions.');
+    err.code = 'PAYMENT_SOURCE_NOT_AUTHORIZED_FOR_PLAN_PURCHASE';
+    throw err;
+  }
+
+  if (!hasActiveAdminActivation) {
+    await auditService.logAction({
+      userId: mId,
+      userType: 'merchant',
+      action: 'ADMIN_PLAN_PAYMENT_REJECTED',
+      details: {
+        transactionId: cleanTrxId,
+        reason: 'INVALID_ADMIN_ACTIVATION',
+        deviceId: sourceDevice._id,
+        androidId: sourceDevice.androidId,
+        plan: targetPlan.name,
+        isUpgrade: true,
+      },
+    }).catch(() => {});
+    const err = new ApiError(400, 'The Admin payment gateway device does not have an active activation.');
+    err.code = 'INVALID_ADMIN_ACTIVATION';
     throw err;
   }
 
   // 4. Verify Payment Amount matches difference
   if ((paymentRecord.amount || 0) < quote.priceDifference) {
+    await auditService.logAction({
+      userId: mId,
+      userType: 'merchant',
+      action: 'ADMIN_PLAN_PAYMENT_REJECTED',
+      details: {
+        transactionId: cleanTrxId,
+        reason: 'AMOUNT_MISMATCH',
+        expectedAmount: quote.priceDifference,
+        actualAmount: paymentRecord.amount || 0,
+        plan: targetPlan.name,
+        isUpgrade: true,
+      },
+    }).catch(() => {});
     const err = new ApiError(
       400,
       `Payment amount (৳${paymentRecord.amount || 0}) is less than the required upgrade difference (৳${quote.priceDifference}).`

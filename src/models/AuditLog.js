@@ -8,7 +8,7 @@ const auditLogSchema = new mongoose.Schema(
     },
     userType: {
       type: String,
-      enum: ['merchant', 'admin', 'device', 'system'],
+      enum: ['merchant', 'admin', 'device', 'system', 'user'],
       default: 'system',
     },
     action: {

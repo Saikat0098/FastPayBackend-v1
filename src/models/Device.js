@@ -12,10 +12,28 @@ const deviceSchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
+    ownerType: {
+      type: String,
+      enum: ['MERCHANT', 'ADMIN', null],
+      default: null,
+      index: true,
+    },
+    admin: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Admin',
+      default: null,
+      index: true,
+    },
     merchant: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Merchant',
-      required: true,
+      required: false,
+      default: null,
+    },
+    label: {
+      type: String,
+      default: '',
+      trim: true,
     },
     deviceModel: {
       type: String,

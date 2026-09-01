@@ -219,7 +219,9 @@ const createBrand = async ({
 };
 
 const getBrandsByMerchant = async (merchantId) => {
-  const query = merchantId ? { merchant: merchantId } : {};
+  const query = merchantId
+    ? { merchant: merchantId, ownerType: { $ne: 'ADMIN' } }
+    : { ownerType: { $ne: 'ADMIN' } };
   const brands = await Brand.find(query).sort({ createdAt: -1 });
 
   const processed = [];

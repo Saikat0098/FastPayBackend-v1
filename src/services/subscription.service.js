@@ -6,6 +6,8 @@ const Plan = require('../models/Plan');
 const Payment = require('../models/Payment');
 const PaymentMethod = require('../models/PaymentMethod');
 const MerchantApplication = require('../models/MerchantApplication');
+const Device = require('../models/Device');
+const auditService = require('./audit.service');
 const ApiError = require('../utils/apiError');
 const { v4: uuidv4 } = require('uuid');
 
@@ -282,6 +284,77 @@ const submitApplication = async ({
     if (!paymentRecord) {
       const err = new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment. Please check your Transaction ID and try again.');
       err.code = 'INVALID_TRANSACTION';
+      await auditService.logAction({
+        userId,
+        userType: 'user',
+        action: 'ADMIN_PLAN_PAYMENT_REJECTED',
+        details: { transactionId: cleanTrxId, reason: 'TRANSACTION_NOT_FOUND', plan: targetPlan.name },
+      }).catch(() => {});
+      throw err;
+    }
+
+    // 5.1 Authoritative Admin Device Ownership & Active Activation Verification
+    let sourceDevice = null;
+    if (paymentRecord.device) {
+      sourceDevice = await Device.findById(paymentRecord.device).populate('activationKey');
+    } else if (paymentRecord.deviceId) {
+      const isMongoId = mongoose.Types.ObjectId.isValid(paymentRecord.deviceId);
+      sourceDevice = await Device.findOne({
+        $or: [
+          { androidId: paymentRecord.deviceId },
+          ...(isMongoId ? [{ _id: paymentRecord.deviceId }] : []),
+        ],
+      }).populate('activationKey');
+    }
+
+    const isSourceAdmin = sourceDevice && sourceDevice.ownerType === 'ADMIN';
+    const hasActiveAdminActivation = isSourceAdmin && sourceDevice.status === 'ACTIVE' && sourceDevice.activationKey && sourceDevice.activationKey.ownerType === 'ADMIN' && sourceDevice.activationKey.status === 'ACTIVE';
+
+    if (!sourceDevice) {
+      await auditService.logAction({
+        userId,
+        userType: 'user',
+        action: 'ADMIN_PLAN_PAYMENT_REJECTED',
+        details: { transactionId: cleanTrxId, reason: 'DEVICE_NOT_FOUND', plan: targetPlan.name },
+      }).catch(() => {});
+      const err = new ApiError(400, 'Payment source device not recognized or unauthorized for plan purchases.');
+      err.code = 'PAYMENT_SOURCE_NOT_AUTHORIZED_FOR_PLAN_PURCHASE';
+      throw err;
+    }
+
+    if (sourceDevice.ownerType === 'MERCHANT' || !isSourceAdmin) {
+      await auditService.logAction({
+        userId,
+        userType: 'user',
+        action: 'ADMIN_PLAN_PAYMENT_REJECTED',
+        details: {
+          transactionId: cleanTrxId,
+          reason: 'MERCHANT_DEVICE_NOT_ALLOWED',
+          deviceId: sourceDevice._id,
+          androidId: sourceDevice.androidId,
+          plan: targetPlan.name,
+        },
+      }).catch(() => {});
+      const err = new ApiError(400, 'Payment source is not authorized for plan purchases. Transactions from merchant devices cannot be used to activate FastPay subscriptions.');
+      err.code = 'PAYMENT_SOURCE_NOT_AUTHORIZED_FOR_PLAN_PURCHASE';
+      throw err;
+    }
+
+    if (!hasActiveAdminActivation) {
+      await auditService.logAction({
+        userId,
+        userType: 'user',
+        action: 'ADMIN_PLAN_PAYMENT_REJECTED',
+        details: {
+          transactionId: cleanTrxId,
+          reason: 'INVALID_ADMIN_ACTIVATION',
+          deviceId: sourceDevice._id,
+          androidId: sourceDevice.androidId,
+          plan: targetPlan.name,
+        },
+      }).catch(() => {});
+      const err = new ApiError(400, 'The Admin payment gateway device does not have an active activation.');
+      err.code = 'INVALID_ADMIN_ACTIVATION';
       throw err;
     }
 
@@ -304,6 +377,18 @@ const submitApplication = async ({
 
     // 8. Check Payment Amount
     if ((paymentRecord.amount || 0) < expectedAmount) {
+      await auditService.logAction({
+        userId,
+        userType: 'user',
+        action: 'ADMIN_PLAN_PAYMENT_REJECTED',
+        details: {
+          transactionId: cleanTrxId,
+          reason: 'AMOUNT_MISMATCH',
+          expectedAmount,
+          actualAmount: paymentRecord.amount || 0,
+          plan: targetPlan.name,
+        },
+      }).catch(() => {});
       const err = new ApiError(400, 'The payment amount does not match the selected plan. Please make the correct payment and try again.');
       err.code = 'PAYMENT_AMOUNT_MISMATCH';
       throw err;
@@ -382,6 +467,19 @@ const submitApplication = async ({
     paymentRecord.isUsedForSubscription = true;
     paymentRecord.usedBySubscription = subscription._id;
     await paymentRecord.save().catch(() => {});
+
+    await auditService.logAction({
+      userId: user._id,
+      userType: 'merchant',
+      action: 'ADMIN_PLAN_PAYMENT_ACCEPTED',
+      details: {
+        subscriptionId: subscription._id,
+        plan: targetPlan.name,
+        amount: expectedAmount,
+        transactionId: finalTrxId,
+        paymentRecordId: paymentRecord._id,
+      },
+    }).catch(() => {});
   }
 
   const application = await MerchantApplication.create({

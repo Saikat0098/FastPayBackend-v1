@@ -343,9 +343,18 @@ const getAllTransactions = asyncHandler(async (req, res) => {
 });
 
 const getAllDevices = asyncHandler(async (req, res) => {
-  const { page, limit, status, search, merchantId } = req.query;
+  const { page, limit, status, search, merchantId, ownerType } = req.query;
 
   const query = {};
+
+  if (ownerType && ownerType.toUpperCase() === 'ADMIN') {
+    query.ownerType = 'ADMIN';
+  } else if (ownerType && ownerType.toUpperCase() === 'MERCHANT') {
+    query.$or = [{ ownerType: 'MERCHANT' }, { ownerType: { $exists: false } }, { ownerType: null }];
+  } else if (!ownerType) {
+    // Default to merchant devices if not specified for backward compatibility
+    query.$or = [{ ownerType: 'MERCHANT' }, { ownerType: { $exists: false } }, { ownerType: null }];
+  }
 
   // Status Filter
   if (status && status !== 'ALL') {
@@ -555,10 +564,16 @@ const resetDeviceActivation = asyncHandler(async (req, res) => {
     }
   }
 
-  // Invalidate activation on device, make available for re-activation
+  const previousMerchantId = device.merchant || (keyDoc ? keyDoc.merchant : null);
+  const previousAdminId = device.admin || (keyDoc ? keyDoc.admin : null);
+
+  // Invalidate activation on device, make available for re-activation (unbound state)
   device.activationKey = null;
   device.status = 'INACTIVE';
   device.isOnline = false;
+  device.ownerType = null;
+  device.merchant = null;
+  device.admin = null;
   await device.save();
 
   const maskedKeyStr = maskActivationKey(rawKey);
@@ -575,7 +590,7 @@ const resetDeviceActivation = asyncHandler(async (req, res) => {
       androidId: device.androidId,
       deviceModel: device.deviceModel,
       deviceBrand: device.deviceBrand,
-      merchantId: device.merchant,
+      merchantId: previousMerchantId,
       brandId: brandId,
       activationKeyId: currentKeyId || null,
       maskedActivationKey: maskedKeyStr,
@@ -607,6 +622,294 @@ const resetDeviceActivation = asyncHandler(async (req, res) => {
   populatedDevice.brand = null;
 
   return ApiResponse.success(res, populatedDevice, 'Device activation reset successfully. Device is now eligible for a new activation.');
+});
+
+// Admin-Owned Connected Devices & Activation Key Controllers
+const getAdminConnectedDevices = asyncHandler(async (req, res) => {
+  const { page, limit, status, search } = req.query;
+
+  const query = { ownerType: 'ADMIN' };
+
+  // Status Filter
+  if (status && status !== 'ALL') {
+    const upperStatus = status.toUpperCase();
+    if (upperStatus === 'ONLINE') {
+      query.isOnline = true;
+      query.isBlocked = false;
+    } else if (upperStatus === 'OFFLINE') {
+      query.$or = [{ isOnline: false }, { status: 'OFFLINE' }, { status: 'DISCONNECTED' }];
+    } else if (upperStatus === 'BLOCKED') {
+      query.isBlocked = true;
+    } else if (upperStatus === 'ACTIVE') {
+      query.status = 'ACTIVE';
+      query.isBlocked = false;
+      query.activationKey = { $ne: null };
+    } else if (upperStatus === 'INACTIVE' || upperStatus === 'AVAILABLE') {
+      query.$or = [
+        { status: 'INACTIVE' },
+        { activationKey: null },
+      ];
+    } else {
+      query.status = upperStatus;
+    }
+  }
+
+  // Search Filter
+  if (search && search.trim()) {
+    const s = search.trim();
+    const regex = new RegExp(s, 'i');
+
+    const matchingKeys = await ActivationKey.find({
+      ownerType: 'ADMIN',
+      $or: [{ key: regex }, { label: regex }, { note: regex }],
+    }).select('_id');
+    const kIds = matchingKeys.map((k) => k._id);
+
+    query.$and = [
+      {
+        $or: [
+          { label: regex },
+          { androidId: regex },
+          { deviceId: regex },
+          { deviceModel: regex },
+          { deviceBrand: regex },
+          ...(kIds.length > 0 ? [{ activationKey: { $in: kIds } }] : []),
+        ],
+      },
+    ];
+  }
+
+  const isPaginationRequested = Boolean(page || limit);
+  const pageNum = parseInt(page) || 1;
+  const limitNum = parseInt(limit) || 50;
+
+  let queryBuilder = Device.find(query)
+    .populate('admin', 'name email role')
+    .populate({
+      path: 'activationKey',
+      select: 'key label note status plan expireDate activationTime createdAt isUsed ownerType',
+    })
+    .sort({ updatedAt: -1 });
+
+  let total = 0;
+  if (isPaginationRequested) {
+    total = await Device.countDocuments(query);
+    queryBuilder = queryBuilder.skip((pageNum - 1) * limitNum).limit(limitNum);
+  }
+
+  const devices = await queryBuilder;
+
+  const formattedDevices = devices.map((dev) => {
+    const devObj = dev.toObject();
+    if (devObj.activationKey) {
+      devObj.rawKeyMasked = maskActivationKey(devObj.activationKey.key);
+      devObj.maskedKey = maskActivationKey(devObj.activationKey.key);
+      devObj.activationKey.key = maskActivationKey(devObj.activationKey.key);
+      devObj.activationKey.maskedKey = devObj.rawKeyMasked;
+    } else {
+      devObj.maskedKey = null;
+    }
+    return devObj;
+  });
+
+  if (isPaginationRequested) {
+    return ApiResponse.success(
+      res,
+      {
+        devices: formattedDevices,
+        pagination: {
+          total,
+          page: pageNum,
+          limit: limitNum,
+          pages: Math.ceil(total / limitNum),
+        },
+      },
+      'Admin connected devices list'
+    );
+  }
+
+  return ApiResponse.success(res, formattedDevices, 'Admin connected devices list');
+});
+
+const createAdminDeviceActivationKey = asyncHandler(async (req, res) => {
+  const { label, note, durationDays = 365, plan = 'starter' } = req.body;
+  const adminUser = req.admin || req.user;
+  const adminId = adminUser?._id || adminUser?.id;
+
+  const { generateAdminKeyString } = require('../services/activation.service');
+  let keyString = generateAdminKeyString();
+  while (await ActivationKey.findOne({ key: keyString })) {
+    keyString = generateAdminKeyString();
+  }
+  const expireDate = new Date();
+  expireDate.setDate(expireDate.getDate() + (Number(durationDays) || 365));
+
+  const activationKey = await ActivationKey.create({
+    key: keyString,
+    ownerType: 'ADMIN',
+    admin: adminId,
+    merchant: null,
+    brand: null,
+    label: (label || '').trim(),
+    note: (note || '').trim(),
+    plan: (plan || 'starter').toLowerCase(),
+    maxDevices: 1,
+    durationDays: Number(durationDays) || 365,
+    expireDate,
+    status: 'AVAILABLE',
+    isUsed: false,
+  });
+
+  await auditService.logAction({
+    userId: adminId,
+    userType: 'admin',
+    action: 'ADMIN_ACTIVATION_CREATED',
+    req,
+    details: {
+      activationKeyId: activationKey._id,
+      maskedActivationKey: maskActivationKey(keyString),
+      label: label || '',
+      note: note || '',
+      durationDays: Number(durationDays) || 365,
+      expireDate,
+    },
+  });
+
+  logger.info(`[Admin Activation Key] Created Admin activation key for admin ${adminId}. Key: ${maskActivationKey(keyString)}`);
+
+  return ApiResponse.success(
+    res,
+    {
+      ...activationKey.toObject(),
+      rawKey: keyString,
+      maskedKey: maskActivationKey(keyString),
+    },
+    'Admin activation key generated successfully',
+    201
+  );
+});
+
+const getAdminConnectedDeviceById = asyncHandler(async (req, res) => {
+  const { deviceId } = req.params;
+  const dIdStr = deviceId ? deviceId.toString() : '';
+  const isMongoId = mongoose.Types.ObjectId.isValid(dIdStr);
+
+  const device = await Device.findOne({
+    ownerType: 'ADMIN',
+    $or: [
+      ...(isMongoId ? [{ _id: dIdStr }] : []),
+      { androidId: dIdStr },
+      { deviceId: dIdStr },
+    ],
+  })
+    .populate('admin', 'name email role')
+    .populate('activationKey');
+
+  if (!device) {
+    throw new ApiError(404, 'Admin device not found');
+  }
+
+  const devObj = device.toObject();
+  if (devObj.activationKey) {
+    devObj.rawKeyMasked = maskActivationKey(devObj.activationKey.key);
+    devObj.maskedKey = maskActivationKey(devObj.activationKey.key);
+    devObj.activationKey.key = maskActivationKey(devObj.activationKey.key);
+    devObj.activationKey.maskedKey = devObj.rawKeyMasked;
+  } else {
+    devObj.maskedKey = null;
+  }
+
+  return ApiResponse.success(res, devObj, 'Admin device details retrieved successfully');
+});
+
+const resetAdminConnectedDeviceActivation = asyncHandler(async (req, res) => {
+  const { deviceId } = req.params;
+  const { reason } = req.body || {};
+  const dIdStr = deviceId ? deviceId.toString() : '';
+  const isMongoId = mongoose.Types.ObjectId.isValid(dIdStr);
+
+  const device = await Device.findOne({
+    ownerType: 'ADMIN',
+    $or: [
+      ...(isMongoId ? [{ _id: dIdStr }] : []),
+      { androidId: dIdStr },
+      { deviceId: dIdStr },
+    ],
+  }).populate('activationKey');
+
+  if (!device) {
+    throw new ApiError(404, 'Admin device not found');
+  }
+
+  const currentKeyId = device.activationKey?._id || device.activationKey;
+  const previousStatus = device.status;
+  const hasActiveActivation = Boolean(currentKeyId || device.status === 'ACTIVE');
+
+  if (!hasActiveActivation && !currentKeyId) {
+    throw new ApiError(400, 'Admin device has no active activation to reset');
+  }
+
+  let rawKey = '';
+  let keyDoc = null;
+
+  if (currentKeyId) {
+    keyDoc = await ActivationKey.findById(currentKeyId);
+    if (keyDoc) {
+      rawKey = keyDoc.key || '';
+      keyDoc.isUsed = false;
+      keyDoc.status = 'REVOKED';
+      keyDoc.usedByDevice = null;
+      keyDoc.activationTime = null;
+      await keyDoc.save();
+    }
+  }
+
+  const previousAdminId = device.admin || (keyDoc ? keyDoc.admin : null);
+
+  device.activationKey = null;
+  device.status = 'INACTIVE';
+  device.isOnline = false;
+  device.ownerType = null;
+  device.merchant = null;
+  device.admin = null;
+  await device.save();
+
+  const maskedKeyStr = maskActivationKey(rawKey);
+  const adminId = req.admin?._id || req.user?.id || req.user?._id || null;
+
+  await auditService.logAction({
+    userId: adminId,
+    userType: 'admin',
+    action: 'ADMIN_ACTIVATION_RESET',
+    req,
+    details: {
+      deviceId: device._id,
+      androidId: device.androidId,
+      deviceModel: device.deviceModel,
+      deviceBrand: device.deviceBrand,
+      adminId: previousAdminId,
+      activationKeyId: currentKeyId || null,
+      maskedActivationKey: maskedKeyStr,
+      previousStatus: previousStatus,
+      resultingStatus: 'INACTIVE',
+      reason: (reason || 'Admin device activation reset').trim(),
+      timestamp: new Date(),
+    },
+  });
+
+  const { emitDeviceEvent } = require('../socket/socketManager');
+  emitDeviceEvent('all', 'device:reset', device);
+  emitDeviceEvent('all', 'device:updated', device);
+
+  logger.info(`[Admin Reset Activation] Admin device ${device.androidId} reset by admin ${adminId}. Key: ${maskedKeyStr}`);
+
+  const populatedDevice = await Device.findById(device._id)
+    .populate('admin', 'name email role')
+    .lean();
+
+  populatedDevice.maskedKey = null;
+
+  return ApiResponse.success(res, populatedDevice, 'Admin device activation reset successfully. Device is now eligible for a new Admin activation key.');
 });
 
 const blockDevice = asyncHandler(async (req, res) => {
@@ -917,6 +1220,200 @@ const revealAdminBrandDoc = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, doc, 'Verification document unmasked');
 });
 
+// 13. Admin Platform Brand Management (Platform-Owned Brands)
+const getAdminPlatformBrands = asyncHandler(async (req, res) => {
+  const { search, status } = req.query;
+  const query = { ownerType: 'ADMIN' };
+
+  if (status && status !== 'ALL') {
+    query.status = status.toUpperCase();
+  }
+
+  if (search && search.trim()) {
+    const s = search.trim();
+    query.$or = [
+      { name: new RegExp(s, 'i') },
+      { slug: new RegExp(s, 'i') },
+      { supportEmail: new RegExp(s, 'i') },
+    ];
+  }
+
+  const brands = await Brand.find(query)
+    .populate('admin', 'name email role')
+    .sort({ createdAt: -1 });
+
+  return ApiResponse.success(res, brands, 'Admin platform brands retrieved successfully');
+});
+
+const createAdminPlatformBrand = asyncHandler(async (req, res) => {
+  const {
+    name,
+    slug,
+    description,
+    websiteUrl,
+    logo,
+    supportEmail,
+    supportPhone,
+    whatsappNumber,
+    paymentSettings,
+    livePayment,
+  } = req.body;
+
+  if (!name || !name.trim()) {
+    throw new ApiError(400, 'Brand name is required');
+  }
+
+  const adminUser = req.admin || req.user;
+  const adminId = adminUser?._id || adminUser?.id;
+
+  const baseSlug = (slug || name)
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '');
+
+  let finalSlug = baseSlug || `admin-brand-${Date.now()}`;
+  let count = 1;
+  while (await Brand.findOne({ slug: finalSlug })) {
+    finalSlug = `${baseSlug}-${count++}`;
+  }
+
+  const brand = await Brand.create({
+    name: name.trim(),
+    slug: finalSlug,
+    description: (description || '').trim(),
+    websiteUrl: (websiteUrl || '').trim(),
+    logo: (logo || '').trim(),
+    supportEmail: (supportEmail || '').trim(),
+    supportPhone: (supportPhone || '').trim(),
+    whatsappNumber: (whatsappNumber || '').trim(),
+    paymentSettings: paymentSettings || {},
+    livePayment: livePayment || { enabled: false, gateways: [] },
+    ownerType: 'ADMIN',
+    admin: adminId,
+    merchant: null,
+    status: 'ACTIVE',
+    isActive: true,
+    submissionStatus: 'VERIFIED',
+    reviewStatus: 'APPROVED',
+  });
+
+  await auditService.logAction({
+    userId: adminId,
+    userType: 'admin',
+    action: 'ADMIN_BRAND_CREATED',
+    req,
+    details: {
+      brandId: brand._id,
+      name: brand.name,
+      slug: brand.slug,
+      ownerType: 'ADMIN',
+    },
+  });
+
+  logger.info(`[Admin Platform Brand] Created Admin brand ${brand.name} (${brand.slug}) by admin ${adminId}`);
+
+  return ApiResponse.success(res, brand, 'Admin platform brand created successfully', 201);
+});
+
+const getAdminPlatformBrandById = asyncHandler(async (req, res) => {
+  const brand = await Brand.findOne({ _id: req.params.id, ownerType: 'ADMIN' })
+    .populate('admin', 'name email role');
+
+  if (!brand) {
+    throw new ApiError(404, 'Admin platform brand not found');
+  }
+
+  return ApiResponse.success(res, brand, 'Admin platform brand retrieved successfully');
+});
+
+const updateAdminPlatformBrand = asyncHandler(async (req, res) => {
+  const brand = await Brand.findOne({ _id: req.params.id, ownerType: 'ADMIN' });
+  if (!brand) {
+    throw new ApiError(404, 'Admin platform brand not found');
+  }
+
+  const adminUser = req.admin || req.user;
+  const adminId = adminUser?._id || adminUser?.id;
+
+  const allowedFields = [
+    'name',
+    'description',
+    'websiteUrl',
+    'logo',
+    'supportEmail',
+    'supportPhone',
+    'whatsappNumber',
+    'supportPageUrl',
+    'facebookPage',
+    'telegramUsername',
+    'paymentSettings',
+    'livePayment',
+    'status',
+    'isActive',
+  ];
+
+  allowedFields.forEach((field) => {
+    if (req.body[field] !== undefined) {
+      brand[field] = req.body[field];
+    }
+  });
+
+  if (req.body.status) {
+    brand.isActive = req.body.status === 'ACTIVE';
+  }
+
+  await brand.save();
+
+  await auditService.logAction({
+    userId: adminId,
+    userType: 'admin',
+    action: 'ADMIN_BRAND_UPDATED',
+    req,
+    details: {
+      brandId: brand._id,
+      name: brand.name,
+      slug: brand.slug,
+    },
+  });
+
+  logger.info(`[Admin Platform Brand] Updated Admin brand ${brand.name} (${brand.slug}) by admin ${adminId}`);
+
+  return ApiResponse.success(res, brand, 'Admin platform brand updated successfully');
+});
+
+const toggleAdminPlatformBrandStatus = asyncHandler(async (req, res) => {
+  const brand = await Brand.findOne({ _id: req.params.id, ownerType: 'ADMIN' });
+  if (!brand) {
+    throw new ApiError(404, 'Admin platform brand not found');
+  }
+
+  const adminUser = req.admin || req.user;
+  const adminId = adminUser?._id || adminUser?.id;
+
+  const newStatus = brand.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
+  brand.status = newStatus;
+  brand.isActive = newStatus === 'ACTIVE';
+  await brand.save();
+
+  await auditService.logAction({
+    userId: adminId,
+    userType: 'admin',
+    action: 'ADMIN_BRAND_STATUS_CHANGED',
+    req,
+    details: {
+      brandId: brand._id,
+      name: brand.name,
+      newStatus,
+      isActive: brand.isActive,
+    },
+  });
+
+  logger.info(`[Admin Platform Brand] Toggled status of ${brand.name} to ${newStatus} by admin ${adminId}`);
+
+  return ApiResponse.success(res, brand, `Admin platform brand is now ${newStatus}`);
+});
+
 module.exports = {
   getAdminDashboard,
   getAllUsers,
@@ -934,6 +1431,11 @@ module.exports = {
   getAllDevices,
   getAdminDeviceById,
   resetDeviceActivation,
+  // Admin-Owned Connected Devices
+  getAdminConnectedDevices,
+  createAdminDeviceActivationKey,
+  getAdminConnectedDeviceById,
+  resetAdminConnectedDeviceActivation,
   blockDevice,
   unblockDevice,
   getAllActivationKeys,
@@ -954,6 +1456,12 @@ module.exports = {
   blockAdminBrand,
   unblockAdminBrand,
   revealAdminBrandDoc,
+  // Platform Brands (Admin-Owned)
+  getAdminPlatformBrands,
+  createAdminPlatformBrand,
+  getAdminPlatformBrandById,
+  updateAdminPlatformBrand,
+  toggleAdminPlatformBrandStatus,
 };
 
 

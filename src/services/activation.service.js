@@ -1,16 +1,30 @@
+const crypto = require('crypto');
+const mongoose = require('mongoose');
 const ActivationKey = require('../models/ActivationKey');
 const Device = require('../models/Device');
+const Brand = require('../models/Brand');
 const ApiError = require('../utils/apiError');
 const logger = require('../config/logger');
+const { checkBrandOperationalStatus } = require('../middlewares/brandGuard.middleware');
 
-const generateKeyString = () => {
-  const seg = () => Math.random().toString(36).substring(2, 6).toUpperCase();
-  return `SUB-${seg()}-${seg()}-${seg()}`;
+const CHARSET = '0123456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+
+const generateSecureCode = (len = 4) => {
+  const bytes = crypto.randomBytes(len);
+  let res = '';
+  for (let i = 0; i < len; i++) {
+    res += CHARSET[bytes[i] % CHARSET.length];
+  }
+  return res;
 };
 
-const Brand = require('../models/Brand');
-const { checkBrandOperationalStatus } = require('../middlewares/brandGuard.middleware');
-const mongoose = require('mongoose');
+const generateMerchantKeyString = () => {
+  return `FP-MER-${generateSecureCode(4)}-${generateSecureCode(4)}`;
+};
+
+const generateAdminKeyString = () => {
+  return `FP-ADM-${generateSecureCode(4)}-${generateSecureCode(4)}`;
+};
 
 const createActivationKey = async ({ merchantId, brandId }) => {
   const entitlementService = require('./entitlement.service');
@@ -37,9 +51,9 @@ const createActivationKey = async ({ merchantId, brandId }) => {
 
   await entitlementService.checkDeviceLimit(merchantId);
 
-  let keyString = generateKeyString();
+  let keyString = generateMerchantKeyString();
   while (await ActivationKey.findOne({ key: keyString })) {
-    keyString = generateKeyString();
+    keyString = generateMerchantKeyString();
   }
 
   // Key expiration is strictly derived from the merchant's subscription expireDate
@@ -49,6 +63,7 @@ const createActivationKey = async ({ merchantId, brandId }) => {
 
   const key = await ActivationKey.create({
     key: keyString,
+    ownerType: 'MERCHANT',
     merchant: merchantId,
     brand: resolvedBrand ? resolvedBrand._id : null,
     plan: normalizedPlan,
@@ -58,7 +73,6 @@ const createActivationKey = async ({ merchantId, brandId }) => {
 
   return await ActivationKey.findById(key._id).populate('brand', 'name slug logo status');
 };
-
 
 const activateDeviceWithKey = async ({
   keyString,
@@ -76,8 +90,13 @@ const activateDeviceWithKey = async ({
     });
   }
 
-  // 1. Device Identity & Block Check FIRST (CASE 2, CASE 5, CASE 6)
-  let device = await Device.findOne({ androidId });
+  const cleanAndroidId = androidId.toString().trim();
+  const cleanKey = keyString.toString().trim().toUpperCase();
+
+  // 1. Device Identity & Block Check FIRST
+  let device = await Device.findOne({
+    $or: [{ androidId: cleanAndroidId }, { deviceId: cleanAndroidId }],
+  });
 
   if (device && device.isBlocked) {
     if (device.blockedUntil && new Date() >= new Date(device.blockedUntil)) {
@@ -101,13 +120,19 @@ const activateDeviceWithKey = async ({
     }
   }
 
-  // 2. Validate Activation Key (CASE 3)
-  const cleanKey = keyString.trim().toUpperCase();
+  // 2. Validate Activation Key
   const keyDoc = await ActivationKey.findOne({ key: cleanKey });
-  if (!keyDoc || keyDoc.status === 'REVOKED') {
+  if (!keyDoc) {
     throw new ApiError(400, 'The activation key is invalid or unavailable.', [], '', {
       code: 'INVALID_ACTIVATION_KEY',
-      userMessage: 'This activation key is invalid or has already been used. Please check your key and try again.',
+      userMessage: 'This activation key is invalid. Please check your key and try again.',
+    });
+  }
+
+  if (keyDoc.status === 'REVOKED') {
+    throw new ApiError(400, 'This activation key has been revoked.', [], '', {
+      code: 'ACTIVATION_KEY_REVOKED',
+      userMessage: 'This activation key has been revoked. Please request a new activation key.',
     });
   }
 
@@ -115,12 +140,12 @@ const activateDeviceWithKey = async ({
     keyDoc.status = 'EXPIRED';
     await keyDoc.save().catch(() => {});
     throw new ApiError(400, 'The activation key has expired.', [], '', {
-      code: 'INVALID_ACTIVATION_KEY',
+      code: 'ACTIVATION_KEY_EXPIRED',
       userMessage: 'This activation key has expired. Please contact support to get a new activation key.',
     });
   }
 
-  // 3. Activation Key Belongs to ANOTHER Device (CASE 4)
+  // 3. Activation Key Belongs to ANOTHER Device
   if (keyDoc.isUsed && keyDoc.usedByDevice) {
     if (!device || device._id.toString() !== keyDoc.usedByDevice.toString()) {
       throw new ApiError(400, 'This activation key is already registered to another device.', [], '', {
@@ -130,21 +155,45 @@ const activateDeviceWithKey = async ({
     }
   }
 
-  // 4. Device is Already Registered and Active Under a DIFFERENT Key (CASE 1)
+  // 4. Device is Already Registered and Active Under a DIFFERENT Key (Only if currently active & bound)
   if (device && device.activationKey && device.status !== 'INACTIVE') {
     if (device.activationKey.toString() !== keyDoc._id.toString()) {
-      throw new ApiError(400, 'This Android device is already registered with an activation key.', [], '', {
-        code: 'DEVICE_ALREADY_ACTIVATED',
-        userMessage: 'This device is already activated. Please use the existing activation key associated with this device.',
+      throw new ApiError(400, 'This Android device is already registered with an active activation key.', [], '', {
+        code: 'DEVICE_ALREADY_ACTIVE',
+        userMessage: 'This device is already activated. Please reset it before using another activation key.',
       });
     }
   }
 
-  // 5. Device Limit Check for New Activations
-  const isNewDeviceForMerchant = !device || device.merchant.toString() !== keyDoc.merchant.toString() || device.status === 'INACTIVE';
-  if (isNewDeviceForMerchant) {
-    const entitlementService = require('./entitlement.service');
-    await entitlementService.checkDeviceLimit(keyDoc.merchant);
+  // 5. Device Limit & Owner Check
+  const isMerchantKey = keyDoc.ownerType === 'MERCHANT' || (!keyDoc.ownerType && keyDoc.merchant);
+  if (isMerchantKey) {
+    if (!keyDoc.merchant) {
+      throw new ApiError(400, 'Invalid merchant association for this activation key.', [], '', {
+        code: 'MERCHANT_ACTIVATION_INVALID',
+        userMessage: 'Merchant activation key is invalid.',
+      });
+    }
+    const isNewDeviceForMerchant = !device || !device.merchant || device.merchant.toString() !== keyDoc.merchant.toString() || device.status === 'INACTIVE';
+    if (isNewDeviceForMerchant) {
+      const entitlementService = require('./entitlement.service');
+      await entitlementService.checkDeviceLimit(keyDoc.merchant);
+    }
+  } else if (keyDoc.ownerType === 'ADMIN') {
+    if (!keyDoc.admin) {
+      const Admin = require('../models/Admin');
+      const User = require('../models/User');
+      const defaultAdmin = (await Admin.findOne()) || (await User.findOne({ role: { $in: ['superadmin', 'admin'] } }));
+      if (defaultAdmin) {
+        keyDoc.admin = defaultAdmin._id;
+        await keyDoc.save().catch(() => {});
+      } else {
+        throw new ApiError(400, 'Invalid admin association for this activation key.', [], '', {
+          code: 'ADMIN_ACTIVATION_INVALID',
+          userMessage: 'Admin activation key is invalid.',
+        });
+      }
+    }
   }
 
   // 6. If device was previously bound to another key, reset that old key
@@ -157,17 +206,24 @@ const activateDeviceWithKey = async ({
     });
   }
 
+  const targetOwnerType = keyDoc.ownerType || 'MERCHANT';
+
   if (!device) {
     device = new Device({
-      androidId,
-      merchant: keyDoc.merchant,
+      androidId: cleanAndroidId,
+      deviceId: cleanAndroidId,
+      ownerType: targetOwnerType,
+      admin: targetOwnerType === 'ADMIN' ? keyDoc.admin : null,
+      merchant: targetOwnerType === 'MERCHANT' ? keyDoc.merchant : null,
       activationKey: keyDoc._id,
     });
+  } else {
+    device.ownerType = targetOwnerType;
+    device.admin = targetOwnerType === 'ADMIN' ? keyDoc.admin : null;
+    device.merchant = targetOwnerType === 'MERCHANT' ? keyDoc.merchant : null;
+    device.activationKey = keyDoc._id;
+    device.deviceId = cleanAndroidId;
   }
-
-  device.merchant = keyDoc.merchant;
-  device.activationKey = keyDoc._id;
-  device.deviceId = androidId;
 
   device.deviceModel = deviceModel || device.deviceModel || 'Android Device';
   device.deviceBrand = deviceBrand || device.deviceBrand || 'Generic';
@@ -187,7 +243,12 @@ const activateDeviceWithKey = async ({
     await keyDoc.save();
   }
 
-  logger.info(`[Device Activation] Device ${androidId} (${device.deviceBrand} ${device.deviceModel}) activated and bound to merchant ${keyDoc.merchant}`);
+  const maskedKeyLog = cleanKey.length >= 8 ? `${cleanKey.slice(0, 6)}••••${cleanKey.slice(-4)}` : '••••';
+  if (targetOwnerType === 'ADMIN') {
+    logger.info(`[Device Activation] Admin Device ${cleanAndroidId} (${device.deviceBrand} ${device.deviceModel}) activated with key ${maskedKeyLog} bound to admin ${keyDoc.admin}`);
+  } else {
+    logger.info(`[Device Activation] Device ${cleanAndroidId} (${device.deviceBrand} ${device.deviceModel}) activated with key ${maskedKeyLog} bound to merchant ${keyDoc.merchant}`);
+  }
 
   return { device, keyDoc };
 };
@@ -199,7 +260,14 @@ const resetActivationKey = async (keyId) => {
   }
 
   if (keyDoc.usedByDevice) {
-    await Device.findByIdAndUpdate(keyDoc.usedByDevice, { status: 'INACTIVE' });
+    await Device.findByIdAndUpdate(keyDoc.usedByDevice, {
+      status: 'INACTIVE',
+      isOnline: false,
+      activationKey: null,
+      ownerType: null,
+      merchant: null,
+      admin: null,
+    });
   }
 
   keyDoc.isUsed = false;
@@ -213,7 +281,7 @@ const resetActivationKey = async (keyId) => {
 
 const getMerchantActivationKeys = async (merchantId, brandId) => {
   if (!merchantId) throw new ApiError(403, 'Tenant context missing');
-  const query = { merchant: merchantId };
+  const query = { merchant: merchantId, ownerType: { $ne: 'ADMIN' } };
   if (brandId && brandId !== 'ALL' && mongoose.Types.ObjectId.isValid(brandId)) {
     query.brand = brandId;
   }
@@ -224,9 +292,10 @@ const getMerchantActivationKeys = async (merchantId, brandId) => {
 };
 
 module.exports = {
+  generateMerchantKeyString,
+  generateAdminKeyString,
   createActivationKey,
   getMerchantActivationKeys,
   activateDeviceWithKey,
   resetActivationKey,
 };
-

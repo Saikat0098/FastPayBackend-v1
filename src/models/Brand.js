@@ -5,13 +5,35 @@ const brandSchema = new mongoose.Schema(
     merchant: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Merchant',
-      required: true,
+      required: false,
+      default: null,
+      index: true,
+    },
+    ownerType: {
+      type: String,
+      enum: ['MERCHANT', 'ADMIN'],
+      default: 'MERCHANT',
+      index: true,
+    },
+    admin: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Admin',
+      default: null,
       index: true,
     },
     name: {
       type: String,
       required: [true, 'Brand name is required'],
       trim: true,
+    },
+    description: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    isActive: {
+      type: Boolean,
+      default: true,
     },
     slug: {
       type: String,

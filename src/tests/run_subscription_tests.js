@@ -40,7 +40,7 @@ async function runSubscriptionTests() {
       throw new Error(`TEST 2 FAILED: Incorrect pricing values found! Starter: ${starter?.priceMonthly}, Pro: ${pro?.priceMonthly}`);
     }
 
-    // Create Test User
+    // Create Test User & Admin Device for official plan payment authorization
     const testEmail = `subuser_${Date.now()}@test.com`;
     const user = await User.create({
       name: 'Subscription Test User',
@@ -49,6 +49,39 @@ async function runSubscriptionTests() {
       role: 'USER',
     });
     console.log(`TEST 3: Created test user ${user._id} (${user.email}) -> ✅ PASS`);
+
+    const Admin = require('../models/Admin');
+    const Device = require('../models/Device');
+    const ActivationKey = require('../models/ActivationKey');
+
+    const adminUser = await Admin.create({
+      name: 'Admin Sub Tester',
+      email: `admin_sub_${Date.now()}@fastpay.test`,
+      password: 'password123',
+      role: 'superadmin',
+    });
+
+    const adminKey = await ActivationKey.create({
+      key: `FP-ADM-SUBTEST-${Date.now()}`,
+      ownerType: 'ADMIN',
+      admin: adminUser._id,
+      plan: 'starter',
+      expireDate: new Date(Date.now() + 365 * 24 * 3600 * 1000),
+      status: 'ACTIVE',
+      isUsed: true,
+    });
+
+    const adminDevice = await Device.create({
+      androidId: `ANDROID_SUB_TEST_${Date.now()}`,
+      deviceId: `ANDROID_SUB_TEST_${Date.now()}`,
+      ownerType: 'ADMIN',
+      admin: adminUser._id,
+      activationKey: adminKey._id,
+      status: 'ACTIVE',
+      isOnline: true,
+    });
+    adminKey.usedByDevice = adminDevice._id;
+    await adminKey.save();
 
     // TEST 4: Invalid TrxID (Non-existent payment) -> Must throw INVALID_TRANSACTION & 0 DB records created
     const fakeTxId = `NON_EXISTENT_${Date.now()}`;
@@ -89,6 +122,8 @@ async function runSubscriptionTests() {
       verificationState: 'NOTIFICATION_ONLY',
       packageName: 'com.bkash.customerapp',
       sender: '01711112222',
+      device: adminDevice._id,
+      deviceId: adminDevice.androidId,
     });
 
     try {
@@ -122,6 +157,8 @@ async function runSubscriptionTests() {
       verificationState: 'NOTIFICATION_ONLY',
       packageName: 'com.konasl.nagad',
       sender: '01811112222',
+      device: adminDevice._id,
+      deviceId: adminDevice.androidId,
     });
 
     try {
@@ -155,6 +192,8 @@ async function runSubscriptionTests() {
       verificationState: 'NOTIFICATION_ONLY',
       packageName: 'com.bkash.customerapp',
       sender: '01711112222',
+      device: adminDevice._id,
+      deviceId: adminDevice.androidId,
     });
 
     const verifyResult = await subscriptionService.submitApplication({

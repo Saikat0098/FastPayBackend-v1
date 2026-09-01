@@ -35,13 +35,21 @@ router.put('/subscriptions/:id/reject', subscriptionController.rejectAdminSubscr
 // 6. All Transactions
 router.get('/transactions', adminController.getAllTransactions);
 
-// 7. Connected Devices & Activation Management
+// 7. Merchant Connected Devices & Activation Management
 router.get('/devices', adminController.getAllDevices);
 router.get('/devices/:deviceId', adminController.getAdminDeviceById);
 router.post('/devices/:deviceId/reset-activation', adminController.resetDeviceActivation);
 router.post('/devices/:deviceId/reset', adminController.resetDeviceActivation);
 router.put('/devices/:deviceId/block', adminController.blockDevice);
 router.put('/devices/:deviceId/unblock', adminController.unblockDevice);
+
+// 7.1. Admin-Owned Connected Devices & Admin Keys
+router.get('/connected-devices', adminController.getAdminConnectedDevices);
+router.post('/connected-devices/activation-key', adminController.createAdminDeviceActivationKey);
+router.post('/connected-devices/keys', adminController.createAdminDeviceActivationKey);
+router.get('/connected-devices/:deviceId', adminController.getAdminConnectedDeviceById);
+router.post('/connected-devices/:deviceId/reset-activation', adminController.resetAdminConnectedDeviceActivation);
+router.post('/connected-devices/:deviceId/reset', adminController.resetAdminConnectedDeviceActivation);
 
 // 8. Activation Keys / Master Keys
 router.get('/activation-keys', adminController.getAllActivationKeys);
@@ -71,6 +79,13 @@ router.put('/brands/:id/unsuspend', adminController.unsuspendAdminBrand);
 router.put('/brands/:id/block', adminController.blockAdminBrand);
 router.put('/brands/:id/unblock', adminController.unblockAdminBrand);
 router.post('/brands/:id/reveal-doc', adminController.revealAdminBrandDoc);
+
+// 13. Admin Platform Brands (Platform-Owned Brands)
+router.get('/platform-brands', adminController.getAdminPlatformBrands);
+router.post('/platform-brands', adminController.createAdminPlatformBrand);
+router.get('/platform-brands/:id', adminController.getAdminPlatformBrandById);
+router.put('/platform-brands/:id', adminController.updateAdminPlatformBrand);
+router.put('/platform-brands/:id/status', adminController.toggleAdminPlatformBrandStatus);
 
 module.exports = router;
 

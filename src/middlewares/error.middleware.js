@@ -15,9 +15,9 @@ const errorHandler = (err, req, res, next) => {
   const response = {
     statusCode: error.statusCode,
     success: false,
-    ...(error.code && { code: error.code }),
+    code: error.code || (error.statusCode === 403 ? 'FORBIDDEN' : error.statusCode === 401 ? 'UNAUTHORIZED' : 'ERROR'),
     message: error.message,
-    ...(error.userMessage !== undefined && { userMessage: error.userMessage }),
+    userMessage: error.userMessage || error.message,
     ...(error.reason !== undefined && { reason: error.reason }),
     ...(error.blockedUntil !== undefined && { blockedUntil: error.blockedUntil }),
     errors: error.errors || [],

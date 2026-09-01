@@ -75,6 +75,35 @@ async function runPricingEntitlementTests() {
 
     console.log(`\nTEST 4: Created test user & merchant account (${merchant._id}) -> ✅ PASS`);
 
+    const Admin = require('../models/Admin');
+    const ActivationKey = require('../models/ActivationKey');
+    const adminUser = await Admin.create({
+      name: 'Admin Pricing Tester',
+      email: `admin_pricing_${Date.now()}@fastpay.test`,
+      password: 'password123',
+      role: 'superadmin',
+    });
+    const adminKey = await ActivationKey.create({
+      key: `FP-ADM-PRICE-${Date.now()}`,
+      ownerType: 'ADMIN',
+      admin: adminUser._id,
+      plan: 'starter',
+      expireDate: new Date(Date.now() + 365 * 24 * 3600 * 1000),
+      status: 'ACTIVE',
+      isUsed: true,
+    });
+    const adminDevice = await Device.create({
+      androidId: `ANDROID_PRICING_TEST_${Date.now()}`,
+      deviceId: `ANDROID_PRICING_TEST_${Date.now()}`,
+      ownerType: 'ADMIN',
+      admin: adminUser._id,
+      activationKey: adminKey._id,
+      status: 'ACTIVE',
+      isOnline: true,
+    });
+    adminKey.usedByDevice = adminDevice._id;
+    await adminKey.save();
+
     // 3. Purchase Starter Plan (৳100)
     const starterTxId = `TX_STARTER_${Date.now()}`;
     await Payment.create({
@@ -85,6 +114,8 @@ async function runPricingEntitlementTests() {
       status: 'COMPLETED',
       paymentStatus: 'COMPLETED',
       sender: '01711112222',
+      device: adminDevice._id,
+      deviceId: adminDevice.androidId,
     });
 
     const purchaseRes = await subscriptionService.submitApplication({
@@ -149,6 +180,8 @@ async function runPricingEntitlementTests() {
       status: 'COMPLETED',
       paymentStatus: 'COMPLETED',
       sender: '01711112222',
+      device: adminDevice._id,
+      deviceId: adminDevice.androidId,
     });
 
     const upgradeRes = await entitlementService.upgradeMerchantSubscription({
@@ -188,6 +221,8 @@ async function runPricingEntitlementTests() {
       status: 'COMPLETED',
       paymentStatus: 'COMPLETED',
       sender: '01711112222',
+      device: adminDevice._id,
+      deviceId: adminDevice.androidId,
     });
 
     const yearlyUpgradeRes = await entitlementService.upgradeMerchantSubscription({
