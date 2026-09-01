@@ -8,6 +8,7 @@ const Subscription = require('../models/Subscription');
 const Plan = require('../models/Plan');
 const MerchantApplication = require('../models/MerchantApplication');
 const ActivationKey = require('../models/ActivationKey');
+const Brand = require('../models/Brand');
 const AuditLog = require('../models/AuditLog');
 const ApiLog = require('../models/ApiLog');
 const LoginHistory = require('../models/LoginHistory');
@@ -17,6 +18,8 @@ const ApiError = require('../utils/apiError');
 const logger = require('../config/logger');
 const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
+const { maskActivationKey } = require('../utils/maskKey');
+const auditService = require('../services/audit.service');
 
 // 1. Comprehensive Real MongoDB Dashboard Stats
 const getAdminDashboard = asyncHandler(async (req, res) => {
@@ -340,12 +343,270 @@ const getAllTransactions = asyncHandler(async (req, res) => {
 });
 
 const getAllDevices = asyncHandler(async (req, res) => {
-  const devices = await Device.find()
-    .populate('merchant', 'name companyName email')
-    .populate('activationKey')
+  const { page, limit, status, search, merchantId } = req.query;
+
+  const query = {};
+
+  // Status Filter
+  if (status && status !== 'ALL') {
+    const upperStatus = status.toUpperCase();
+    if (upperStatus === 'ONLINE') {
+      query.isOnline = true;
+      query.isBlocked = false;
+    } else if (upperStatus === 'OFFLINE') {
+      query.$or = [{ isOnline: false }, { status: 'OFFLINE' }, { status: 'DISCONNECTED' }];
+    } else if (upperStatus === 'BLOCKED') {
+      query.isBlocked = true;
+    } else if (upperStatus === 'ACTIVE') {
+      query.status = 'ACTIVE';
+      query.isBlocked = false;
+      query.activationKey = { $ne: null };
+    } else if (upperStatus === 'INACTIVE' || upperStatus === 'AVAILABLE') {
+      query.$or = [
+        { status: 'INACTIVE' },
+        { activationKey: null },
+      ];
+    } else {
+      query.status = upperStatus;
+    }
+  }
+
+  // Merchant Filter
+  if (merchantId && mongoose.Types.ObjectId.isValid(merchantId)) {
+    query.merchant = merchantId;
+  }
+
+  // Search Filter
+  if (search && search.trim()) {
+    const s = search.trim();
+    const regex = new RegExp(s, 'i');
+
+    const matchingMerchants = await Merchant.find({
+      $or: [{ name: regex }, { companyName: regex }, { email: regex }],
+    }).select('_id');
+    const mIds = matchingMerchants.map((m) => m._id);
+
+    const matchingBrands = await Brand.find({
+      $or: [{ name: regex }, { slug: regex }],
+    }).select('_id');
+    const bIds = matchingBrands.map((b) => b._id);
+
+    const matchingKeys = await ActivationKey.find({
+      $or: [
+        { key: regex },
+        { brand: { $in: bIds } },
+      ],
+    }).select('_id');
+    const kIds = matchingKeys.map((k) => k._id);
+
+    query.$or = [
+      { androidId: regex },
+      { deviceId: regex },
+      { deviceModel: regex },
+      { deviceBrand: regex },
+      ...(mIds.length > 0 ? [{ merchant: { $in: mIds } }] : []),
+      ...(kIds.length > 0 ? [{ activationKey: { $in: kIds } }] : []),
+    ];
+  }
+
+  const isPaginationRequested = Boolean(page || limit);
+  const pageNum = parseInt(page) || 1;
+  const limitNum = parseInt(limit) || 50;
+
+  let queryBuilder = Device.find(query)
+    .populate('merchant', 'name companyName email status')
+    .populate({
+      path: 'activationKey',
+      select: 'key status plan expireDate activationTime brand createdAt isUsed',
+      populate: {
+        path: 'brand',
+        select: 'name slug logo status businessInfo',
+      },
+    })
     .sort({ updatedAt: -1 });
-  console.log("Admin devices query count:", devices.length);
-  return ApiResponse.success(res, devices, 'Connected devices list');
+
+  let total = 0;
+  if (isPaginationRequested) {
+    total = await Device.countDocuments(query);
+    queryBuilder = queryBuilder.skip((pageNum - 1) * limitNum).limit(limitNum);
+  }
+
+  const devices = await queryBuilder;
+
+  // Safely format devices with masked activation keys & populated brand info
+  const formattedDevices = devices.map((dev) => {
+    const devObj = dev.toObject();
+
+    if (devObj.activationKey) {
+      devObj.rawKeyMasked = maskActivationKey(devObj.activationKey.key);
+      devObj.maskedKey = maskActivationKey(devObj.activationKey.key);
+      devObj.brand = devObj.activationKey.brand || null;
+      devObj.activationKey.key = maskActivationKey(devObj.activationKey.key);
+      devObj.activationKey.maskedKey = devObj.rawKeyMasked;
+    } else {
+      devObj.maskedKey = null;
+      devObj.brand = null;
+    }
+
+    return devObj;
+  });
+
+  if (isPaginationRequested) {
+    return ApiResponse.success(
+      res,
+      {
+        devices: formattedDevices,
+        pagination: {
+          total,
+          page: pageNum,
+          limit: limitNum,
+          pages: Math.ceil(total / limitNum),
+        },
+      },
+      'Connected devices list'
+    );
+  }
+
+  return ApiResponse.success(res, formattedDevices, 'Connected devices list');
+});
+
+const getAdminDeviceById = asyncHandler(async (req, res) => {
+  const { deviceId } = req.params;
+  const dIdStr = deviceId ? deviceId.toString() : '';
+  const isMongoId = mongoose.Types.ObjectId.isValid(dIdStr);
+
+  const device = await Device.findOne({
+    $or: [
+      ...(isMongoId ? [{ _id: dIdStr }] : []),
+      { androidId: dIdStr },
+      { deviceId: dIdStr },
+    ],
+  })
+    .populate('merchant', 'name companyName email status')
+    .populate({
+      path: 'activationKey',
+      select: 'key status plan expireDate activationTime brand createdAt isUsed',
+      populate: {
+        path: 'brand',
+        select: 'name slug logo status businessInfo',
+      },
+    });
+
+  if (!device) {
+    throw new ApiError(404, 'Device not found');
+  }
+
+  const devObj = device.toObject();
+  if (devObj.activationKey) {
+    devObj.rawKeyMasked = maskActivationKey(devObj.activationKey.key);
+    devObj.maskedKey = maskActivationKey(devObj.activationKey.key);
+    devObj.brand = devObj.activationKey.brand || null;
+    devObj.activationKey.key = maskActivationKey(devObj.activationKey.key);
+    devObj.activationKey.maskedKey = devObj.rawKeyMasked;
+  } else {
+    devObj.maskedKey = null;
+    devObj.brand = null;
+  }
+
+  return ApiResponse.success(res, devObj, 'Device details retrieved successfully');
+});
+
+const resetDeviceActivation = asyncHandler(async (req, res) => {
+  const { deviceId } = req.params;
+  const { reason } = req.body || {};
+  const dIdStr = deviceId ? deviceId.toString() : '';
+  const isMongoId = mongoose.Types.ObjectId.isValid(dIdStr);
+
+  const device = await Device.findOne({
+    $or: [
+      ...(isMongoId ? [{ _id: dIdStr }] : []),
+      { androidId: dIdStr },
+      { deviceId: dIdStr },
+    ],
+  }).populate('activationKey');
+
+  if (!device) {
+    throw new ApiError(404, 'Device not found');
+  }
+
+  const currentKeyId = device.activationKey?._id || device.activationKey;
+  const previousStatus = device.status;
+  const hasActiveActivation = Boolean(currentKeyId || device.status === 'ACTIVE');
+
+  if (!hasActiveActivation && !currentKeyId) {
+    throw new ApiError(400, 'Device has no active activation to reset');
+  }
+
+  let brandId = null;
+  let rawKey = '';
+  let keyDoc = null;
+
+  // Revoke the old activation key
+  if (currentKeyId) {
+    keyDoc = await ActivationKey.findById(currentKeyId);
+    if (keyDoc) {
+      rawKey = keyDoc.key || '';
+      brandId = keyDoc.brand || null;
+      keyDoc.isUsed = false;
+      keyDoc.status = 'REVOKED';
+      keyDoc.usedByDevice = null;
+      keyDoc.activationTime = null;
+      await keyDoc.save();
+    }
+  }
+
+  // Invalidate activation on device, make available for re-activation
+  device.activationKey = null;
+  device.status = 'INACTIVE';
+  device.isOnline = false;
+  await device.save();
+
+  const maskedKeyStr = maskActivationKey(rawKey);
+  const adminId = req.admin?._id || req.user?.id || req.user?._id || null;
+
+  // Record audit log
+  await auditService.logAction({
+    userId: adminId,
+    userType: 'admin',
+    action: 'ACTIVATION_RESET',
+    req,
+    details: {
+      deviceId: device._id,
+      androidId: device.androidId,
+      deviceModel: device.deviceModel,
+      deviceBrand: device.deviceBrand,
+      merchantId: device.merchant,
+      brandId: brandId,
+      activationKeyId: currentKeyId || null,
+      maskedActivationKey: maskedKeyStr,
+      previousStatus: previousStatus,
+      resultingStatus: 'INACTIVE',
+      reason: (reason || 'Super Admin activation reset').trim(),
+      timestamp: new Date(),
+    },
+  });
+
+  // Emit realtime updates
+  const { emitDeviceEvent } = require('../socket/socketManager');
+  if (device.merchant) {
+    emitDeviceEvent(device.merchant, 'device:reset', device);
+    emitDeviceEvent(device.merchant, 'device:updated', device);
+    emitDeviceEvent(device.merchant, 'device:offline', device);
+    emitDeviceEvent(device.merchant, 'deviceDisconnected', device);
+  }
+  emitDeviceEvent('all', 'device:reset', device);
+  emitDeviceEvent('all', 'device:updated', device);
+
+  logger.info(`[Admin Reset Activation] Device ${device.androidId} activation reset by admin ${adminId}. Key: ${maskedKeyStr}`);
+
+  const populatedDevice = await Device.findById(device._id)
+    .populate('merchant', 'name companyName email status')
+    .lean();
+
+  populatedDevice.maskedKey = null;
+  populatedDevice.brand = null;
+
+  return ApiResponse.success(res, populatedDevice, 'Device activation reset successfully. Device is now eligible for a new activation.');
 });
 
 const blockDevice = asyncHandler(async (req, res) => {
@@ -671,6 +932,8 @@ module.exports = {
   deletePlan,
   getAllTransactions,
   getAllDevices,
+  getAdminDeviceById,
+  resetDeviceActivation,
   blockDevice,
   unblockDevice,
   getAllActivationKeys,

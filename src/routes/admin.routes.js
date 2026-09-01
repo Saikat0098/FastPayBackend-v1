@@ -35,8 +35,11 @@ router.put('/subscriptions/:id/reject', subscriptionController.rejectAdminSubscr
 // 6. All Transactions
 router.get('/transactions', adminController.getAllTransactions);
 
-// 7. Connected Devices
+// 7. Connected Devices & Activation Management
 router.get('/devices', adminController.getAllDevices);
+router.get('/devices/:deviceId', adminController.getAdminDeviceById);
+router.post('/devices/:deviceId/reset-activation', adminController.resetDeviceActivation);
+router.post('/devices/:deviceId/reset', adminController.resetDeviceActivation);
 router.put('/devices/:deviceId/block', adminController.blockDevice);
 router.put('/devices/:deviceId/unblock', adminController.unblockDevice);
 
