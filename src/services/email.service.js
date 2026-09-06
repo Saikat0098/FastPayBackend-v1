@@ -4,16 +4,32 @@ const nodemailer = require('nodemailer');
 const logger = require('../config/logger');
 const { maskEmail } = require('../utils/otp');
 
+const fs = require('fs');
+
 /**
  * Dynamic runtime SMTP configuration reader
  */
 const getSmtpConfig = () => {
+  try {
+    const envPaths = [
+      path.join(__dirname, '../../.env'),
+      path.resolve(process.cwd(), '.env'),
+      path.resolve(process.cwd(), 'backend/.env'),
+    ];
+    for (const p of envPaths) {
+      if (fs.existsSync(p)) {
+        require('dotenv').config({ path: p, override: true });
+        break;
+      }
+    }
+  } catch (_) {}
+
   const host = process.env.SMTP_HOST || process.env.EMAIL_HOST || 'smtp.gmail.com';
   const port = parseInt(process.env.SMTP_PORT || process.env.EMAIL_PORT || '587', 10);
   const secure = process.env.SMTP_SECURE === 'true' || process.env.EMAIL_SECURE === 'true' || port === 465;
   const user = (process.env.SMTP_USER || process.env.EMAIL_USER || '').trim();
   const rawPass = process.env.SMTP_PASS || process.env.SMTP_PASSWORD || process.env.EMAIL_PASS || process.env.EMAIL_PASSWORD || '';
-  const pass = rawPass.replace(/\s+/g, '');
+  const pass = rawPass.replace(/[\r\n\t]/g, '').trim().replace(/^["']|["']$/g, '');
   const fromName = process.env.SMTP_FROM_NAME || process.env.EMAIL_FROM_NAME || 'FastPay';
 
   let fromEmailAddress = user;
@@ -64,8 +80,13 @@ const createSmtpTransporter = (config) => {
 
 const getTransporter = () => {
   const config = getSmtpConfig();
-  if (!transporter && config.isConfigured) {
+  if (!config.isConfigured) {
+    return null;
+  }
+  if (!transporter || transporter._fastpayConfigPass !== config.pass || transporter._fastpayConfigUser !== config.user) {
     transporter = createSmtpTransporter(config);
+    transporter._fastpayConfigPass = config.pass;
+    transporter._fastpayConfigUser = config.user;
     logger.info(`[ORDER_EMAIL_SMTP] Transporter initialized with host: ${config.host}:${config.port}`);
   }
   return transporter;
@@ -115,12 +136,15 @@ const sendMail = async ({ to, subject, html, text, fromName, replyTo, emailType 
     const config = getSmtpConfig();
     let activeTransporter = getTransporter();
 
+    // Mock email transport for automated test suites or missing SMTP credentials
+    const isMockPermitted = process.env.NODE_ENV === 'test' || process.env.ALLOW_MOCK_EMAIL === 'true' || process.env.MOCK_EMAIL_FOR_TESTS === 'true';
+    if (isMockPermitted && (process.env.MOCK_EMAIL_FOR_TESTS === 'true' || !config.isConfigured || to.endsWith('@example.com') || to.endsWith('@test.com'))) {
+      logger.info(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: Mock | status: SENT (Mock Test Mode)`);
+      return { success: true, mocked: true, messageId: `mock_${Date.now()}` };
+    }
+
     // If SMTP is not configured
     if (!activeTransporter || !config.isConfigured) {
-      if (process.env.NODE_ENV === 'test' || process.env.ALLOW_MOCK_EMAIL === 'true') {
-        logger.info(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: Mock | status: SENT (Mock Test Mode)`);
-        return { success: true, mocked: true, messageId: `mock_${Date.now()}` };
-      }
       logger.error(`[${emailType}_EMAIL] recipient: ${maskedTo} | transport: SMTP | status: FAILED | error: SMTP credentials missing or unconfigured in environment`);
       return { success: false, error: 'SMTP credentials missing or unconfigured in environment', mocked: false };
     }
@@ -951,6 +975,8 @@ const sendOrderConfirmationEmail = async ({
         success: true,
         status: session?.confirmationEmailStatus || 'SENT',
         idempotent: true,
+        skipped: true,
+        reason: 'ALREADY_SENT',
         messageId: session?.confirmationEmailMessageId || 'already_sent',
       };
     }
@@ -1075,10 +1101,11 @@ const sendOrderConfirmationEmail = async ({
 
     // In non-test mode, if mocked is true or messageId starts with mock_, reject as failure
     const isMock = Boolean(sendResult.mocked || (sendResult.messageId && sendResult.messageId.startsWith('mock_')));
-    const isSuccess = Boolean(sendResult.success) && (!isMock || process.env.NODE_ENV === 'test');
+    const isTestEnv = process.env.NODE_ENV === 'test' || process.env.ALLOW_MOCK_EMAIL === 'true' || process.env.MOCK_EMAIL_FOR_TESTS === 'true';
+    const isSuccess = Boolean(sendResult.success) && (!isMock || isTestEnv);
 
     const effectiveError = !isSuccess
-      ? (isMock && process.env.NODE_ENV !== 'test'
+      ? (isMock && !isTestEnv
           ? 'Mock email transmission rejected in production/live environment'
           : (sendResult.error || 'Delivery failed'))
       : '';

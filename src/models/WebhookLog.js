@@ -42,6 +42,14 @@ const webhookLogSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    error: {
+      type: String,
+      default: '',
+    },
+    errorCode: {
+      type: String,
+      default: '',
+    },
     attempts: {
       type: Number,
       default: 1,
@@ -52,6 +60,8 @@ const webhookLogSchema = new mongoose.Schema(
         dispatchedAt: { type: Date, default: Date.now },
         responseStatus: { type: Number, default: 0 },
         responseBody: { type: String, default: '' },
+        error: { type: String, default: '' },
+        errorCode: { type: String, default: '' },
         status: { type: String, enum: ['SUCCESS', 'FAILED', 'PENDING'], default: 'PENDING' },
       },
     ],

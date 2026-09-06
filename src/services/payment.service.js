@@ -494,7 +494,7 @@ const processTransactionSync = async ({
       syncStatus: 'SUCCESS',
       responseCode: 200,
       responseBody: 'Sync success',
-    }).catch(() => {});
+    }).catch(() => { });
   }
 
   // 5. Emit Socket.io event for live dashboard updates
@@ -504,8 +504,12 @@ const processTransactionSync = async ({
     gateway: payment.gateway,
     provider: payment.provider,
     transactionId: payment.transactionId,
+    trxId: payment.transactionId,
     amount: payment.amount,
     sender: payment.sender,
+    brand: payment.brand || null,
+    brandName: null,
+    isPrimary: !payment.brand,
     sms: payment.sms,
     deviceId: payment.deviceId,
     activationKey: payment.activationKey,
@@ -946,12 +950,19 @@ const verifyCustomerCheckoutPayment = async ({
   }
 
   if (claimedPayment.merchant) {
-    emitPaymentUpdated(claimedPayment.merchant, {
+    emitPaymentUpdated(claimedPayment.merchant.toString(), {
       _id: claimedPayment._id,
+      id: claimedPayment._id,
       transactionId: claimedPayment.transactionId,
-      status: claimedPayment.status,
-      verificationState: claimedPayment.verificationState,
+      trxId: claimedPayment.transactionId,
+      gateway: claimedPayment.gateway,
+      provider: claimedPayment.provider,
       amount: claimedPayment.amount,
+      status: claimedPayment.status,
+      brand: claimedPayment.brand,
+      isPrimary: !claimedPayment.brand,
+      verificationState: claimedPayment.verificationState,
+      updatedAt: claimedPayment.updatedAt,
     });
   }
 

@@ -74,6 +74,7 @@ const paymentSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Brand',
       required: false,
+      default: null,
     },
     receiver: {
       type: String,
@@ -198,6 +199,17 @@ const paymentSchema = new mongoose.Schema(
   }
 );
 
+paymentSchema.virtual('isPrimary').get(function () {
+  return !this.brand;
+});
+
+paymentSchema.virtual('brandName').get(function () {
+  return this.brand?.name || null;
+});
+
+paymentSchema.set('toJSON', { virtuals: true });
+paymentSchema.set('toObject', { virtuals: true });
+
 paymentSchema.index({ transactionId: 1 }, { unique: true });
 paymentSchema.index({ provider: 1, transactionId: 1 });
 paymentSchema.index({ ownerType: 1, transactionId: 1 });
@@ -205,6 +217,8 @@ paymentSchema.index({ ownerType: 1, merchant: 1, createdAt: -1 });
 paymentSchema.index({ ownerType: 1, admin: 1, createdAt: -1 });
 paymentSchema.index({ merchant: 1, createdAt: -1 });
 paymentSchema.index({ merchant: 1, brand: 1, createdAt: -1 });
+paymentSchema.index({ merchant: 1, isUsed: 1 });
+paymentSchema.index({ merchant: 1, brand: 1, isUsed: 1 });
 paymentSchema.index({ brand: 1, createdAt: -1 });
 paymentSchema.index({ provider: 1 });
 paymentSchema.index({ gateway: 1 });

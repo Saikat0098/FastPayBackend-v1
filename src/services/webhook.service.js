@@ -78,32 +78,42 @@ const sanitizeResponseBody = (data, defaultMessage = '') => {
 };
 
 const dispatchHttpRequest = async (targetUrl, rawBody, headers, timeout = 25000) => {
-  const maxAttempts = 2;
+  const urlsToTry = [targetUrl];
+  if (targetUrl.includes('://localhost')) {
+    urlsToTry.push(targetUrl.replace('://localhost', '://127.0.0.1'));
+  }
+
   let lastError = null;
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  for (const currentUrl of urlsToTry) {
     try {
-      const response = await axios.post(targetUrl, rawBody, {
+      const response = await axios.post(currentUrl, rawBody, {
         headers,
         timeout,
       });
       return response;
     } catch (err) {
       lastError = err;
-      const status = err.response ? err.response.status : (err.code === 'ECONNABORTED' ? 504 : 500);
-      const isTransient = [502, 503, 504].includes(status) || ['ECONNABORTED', 'ETIMEDOUT', 'ECONNRESET'].includes(err.code);
-      if (attempt < maxAttempts && isTransient) {
-        logger.info(`[Webhook Dispatch] Transient ${status}/${err.code || 'ERR'} from ${targetUrl}. Fast backoff retry in 2.5s (attempt ${attempt}/${maxAttempts})...`);
-        await new Promise((r) => setTimeout(r, 2500));
-        continue;
+      const status = err.response ? err.response.status : 0;
+      const isTransient = [502, 503, 504].includes(status) || ['ECONNABORTED', 'ETIMEDOUT'].includes(err.code);
+      if (isTransient) {
+        try {
+          await new Promise((r) => setTimeout(r, 1000));
+          const retryResp = await axios.post(currentUrl, rawBody, {
+            headers,
+            timeout,
+          });
+          return retryResp;
+        } catch (retryErr) {
+          lastError = retryErr;
+        }
       }
-      throw err;
     }
   }
   throw lastError;
 };
 
-const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'payment.verified', eventId = null }) => {
+const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'payment.verified', eventId = null, timeout = 25000 }) => {
   try {
     let targetUrl = '';
     let secret = '';
@@ -200,14 +210,19 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
       timestamp: new Date().toISOString(),
       data: {
         id: payment._id,
+        paymentId: payment._id,
         sessionId: sessionData?.sessionId || payment.sessionId || undefined,
         orderId: sessionData?.orderId || payment.orderId || undefined,
         transactionId: payment.transactionId,
+        trxId: payment.transactionId,
         gateway: payment.gateway || payment.provider,
+        paymentMethod: payment.gateway || payment.provider,
         amount: sessionData?.amount ?? payment.amount,
         currency: sessionData?.currency || payment.currency || 'BDT',
         sender: payment.sender,
         status: payment.status || payment.paymentStatus,
+        merchantId: effectiveMerchantId || undefined,
+        brandId: brandId || sessionData?.brand?._id || sessionData?.brand || undefined,
         customerName: sessionData?.customerName || payment.customerName || payment.senderName || undefined,
         customerPhone: sessionData?.customerPhone || payment.customerPhone || payment.sender || undefined,
         customerEmail: sessionData?.customerEmail || payment.customerEmail || undefined,
@@ -215,22 +230,6 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
         receivedAt: payment.receivedAt || payment.createdAt,
       },
     };
-
-    // Centralized Order Confirmation Email trigger on payment.verified event
-    if (event === 'payment.verified' && sessionData) {
-      try {
-        const { sendOrderConfirmationEmail } = require('./email.service');
-        sendOrderConfirmationEmail({
-          session: sessionData,
-          payment,
-          brand: brandId || sessionData.brand,
-          merchant: effectiveMerchantId || sessionData.merchant,
-          triggerSource: 'WEBHOOK',
-        }).catch((emailErr) => {
-          logger.warn(`[Webhook Engine] Order confirmation email trigger error: ${emailErr.message}`);
-        });
-      } catch (_) {}
-    }
 
     // Serialize once into raw string so that signed payload matches transmitted body exactly
     const rawBody = JSON.stringify(payload);
@@ -261,6 +260,11 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
     }
 
     const bodyHash = crypto.createHash('sha256').update(rawBody).digest('hex').substring(0, 16);
+    let parsedUrl = {};
+    try {
+      parsedUrl = new URL(targetUrl);
+    } catch (_) {}
+    logger.info(`[Webhook Dispatch Diagnostic] PID:${process.pid} | CWD:${process.cwd()} | ENV:${process.env.NODE_ENV || 'development'} | Target:${targetUrl} | Host:${parsedUrl.hostname || 'unknown'} | Port:${parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80)} | EventID:${assignedEventId} | Order:${payload?.data?.orderId || 'N/A'} | TxID:${payment?.transactionId || 'N/A'} | Client:axios | Timeout:${timeout || 25000}ms | Mode:main_process`);
     logger.info(`[Webhook Dispatch] [ID:${logEntry._id}] [EventID:${assignedEventId}] Attempt:${currentAttempt} | Method: POST | Target: ${targetUrl} | Event: ${event} | Tx: ${payment.transactionId} | BodyHash: ${bodyHash} | Timestamp: ${timestamp}`);
 
     try {
@@ -270,13 +274,15 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
         'X-FirstPay-Signature': `t=${timestamp},v1=${signature}`,
         'X-Gateway-Signature': `t=${timestamp},v1=${signature}`,
         'User-Agent': 'FastPay-Webhook-Engine/1.0',
-      }, 25000);
+      }, timeout || 25000);
 
       const respBodyStr = sanitizeResponseBody(response.data);
       const isSuccess = response.status >= 200 && response.status < 300;
 
       logEntry.responseStatus = response.status;
       logEntry.responseBody = respBodyStr;
+      logEntry.error = '';
+      logEntry.errorCode = '';
       logEntry.status = isSuccess ? 'SUCCESS' : 'FAILED';
       if (!logEntry.deliveryAttempts) logEntry.deliveryAttempts = [];
       logEntry.deliveryAttempts.push({
@@ -284,6 +290,8 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
         dispatchedAt: new Date(),
         responseStatus: response.status,
         responseBody: respBodyStr,
+        error: '',
+        errorCode: '',
         status: isSuccess ? 'SUCCESS' : 'FAILED',
       });
       await logEntry.save();
@@ -291,11 +299,36 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
       logger.info(`[Webhook Response] [ID:${logEntry._id}] [EventID:${assignedEventId}] Attempt:${currentAttempt} | Status: ${response.status} | Body: ${respBodyStr}`);
       return logEntry;
     } catch (httpError) {
-      const statusErr = httpError.response ? httpError.response.status : (httpError.code === 'ECONNABORTED' ? 504 : 500);
-      const respBodyStr = sanitizeResponseBody(httpError.response?.data, httpError.message || 'Connection failed');
+      const isNetworkError = !httpError.response;
+      let errorCode = '';
+      let statusErr = 0;
+
+      if (isNetworkError) {
+        statusErr = 0;
+        if (httpError.code === 'ECONNREFUSED') {
+          errorCode = 'ECONNREFUSED';
+        } else if (httpError.code === 'ECONNABORTED' || httpError.code === 'ETIMEDOUT') {
+          errorCode = 'ETIMEDOUT';
+        } else if (httpError.code === 'ENOTFOUND') {
+          errorCode = 'ENOTFOUND';
+        } else {
+          errorCode = httpError.code || 'NETWORK_ERROR';
+        }
+      } else {
+        statusErr = httpError.response.status;
+        errorCode = '';
+      }
+
+      const rawErrMsg = httpError.message || 'Connection failed';
+      const respBodyStr = sanitizeResponseBody(
+        httpError.response?.data,
+        isNetworkError ? `${rawErrMsg} (${errorCode})` : rawErrMsg
+      );
 
       logEntry.responseStatus = statusErr;
       logEntry.responseBody = respBodyStr;
+      logEntry.error = rawErrMsg;
+      logEntry.errorCode = errorCode;
       logEntry.status = 'FAILED';
       logEntry.nextRetryAt = new Date(Date.now() + 5 * 60 * 1000); // retry in 5 mins
       if (!logEntry.deliveryAttempts) logEntry.deliveryAttempts = [];
@@ -304,11 +337,13 @@ const sendWebhook = async ({ merchantId, brandId, payment, session, event = 'pay
         dispatchedAt: new Date(),
         responseStatus: statusErr,
         responseBody: respBodyStr,
+        error: rawErrMsg,
+        errorCode,
         status: 'FAILED',
       });
       await logEntry.save();
 
-      logger.warn(`[Webhook Response Failed] [ID:${logEntry._id}] [EventID:${assignedEventId}] Attempt:${currentAttempt} | Status: ${statusErr} | Body: ${respBodyStr}`);
+      logger.warn(`[Webhook Response Failed] [ID:${logEntry._id}] [EventID:${assignedEventId}] Attempt:${currentAttempt} | Status: ${statusErr > 0 ? `HTTP ${statusErr}` : 'CONNECTION_ERROR'} | Code: ${errorCode || 'NONE'} | Body: ${respBodyStr}`);
       return logEntry;
     }
   } catch (error) {
@@ -377,6 +412,11 @@ const retryWebhook = async (webhookLogId, merchantId) => {
   const currentAttempt = logEntry.attempts;
   const bodyHash = crypto.createHash('sha256').update(rawBody).digest('hex').substring(0, 16);
   const assignedEventId = logEntry.eventId || logEntry._id;
+  let parsedUrl = {};
+  try {
+    parsedUrl = new URL(logEntry.url);
+  } catch (_) {}
+  logger.info(`[Webhook Retry Diagnostic] PID:${process.pid} | CWD:${process.cwd()} | ENV:${process.env.NODE_ENV || 'development'} | Target:${logEntry.url} | Host:${parsedUrl.hostname || 'unknown'} | Port:${parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80)} | EventID:${assignedEventId} | TxID:${logEntry.payment || 'N/A'} | Client:axios | Timeout:25000ms | Mode:main_process`);
   logger.info(`[Webhook Retry] [ID:${logEntry._id}] [EventID:${assignedEventId}] Attempt:${currentAttempt} | Target: ${logEntry.url} | BodyHash: ${bodyHash} | Timestamp: ${timestamp}`);
 
   try {
@@ -393,6 +433,8 @@ const retryWebhook = async (webhookLogId, merchantId) => {
 
     logEntry.responseStatus = response.status;
     logEntry.responseBody = respBodyStr;
+    logEntry.error = '';
+    logEntry.errorCode = '';
     logEntry.status = isSuccess ? 'SUCCESS' : 'FAILED';
     if (!logEntry.deliveryAttempts) logEntry.deliveryAttempts = [];
     logEntry.deliveryAttempts.push({
@@ -400,6 +442,8 @@ const retryWebhook = async (webhookLogId, merchantId) => {
       dispatchedAt: new Date(),
       responseStatus: response.status,
       responseBody: respBodyStr,
+      error: '',
+      errorCode: '',
       status: isSuccess ? 'SUCCESS' : 'FAILED',
     });
     await logEntry.save();
@@ -407,11 +451,36 @@ const retryWebhook = async (webhookLogId, merchantId) => {
     logger.info(`[Webhook Retry Response] [ID:${logEntry._id}] [EventID:${assignedEventId}] Status: ${response.status} | Body: ${respBodyStr}`);
     return logEntry;
   } catch (httpError) {
-    const statusErr = httpError.response ? httpError.response.status : (httpError.code === 'ECONNABORTED' ? 504 : 500);
-    const respBodyStr = sanitizeResponseBody(httpError.response?.data, httpError.message || 'Retry connection failed');
+    const isNetworkError = !httpError.response;
+    let errorCode = '';
+    let statusErr = 0;
+
+    if (isNetworkError) {
+      statusErr = 0;
+      if (httpError.code === 'ECONNREFUSED') {
+        errorCode = 'ECONNREFUSED';
+      } else if (httpError.code === 'ECONNABORTED' || httpError.code === 'ETIMEDOUT') {
+        errorCode = 'ETIMEDOUT';
+      } else if (httpError.code === 'ENOTFOUND') {
+        errorCode = 'ENOTFOUND';
+      } else {
+        errorCode = httpError.code || 'NETWORK_ERROR';
+      }
+    } else {
+      statusErr = httpError.response.status;
+      errorCode = '';
+    }
+
+    const rawErrMsg = httpError.message || 'Retry connection failed';
+    const respBodyStr = sanitizeResponseBody(
+      httpError.response?.data,
+      isNetworkError ? `${rawErrMsg} (${errorCode})` : rawErrMsg
+    );
 
     logEntry.responseStatus = statusErr;
     logEntry.responseBody = respBodyStr;
+    logEntry.error = rawErrMsg;
+    logEntry.errorCode = errorCode;
     logEntry.status = 'FAILED';
     if (!logEntry.deliveryAttempts) logEntry.deliveryAttempts = [];
     logEntry.deliveryAttempts.push({
@@ -419,11 +488,13 @@ const retryWebhook = async (webhookLogId, merchantId) => {
       dispatchedAt: new Date(),
       responseStatus: statusErr,
       responseBody: respBodyStr,
+      error: rawErrMsg,
+      errorCode,
       status: 'FAILED',
     });
     await logEntry.save();
 
-    logger.warn(`[Webhook Retry Failed] [ID:${logEntry._id}] [EventID:${assignedEventId}] Status: ${statusErr} | Body: ${respBodyStr}`);
+    logger.warn(`[Webhook Retry Failed] [ID:${logEntry._id}] [EventID:${assignedEventId}] Status: ${statusErr > 0 ? `HTTP ${statusErr}` : 'CONNECTION_ERROR'} | Code: ${errorCode || 'NONE'} | Body: ${respBodyStr}`);
     return logEntry;
   }
 };

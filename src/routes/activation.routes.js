@@ -22,12 +22,8 @@ router.get('/keys', authorizeRoles('admin', 'superadmin', 'merchant'), activatio
 router.get('/', authorizeRoles('admin', 'superadmin', 'merchant'), activationController.listKeys);
 
 router.post('/reset/:id', authorizeRoles('admin', 'superadmin', 'merchant'), activationController.resetKey);
-router.post('/revoke/:id', authorizeRoles('admin', 'superadmin', 'merchant'), activationController.resetKey);
-router.post('/keys/:id/revoke', authorizeRoles('admin', 'superadmin', 'merchant'), activationController.resetKey);
 router.patch('/keys/:id/deactivate', authorizeRoles('admin', 'superadmin', 'merchant'), activationController.resetKey);
 router.patch('/:id/deactivate', authorizeRoles('admin', 'superadmin', 'merchant'), activationController.resetKey);
-router.delete('/keys/:id', authorizeRoles('admin', 'superadmin', 'merchant'), activationController.deleteKey);
-router.delete('/:id', authorizeRoles('admin', 'superadmin', 'merchant'), activationController.deleteKey);
 
 module.exports = router;
 

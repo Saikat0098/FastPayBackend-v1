@@ -605,40 +605,23 @@ const verifySessionPayment = async ({
     expectedAccountNumber: targetGatewayRecord?.accountNumber,
   });
 
-  let lpOrder = null;
-  if (session) {
-    session.status = 'VERIFIED';
-    session.payment = payment._id;
-    session.transactionId = payment.transactionId;
-    if (customerName) session.customerName = customerName;
-    if (phone) session.customerPhone = phone;
-    await session.save();
-
-    const postRes = await handleSuccessfulPaymentVerification({
-      session,
-      payment,
-      brand: session.brand,
-      merchant: session.merchant,
-      triggerSource: sessionId ? 'PUBLIC_VERIFICATION' : 'DIRECT_VERIFICATION',
-    });
-    lpOrder = postRes?.lpOrder;
-  }
-
-  // Dispatch webhook event asynchronously
-  if (mId) {
-    sendWebhook({
-      merchantId: mId,
-      brandId: session && session.brand ? (session.brand._id || session.brand) : resolvedBrandId,
-      payment,
-      session,
-      event: 'payment.verified',
-    }).catch(() => {});
-  }
+  // Delegate post-verification processing (order sync, email delivery, webhook dispatch, socket emissions)
+  // to canonical pipeline
+  const { processVerifiedPayment } = require('./paymentPipeline.service');
+  const pipelineResult = await processVerifiedPayment({
+    payment,
+    session,
+    merchantId: mId,
+    brandId: resolvedBrandId,
+    triggerSource: sessionId ? 'PUBLIC_VERIFICATION' : 'DIRECT_VERIFICATION',
+    customerName: customerName || (session ? session.customerName : undefined),
+    customerPhone: phone || (session ? session.customerPhone : undefined),
+  });
 
   return {
-    session,
-    payment,
-    returnUrl: session ? session.returnUrl : '',
+    session: pipelineResult.session || session,
+    payment: pipelineResult.payment || payment,
+    returnUrl: (pipelineResult.session || session) ? (pipelineResult.session || session).returnUrl : '',
     message: 'Payment verified successfully',
   };
 };
