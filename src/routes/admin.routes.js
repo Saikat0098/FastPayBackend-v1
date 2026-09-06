@@ -80,12 +80,24 @@ router.put('/brands/:id/block', adminController.blockAdminBrand);
 router.put('/brands/:id/unblock', adminController.unblockAdminBrand);
 router.post('/brands/:id/reveal-doc', adminController.revealAdminBrandDoc);
 
-// 13. Admin Platform Brands (Platform-Owned Brands)
+// 13. Admin Platform Brands & Platform Identity / Settings
+router.get('/platform-settings', adminController.getPlatformSettings);
+router.put('/platform-settings', adminController.updatePlatformSettings);
+router.post('/platform-settings', adminController.updatePlatformSettings);
+router.get('/platform-identity', adminController.getPlatformSettings);
+router.put('/platform-identity', adminController.updatePlatformSettings);
+router.post('/platform-identity', adminController.updatePlatformSettings);
+
+// Backward Compatibility Platform Brand Routes
 router.get('/platform-brands', adminController.getAdminPlatformBrands);
 router.post('/platform-brands', adminController.createAdminPlatformBrand);
 router.get('/platform-brands/:id', adminController.getAdminPlatformBrandById);
 router.put('/platform-brands/:id', adminController.updateAdminPlatformBrand);
-router.put('/platform-brands/:id/status', adminController.toggleAdminPlatformBrandStatus);
+// 14. Global Live Payment Control
+const adminLivePaymentController = require('../controllers/admin.livePayment.controller');
+router.get('/live-payment/settings', adminLivePaymentController.getAdminLivePaymentSettings);
+router.put('/live-payment/settings', adminLivePaymentController.updateAdminLivePaymentSettings);
+router.post('/live-payment/settings', adminLivePaymentController.updateAdminLivePaymentSettings);
 
 module.exports = router;
 

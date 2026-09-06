@@ -421,13 +421,14 @@ const getPublicLandingPage = async (slug) => {
     merchant: page.merchant,
     brand: page.brand._id || page.brand,
     isActive: true,
-  }).sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
+  });
 
   // Increment view count asynchronously
   LandingPage.updateOne({ _id: page._id }, { $inc: { viewCount: 1 } }).catch(() => {});
 
+  const { sortGatewaysByCanonicalOrder } = require('../utils/gatewayOrdering');
   const pageObj = page.toObject ? page.toObject() : { ...page };
-  pageObj.gateways = brandGateways;
+  pageObj.gateways = sortGatewaysByCanonicalOrder(brandGateways);
 
   // Sanitize products: Never leak instant delivery content before successful payment verification
   if (Array.isArray(pageObj.products)) {

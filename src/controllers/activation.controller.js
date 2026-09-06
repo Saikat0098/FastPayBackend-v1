@@ -31,6 +31,7 @@ const listKeys = asyncHandler(async (req, res) => {
   const query = {};
   if (!isSuperAdmin) {
     query.merchant = merchantId ? merchantId : new mongoose.Types.ObjectId();
+    query.ownerType = { $ne: 'ADMIN' };
   } else if (merchantId) {
     query.merchant = merchantId;
   }
@@ -71,8 +72,23 @@ const resetKey = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, updatedKey, 'Activation key reset successfully');
 });
 
+const deleteKey = asyncHandler(async (req, res) => {
+  const isSuperAdmin = req.user && (req.user.role === 'superadmin' || req.user.role === 'SUPER_ADMIN' || req.user.role === 'admin');
+  const merchantId = req.merchantId || req.merchant?._id;
+
+  const keyId = req.params.id;
+  const result = await activationService.deleteMerchantActivationKey({
+    keyId,
+    merchantId,
+    isSuperAdmin,
+  });
+
+  return ApiResponse.success(res, result, 'Activation key deleted successfully');
+});
+
 module.exports = {
   generateKey,
   listKeys,
   resetKey,
+  deleteKey,
 };

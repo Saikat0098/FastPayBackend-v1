@@ -7,6 +7,8 @@ const { verifyLimiter, sessionLimiter } = require('../middlewares/rateLimiter.mi
 // Public Session Endpoints (For Hosted Checkout UI)
 router.get('/public/:sessionId', checkoutSessionController.getPublicSession);
 router.post('/public/:sessionId/verify', verifyLimiter, checkoutSessionController.verifyPublicSessionPayment);
+router.patch('/public/:sessionId/mode', checkoutSessionController.updatePublicSessionPaymentMode);
+router.post('/public/:sessionId/mode', checkoutSessionController.updatePublicSessionPaymentMode);
 
 // Merchant Server APIs (Secured via API Key or Bearer Token)
 router.post('/', sessionLimiter, verifyApiKey, checkoutSessionController.createSession);

@@ -31,7 +31,7 @@ const syncPayment = asyncHandler(async (req, res) => {
   const result = await paymentService.processTransactionSync({
     activationKey,
     deviceId: deviceId || req.device?._id || req.device?.androidId,
-    merchantId: req.merchant?._id || req.device?.merchant,
+    merchantId: req.body.merchantId || req.merchant?._id || req.device?.merchant,
     gateway: gateway || provider,
     provider: provider || gateway,
     amount,

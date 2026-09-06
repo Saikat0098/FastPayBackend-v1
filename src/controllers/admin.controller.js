@@ -1422,6 +1422,24 @@ const toggleAdminPlatformBrandStatus = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, brand, `Admin platform brand is now ${newStatus}`);
 });
 
+// 14. Platform Identity & Global Platform Settings (Singleton)
+const platformIdentityService = require('../services/platformIdentity.service');
+
+const getPlatformSettings = asyncHandler(async (req, res) => {
+  const identity = await platformIdentityService.getPlatformIdentity();
+  return ApiResponse.success(res, identity, 'Platform settings retrieved successfully');
+});
+
+const updatePlatformSettings = asyncHandler(async (req, res) => {
+  const adminId = req.admin?._id || req.user?.id;
+  const updated = await platformIdentityService.updatePlatformIdentity({
+    data: req.body,
+    adminId,
+    req,
+  });
+  return ApiResponse.success(res, updated, 'Platform settings updated successfully');
+});
+
 module.exports = {
   getAdminDashboard,
   getAllUsers,
@@ -1470,6 +1488,9 @@ module.exports = {
   getAdminPlatformBrandById,
   updateAdminPlatformBrand,
   toggleAdminPlatformBrandStatus,
+  // Platform Identity & Settings (Singleton)
+  getPlatformSettings,
+  updatePlatformSettings,
 };
 
 

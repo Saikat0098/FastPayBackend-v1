@@ -423,7 +423,8 @@ const getPublicMerchantGateways = asyncHandler(async (req, res) => {
     }).sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
   }
 
-  return ApiResponse.success(res, activeGateways, 'Active brand gateways retrieved for checkout');
+  const { sortGatewaysByCanonicalOrder } = require('../utils/gatewayOrdering');
+  return ApiResponse.success(res, sortGatewaysByCanonicalOrder(activeGateways), 'Active brand gateways retrieved for checkout');
 });
 
 // 8. Get public gateways by Brand ID directly
@@ -447,7 +448,8 @@ const getPublicBrandGateways = asyncHandler(async (req, res) => {
     isActive: true,
   }).sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
 
-  return ApiResponse.success(res, activeGateways, 'Active brand gateways retrieved for checkout');
+  const { sortGatewaysByCanonicalOrder } = require('../utils/gatewayOrdering');
+  return ApiResponse.success(res, sortGatewaysByCanonicalOrder(activeGateways), 'Active brand gateways retrieved for checkout');
 });
 
 module.exports = {

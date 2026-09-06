@@ -9,10 +9,17 @@ const livePaymentSessionSchema = new mongoose.Schema(
       index: true,
       trim: true,
     },
+    ownerType: {
+      type: String,
+      enum: ['MERCHANT', 'ADMIN'],
+      default: 'MERCHANT',
+      index: true,
+    },
     checkoutSession: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'CheckoutSession',
-      required: true,
+      required: false,
+      default: null,
       index: true,
     },
     sessionId: {
@@ -29,7 +36,20 @@ const livePaymentSessionSchema = new mongoose.Schema(
     merchant: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Merchant',
-      required: true,
+      required: false,
+      default: null,
+      index: true,
+    },
+    admin: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+      index: true,
+    },
+    user: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
       index: true,
     },
     brand: {
@@ -37,6 +57,16 @@ const livePaymentSessionSchema = new mongoose.Schema(
       ref: 'Brand',
       default: null,
       index: true,
+    },
+    plan: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    billingCycle: {
+      type: String,
+      default: '',
+      trim: true,
     },
     provider: {
       type: String,
@@ -125,6 +155,7 @@ const livePaymentSessionSchema = new mongoose.Schema(
 );
 
 livePaymentSessionSchema.index({ merchant: 1, status: 1, customerPhone: 1 });
+livePaymentSessionSchema.index({ ownerType: 1, status: 1, customerPhone: 1 });
 livePaymentSessionSchema.index({ merchant: 1, createdAt: -1 });
 livePaymentSessionSchema.index({ checkoutSession: 1, status: 1 });
 livePaymentSessionSchema.index({ expiresAt: 1, status: 1 });

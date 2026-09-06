@@ -231,21 +231,23 @@ const getPublicCheckoutSession = async (sessionId) => {
   if (session.brand && session.merchant) {
     const bId = session.brand._id || session.brand;
     const mId = session.merchant._id || session.merchant;
+    const { sortGatewaysByCanonicalOrder } = require('../utils/gatewayOrdering');
     const brandGateways = await MerchantGateway.find({
       merchant: mId,
       brand: bId,
       isActive: true,
-    }).sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
+    });
 
-    sessionObj.gateways = brandGateways;
+    sessionObj.gateways = sortGatewaysByCanonicalOrder(brandGateways);
   } else if (session.merchant) {
+    const { sortGatewaysByCanonicalOrder } = require('../utils/gatewayOrdering');
     const mId = session.merchant._id || session.merchant;
     const merchantGateways = await MerchantGateway.find({
       merchant: mId,
       isActive: true,
-    }).sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
+    });
 
-    sessionObj.gateways = merchantGateways;
+    sessionObj.gateways = sortGatewaysByCanonicalOrder(merchantGateways);
   }
 
   // Authoritatively resolve Brand-scoped Live Payment configuration
@@ -257,16 +259,70 @@ const getPublicCheckoutSession = async (sessionId) => {
     brandLivePayment = session.merchant.livePayment;
   }
 
-  sessionObj.livePayment = {
-    enabled: Boolean(brandLivePayment?.enabled),
-    gateways: Array.isArray(brandLivePayment?.gateways)
-      ? brandLivePayment.gateways.map((g) => (g || '').toUpperCase())
-      : [],
-  };
+  // Check Global Live Payment Settings for merchant checkouts
+  if (session.ownerType !== 'ADMIN') {
+    const globalLivePaymentService = require('./globalLivePayment.service');
+    const globalSettings = await globalLivePaymentService.getGlobalLivePaymentSettings();
+
+    if (!globalSettings.isEnabled) {
+      sessionObj.livePayment = {
+        enabled: false,
+        gateways: [],
+        notice: globalSettings.notice || '',
+        adminNotice: globalSettings.notice || '',
+      };
+    } else {
+      const globallyAllowedList = (globalSettings.gateways || []).map((g) => g.toUpperCase());
+      sessionObj.livePayment = {
+        enabled: Boolean(brandLivePayment?.enabled),
+        gateways: Array.isArray(brandLivePayment?.gateways)
+          ? brandLivePayment.gateways
+              .map((g) => (g || '').toUpperCase())
+              .filter((g) => globallyAllowedList.includes(g))
+          : [],
+        notice: globalSettings.notice || '',
+        adminNotice: globalSettings.notice || '',
+      };
+    }
+  } else {
+    // Platform checkout retains its own configuration
+    sessionObj.livePayment = {
+      enabled: Boolean(brandLivePayment?.enabled),
+      gateways: Array.isArray(brandLivePayment?.gateways)
+        ? brandLivePayment.gateways.map((g) => (g || '').toUpperCase())
+        : [],
+    };
+  }
+
+  sessionObj.paymentMode = session.paymentMode || 'UNSPECIFIED';
+  sessionObj.selectedGateway = session.selectedGateway || '';
 
   return sessionObj;
 };
 
+const updateCheckoutSessionPaymentMode = async ({ sessionId, paymentMode, selectedGateway }) => {
+  if (!sessionId) {
+    throw new ApiError(400, 'Session ID is required');
+  }
+  const session = await CheckoutSession.findOne({ sessionId });
+  if (!session) {
+    throw new ApiError(404, 'Checkout session not found');
+  }
+
+  const validModes = ['LIVE', 'MANUAL', 'UNSPECIFIED'];
+  if (paymentMode && validModes.includes(paymentMode.toUpperCase())) {
+    session.paymentMode = paymentMode.toUpperCase();
+  }
+  if (selectedGateway) {
+    session.selectedGateway = selectedGateway.trim();
+  }
+  await session.save();
+  return {
+    sessionId: session.sessionId,
+    paymentMode: session.paymentMode,
+    selectedGateway: session.selectedGateway,
+  };
+};
 
 const verifySessionPayment = async ({
   sessionId,
@@ -291,8 +347,8 @@ const verifySessionPayment = async ({
       throw err;
     }
 
-    const sMerchantId = session.merchant._id || session.merchant;
-    if (merchantId && sMerchantId.toString() !== merchantId.toString()) {
+    const sMerchantId = session.merchant ? (session.merchant._id || session.merchant) : null;
+    if (merchantId && sMerchantId && sMerchantId.toString() !== merchantId.toString()) {
       const err = new ApiError(404, 'Checkout session not found or access denied');
       err.code = 'NOT_FOUND';
       throw err;
@@ -332,7 +388,158 @@ const verifySessionPayment = async ({
     }
   }
 
-  const mId = merchantId || (session ? (session.merchant._id || session.merchant) : null);
+  const cleanTrx = (trxId || '').trim();
+
+  if (!cleanTrx) {
+    throw new ApiError(400, 'Transaction ID mismatch', [], '', {
+      code: 'TRANSACTION_NOT_FOUND',
+      userMessage: 'Transaction ID mismatch. Please enter your Transaction ID.',
+    });
+  }
+
+  let targetProvider = (provider || gateway || '').trim();
+  if (!targetProvider) {
+    const Payment = require('../models/Payment');
+    const matchedPayment = await Payment.findOne({
+      transactionId: { $regex: new RegExp(`^${cleanTrx}$`, 'i') },
+    });
+    if (matchedPayment) {
+      targetProvider = matchedPayment.provider || matchedPayment.gateway;
+    }
+  }
+
+  if (!targetProvider) {
+    const err = new ApiError(400, 'Transaction gateway mismatch', [], '', {
+      code: 'PAYMENT_PROVIDER_MISMATCH',
+      userMessage: 'Transaction gateway mismatch. Please select the correct payment method.',
+    });
+    err.code = 'PAYMENT_PROVIDER_MISMATCH';
+    throw err;
+  }
+
+  const isPlatformCheckout = session?.ownerType === 'ADMIN';
+
+  // ============================================================
+  // PLATFORM / ADMIN CHECKOUT SESSION VERIFICATION — START
+  // ============================================================
+  if (isPlatformCheckout) {
+    const Payment = require('../models/Payment');
+    const PaymentMethod = require('../models/PaymentMethod');
+
+    const payment = await Payment.findOne({
+      transactionId: { $regex: new RegExp(`^${cleanTrx}$`, 'i') },
+    }).sort({ updatedAt: -1, createdAt: -1 });
+
+    if (!payment) {
+      throw new ApiError(400, 'Transaction ID mismatch', [], '', {
+        code: 'TRANSACTION_NOT_FOUND',
+        userMessage: 'Transaction ID mismatch. We could not find a matching payment.',
+      });
+    }
+
+    // Platform isolation: Never allow merchant-owned transactions for platform checkout
+    if (payment.ownerType === 'MERCHANT' || payment.merchant) {
+      throw new ApiError(400, 'Transaction does not belong to this platform', [], '', {
+        code: 'TRANSACTION_OWNER_MISMATCH',
+        userMessage: 'Transaction does not belong to this platform.',
+      });
+    }
+
+    // Check Gateway / Provider
+    const payProvider = (payment.provider || payment.gateway || '').toLowerCase().trim();
+    if (targetProvider && !payProvider.includes(targetProvider.toLowerCase()) && !targetProvider.toLowerCase().includes(payProvider)) {
+      throw new ApiError(400, 'Transaction gateway mismatch', [], '', {
+        code: 'PAYMENT_PROVIDER_MISMATCH',
+        userMessage: 'Transaction gateway mismatch. Please select the correct payment method.',
+      });
+    }
+
+    // Check Platform Receiving Account
+    const pm = await PaymentMethod.findOne({
+      $or: [
+        { code: targetProvider.toLowerCase() },
+        { name: { $regex: new RegExp(`^${targetProvider}$`, 'i') } },
+      ],
+      isActive: true,
+    });
+
+    if (pm && pm.accountNumber && payment.accountNumber) {
+      const cleanPmAcc = pm.accountNumber.replace(/[^0-9]/g, '');
+      const cleanPayAcc = payment.accountNumber.replace(/[^0-9]/g, '');
+      if (cleanPmAcc && cleanPayAcc && !cleanPmAcc.includes(cleanPayAcc) && !cleanPayAcc.includes(cleanPmAcc)) {
+        throw new ApiError(400, 'Transaction receiving account mismatch', [], '', {
+          code: 'TRANSACTION_ACCOUNT_MISMATCH',
+          userMessage: 'Transaction receiving account mismatch.',
+        });
+      }
+    }
+
+    // Check Amount
+    if (session && session.amount && Number(session.amount) > 0) {
+      if (payment.amount < Number(session.amount)) {
+        throw new ApiError(400, 'Transaction amount mismatch', [], '', {
+          code: 'TRANSACTION_AMOUNT_MISMATCH',
+          userMessage: 'Transaction amount mismatch. Amount paid is less than required.',
+        });
+      }
+    }
+
+    // Check Replay / Already Used
+    if (payment.isUsed || payment.status === 'USED' || payment.status === 'CLAIMED') {
+      throw new ApiError(400, 'Transaction already used', [], '', {
+        code: 'TRANSACTION_ALREADY_USED',
+        userMessage: 'Transaction already used for another purchase.',
+      });
+    }
+
+    // Claim atomically
+    const claimedPayment = await Payment.findOneAndUpdate(
+      {
+        _id: payment._id,
+        isUsed: { $ne: true },
+        status: { $nin: ['USED', 'CLAIMED', 'REJECTED'] },
+      },
+      {
+        $set: {
+          status: 'VERIFIED',
+          paymentStatus: 'VERIFIED',
+          verificationState: 'VERIFIED',
+          isUsed: true,
+          isUsedForSubscription: true,
+          usedAt: new Date(),
+          ...(customerName ? { customerName } : {}),
+          ...(phone ? { phone } : {}),
+        },
+      },
+      { new: true }
+    );
+
+    if (!claimedPayment) {
+      throw new ApiError(400, 'Transaction already used', [], '', {
+        code: 'TRANSACTION_ALREADY_USED',
+        userMessage: 'Transaction already used for another purchase.',
+      });
+    }
+
+    session.status = 'VERIFIED';
+    session.payment = claimedPayment._id;
+    session.transactionId = claimedPayment.transactionId;
+    if (customerName) session.customerName = customerName;
+    if (phone) session.customerPhone = phone;
+    await session.save();
+
+    return {
+      session,
+      payment: claimedPayment,
+      returnUrl: session.returnUrl,
+      message: 'Platform payment verified successfully',
+    };
+  }
+  // ============================================================
+  // PLATFORM / ADMIN CHECKOUT SESSION VERIFICATION — END
+  // ============================================================
+
+  const mId = merchantId || (session ? (session.merchant?._id || session.merchant) : null);
 
   if (mId) {
     const entitlementService = require('./entitlement.service');
@@ -350,33 +557,10 @@ const verifySessionPayment = async ({
     }
   }
 
-  const cleanTrx = (trxId || '').trim();
-
-  if (!cleanTrx) {
-    throw new ApiError(400, 'Transaction ID is required');
-  }
-
-  let targetProvider = (provider || gateway || '').trim();
-  if (!targetProvider) {
-    const Payment = require('../models/Payment');
-    const matchedPayment = await Payment.findOne({
-      transactionId: { $regex: new RegExp(`^${cleanTrx}$`, 'i') },
-      ...(mId ? { merchant: mId } : {}),
-    });
-    if (matchedPayment) {
-      targetProvider = matchedPayment.provider || matchedPayment.gateway;
-    }
-  }
-
-  if (!targetProvider) {
-    const err = new ApiError(400, 'Payment wallet provider is required or could not be determined');
-    err.code = 'PAYMENT_PROVIDER_MISMATCH';
-    throw err;
-  }
-
   const resolvedBrandId = session && session.brand ? (session.brand._id || session.brand) : (brandId || null);
 
   // Validate Gateway Ownership & Active Status for this Brand/Merchant
+  let targetGatewayRecord = null;
   if (mId) {
     const gwQuery = {
       merchant: mId,
@@ -387,10 +571,10 @@ const verifySessionPayment = async ({
       gwQuery.brand = resolvedBrandId;
     }
 
-    let activeGateway = await MerchantGateway.findOne(gwQuery);
-    if (!activeGateway && resolvedBrandId) {
+    targetGatewayRecord = await MerchantGateway.findOne(gwQuery);
+    if (!targetGatewayRecord && resolvedBrandId) {
       // Fallback ONLY for unassigned legacy records (brand is null)
-      activeGateway = await MerchantGateway.findOne({
+      targetGatewayRecord = await MerchantGateway.findOne({
         merchant: mId,
         provider: { $regex: new RegExp(`^${targetProvider}$`, 'i') },
         isActive: true,
@@ -398,8 +582,11 @@ const verifySessionPayment = async ({
       });
     }
 
-    if (!activeGateway) {
-      const err = new ApiError(400, `Selected payment channel (${targetProvider}) is invalid or inactive for this brand.`);
+    if (!targetGatewayRecord) {
+      const err = new ApiError(400, 'Transaction gateway mismatch', [], '', {
+        code: 'PAYMENT_PROVIDER_MISMATCH',
+        userMessage: `Selected payment channel (${targetProvider}) is invalid or inactive for this merchant.`,
+      });
       err.code = 'PAYMENT_PROVIDER_MISMATCH';
       throw err;
     }
@@ -415,6 +602,7 @@ const verifySessionPayment = async ({
     amount: session ? session.amount : undefined,
     phone: phone || (session ? session.customerPhone : undefined),
     customerName: customerName || (session ? session.customerName : undefined),
+    expectedAccountNumber: targetGatewayRecord?.accountNumber,
   });
 
   let lpOrder = null;
@@ -539,6 +727,7 @@ const getMerchantCheckoutSessionStatus = async (sessionId, merchantId, brandId =
 module.exports = {
   createCheckoutSession,
   getPublicCheckoutSession,
+  updateCheckoutSessionPaymentMode,
   verifySessionPayment,
   getMerchantCheckoutSessionStatus,
   handleSuccessfulPaymentVerification,

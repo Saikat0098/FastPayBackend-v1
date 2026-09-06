@@ -36,16 +36,11 @@ const createActivationKey = async ({ merchantId, brandId }) => {
     throw err;
   }
 
-  // Resolve & Validate Brand Context
+  // Resolve & Validate Brand Context (only if brandId was provided)
   let resolvedBrand = null;
   if (brandId && mongoose.Types.ObjectId.isValid(brandId)) {
     resolvedBrand = await Brand.findOne({ _id: brandId, merchant: merchantId });
     if (!resolvedBrand) throw new ApiError(404, 'Brand not found or invalid');
-  } else {
-    resolvedBrand = await Brand.findOne({ merchant: merchantId }).sort({ createdAt: 1 });
-  }
-
-  if (resolvedBrand) {
     await checkBrandOperationalStatus(resolvedBrand);
   }
 
@@ -145,14 +140,23 @@ const activateDeviceWithKey = async ({
     });
   }
 
-  // 3. Activation Key Belongs to ANOTHER Device
-  if (keyDoc.isUsed && keyDoc.usedByDevice) {
-    if (!device || device._id.toString() !== keyDoc.usedByDevice.toString()) {
+  // 3. Activation Key Belongs to ANOTHER Device (Strict 1 key = 1 physical device binding)
+  const boundDeviceId = keyDoc.usedByDevice
+    ? (keyDoc.usedByDevice._id || keyDoc.usedByDevice).toString()
+    : null;
+
+  if (boundDeviceId) {
+    if (!device || device._id.toString() !== boundDeviceId) {
       throw new ApiError(400, 'This activation key is already registered to another device.', [], '', {
         code: 'ACTIVATION_KEY_ALREADY_USED',
         userMessage: 'This activation key is already being used on another device. Please use a different activation key.',
       });
     }
+  } else if (keyDoc.isUsed || keyDoc.status === 'ACTIVE') {
+    throw new ApiError(400, 'This activation key is already registered to another device.', [], '', {
+      code: 'ACTIVATION_KEY_ALREADY_USED',
+      userMessage: 'This activation key is already being used on another device. Please use a different activation key.',
+    });
   }
 
   // 4. Device is Already Registered and Active Under a DIFFERENT Key (Only if currently active & bound)
@@ -291,6 +295,41 @@ const getMerchantActivationKeys = async (merchantId, brandId) => {
     .sort({ createdAt: -1 });
 };
 
+const deleteMerchantActivationKey = async ({ keyId, merchantId, isSuperAdmin = false }) => {
+  if (!keyId || !mongoose.Types.ObjectId.isValid(keyId.toString())) {
+    throw new ApiError(404, 'Key not found');
+  }
+
+  const keyDoc = await ActivationKey.findById(keyId);
+  if (!keyDoc) {
+    throw new ApiError(404, 'Key not found');
+  }
+
+  const keyMerchantId = keyDoc.merchant?._id ? keyDoc.merchant._id.toString() : keyDoc.merchant?.toString();
+  if (!isSuperAdmin && (!keyMerchantId || keyMerchantId !== merchantId?.toString())) {
+    throw new ApiError(404, 'Key not found or access denied');
+  }
+
+  if (keyDoc.ownerType === 'ADMIN') {
+    throw new ApiError(403, 'Platform admin keys cannot be deleted by merchants');
+  }
+
+  // If the key was used by a device, reset the device's binding atomically
+  if (keyDoc.usedByDevice) {
+    await Device.findByIdAndUpdate(keyDoc.usedByDevice, {
+      status: 'INACTIVE',
+      isOnline: false,
+      activationKey: null,
+      ownerType: null,
+      merchant: null,
+      admin: null,
+    });
+  }
+
+  await ActivationKey.findByIdAndDelete(keyId);
+  return { success: true, message: 'Activation key deleted successfully' };
+};
+
 module.exports = {
   generateMerchantKeyString,
   generateAdminKeyString,
@@ -298,4 +337,5 @@ module.exports = {
   getMerchantActivationKeys,
   activateDeviceWithKey,
   resetActivationKey,
+  deleteMerchantActivationKey,
 };

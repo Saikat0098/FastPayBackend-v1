@@ -100,18 +100,32 @@ const getPublicSession = asyncHandler(async (req, res) => {
 // POST /api/v1/checkout/sessions/public/:sessionId/verify
 const verifyPublicSessionPayment = asyncHandler(async (req, res) => {
   const { sessionId } = req.params;
-  const { trxId, transactionId, gateway, provider, customerName, phone } = req.body;
+  const { trxId, transactionId, gateway, provider, paymentMethod, customerName, phone } = req.body;
 
   const result = await checkoutSessionService.verifySessionPayment({
     sessionId,
     trxId: trxId || transactionId,
-    gateway: gateway || provider,
-    provider: provider || gateway,
+    gateway: gateway || provider || paymentMethod,
+    provider: provider || gateway || paymentMethod,
     customerName,
     phone,
   });
 
   return ApiResponse.success(res, result, 'Payment verified successfully for checkout session');
+});
+
+// PATCH /api/v1/checkout/sessions/public/:sessionId/mode
+const updatePublicSessionPaymentMode = asyncHandler(async (req, res) => {
+  const { sessionId } = req.params;
+  const { paymentMode, selectedGateway } = req.body;
+
+  const result = await checkoutSessionService.updateCheckoutSessionPaymentMode({
+    sessionId,
+    paymentMode,
+    selectedGateway,
+  });
+
+  return ApiResponse.success(res, result, 'Checkout session payment mode updated');
 });
 
 // GET /api/v1/checkout/sessions/:sessionId
@@ -129,14 +143,14 @@ const getMerchantSessionStatus = asyncHandler(async (req, res) => {
 const verifyMerchantSessionPayment = asyncHandler(async (req, res) => {
   const merchantId = req.merchantId || req.merchant?._id;
   const { sessionId: paramSessionId } = req.params;
-  const { sessionId: bodySessionId, trxId, transactionId, gateway, provider, customerName, phone, amount } = req.body;
+  const { sessionId: bodySessionId, trxId, transactionId, gateway, provider, paymentMethod, customerName, phone, amount } = req.body;
   const brandId = req.brand ? req.brand._id : req.body?.brandId;
 
   const result = await checkoutSessionService.verifySessionPayment({
     sessionId: paramSessionId || bodySessionId,
     trxId: trxId || transactionId,
-    gateway: gateway || provider,
-    provider: provider || gateway,
+    gateway: gateway || provider || paymentMethod,
+    provider: provider || gateway || paymentMethod,
     customerName,
     phone,
     merchantId,
@@ -150,6 +164,7 @@ module.exports = {
   createSession,
   getPublicSession,
   verifyPublicSessionPayment,
+  updatePublicSessionPaymentMode,
   getMerchantSessionStatus,
   verifyMerchantSessionPayment,
 };

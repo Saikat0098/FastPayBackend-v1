@@ -42,6 +42,7 @@ const verifyDeviceNotBlocked = async ({ deviceId, activationKey, reqDevice }) =>
     devDoc = await Device.findOne({
       $or: [
         { androidId: deviceId.toString() },
+        { deviceId: deviceId.toString() },
         ...(isMongoId ? [{ _id: deviceId }] : []),
       ],
     });
@@ -92,6 +93,7 @@ const processTransactionSync = async ({
   amount,
   sender,
   transactionId,
+  trxId,
   sms,
   rawSms,
   rawBody,
@@ -106,7 +108,7 @@ const processTransactionSync = async ({
   notificationTitle,
   isCorrelated,
 }) => {
-  const cleanTxId = transactionId ? transactionId.trim() : '';
+  const cleanTxId = (transactionId || trxId || '').toString().trim();
 
   // 1. Validate Activation Key (if provided)
   let keyDoc = null;
@@ -143,7 +145,7 @@ const processTransactionSync = async ({
   } else {
     finalOwnerType = 'MERCHANT';
     finalMerchantId = devDoc?.merchant || keyDoc?.merchant || merchantId || null;
-    finalBrandId = devDoc?.brand || keyDoc?.brand || null;
+    finalBrandId = null; // Unassigned initially. The merchant owns the transaction; brand attribution happens at checkout/verification.
     finalAdminId = null;
 
     // Only fallback for merchant devices if unresolved
@@ -664,8 +666,12 @@ const getPayments = async ({ merchantId, brandId, isSuperAdmin = false, provider
     query.merchant = merchantId;
   }
 
-  if (brandId && brandId !== 'ALL' && mongoose.Types.ObjectId.isValid(brandId)) {
-    query.brand = new mongoose.Types.ObjectId(brandId.toString());
+  if (brandId && brandId !== 'ALL') {
+    if (brandId === 'PRIMARY' || brandId === 'UNASSIGNED' || brandId === 'MERCHANT_LEVEL') {
+      query.brand = null;
+    } else if (mongoose.Types.ObjectId.isValid(brandId.toString())) {
+      query.brand = new mongoose.Types.ObjectId(brandId.toString());
+    }
   }
 
   if (provider) query.provider = provider;
@@ -764,11 +770,12 @@ const verifyCustomerCheckoutPayment = async ({
   amount,
   phone,
   customerName,
+  expectedAccountNumber,
 }) => {
   if (!trxId || !trxId.trim()) {
-    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.', [], '', {
+    throw new ApiError(400, 'Transaction ID mismatch', [], '', {
       code: 'TRANSACTION_NOT_FOUND',
-      userMessage: 'Transaction ID is incorrect. We could not find a matching payment. Please check your Transaction ID and try again.',
+      userMessage: 'Transaction ID mismatch. Please enter your Transaction ID.',
     });
   }
 
@@ -788,43 +795,75 @@ const verifyCustomerCheckoutPayment = async ({
   }).sort({ updatedAt: -1, createdAt: -1 });
 
   if (!payment) {
-    throw new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment.', [], '', {
+    throw new ApiError(400, 'Transaction ID mismatch', [], '', {
       code: 'TRANSACTION_NOT_FOUND',
-      userMessage: 'Transaction ID is incorrect. We could not find a matching payment. Please check your Transaction ID and try again.',
+      userMessage: 'Transaction ID mismatch. We could not find a matching payment.',
     });
   }
 
   // 1. ADMIN TO MERCHANT ISOLATION: Admin/Platform transactions can NEVER be consumed by a merchant checkout
   if (payment.ownerType === 'ADMIN' || (!payment.merchant && payment.admin)) {
-    throw new ApiError(400, 'This transaction does not belong to this payment account.', [], '', {
+    throw new ApiError(400, 'Transaction does not belong to this merchant', [], '', {
       code: 'TRANSACTION_OWNER_MISMATCH',
-      userMessage: 'This transaction does not belong to this payment account.',
+      userMessage: 'Transaction does not belong to this merchant.',
     });
   }
 
   // 2. MERCHANT TO MERCHANT ISOLATION: Merchant A cannot consume Merchant B's transaction
   if (!payment.merchant || payment.merchant.toString() !== merchantId.toString()) {
-    throw new ApiError(400, 'This transaction does not belong to this payment account.', [], '', {
+    throw new ApiError(400, 'Transaction does not belong to this merchant', [], '', {
       code: 'TRANSACTION_OWNER_MISMATCH',
-      userMessage: 'This transaction does not belong to this payment account.',
+      userMessage: 'Transaction does not belong to this merchant.',
+    });
+  }
+
+  // 2.5 BRAND-TO-MERCHANT VALIDATION: Ensure requested checkout brand belongs to this merchant
+  if (brandId && mongoose.Types.ObjectId.isValid(brandId.toString())) {
+    const Brand = require('../models/Brand');
+    const brandDoc = await Brand.findOne({ _id: brandId, merchant: merchantId });
+    if (!brandDoc) {
+      throw new ApiError(400, 'Brand does not belong to this merchant', [], '', {
+        code: 'BRAND_MERCHANT_MISMATCH',
+        userMessage: 'Brand does not belong to this merchant.',
+      });
+    }
+  }
+
+  // 2.6 TRANSACTION REPLAY PROTECTION: Once consumed/verified, reject reuse across any brand, order, or checkout
+  if (payment.isUsed || payment.status === 'USED' || payment.status === 'CLAIMED' || payment.status === 'VERIFIED') {
+    throw new ApiError(400, 'Transaction already used', [], '', {
+      code: 'TRANSACTION_ALREADY_USED',
+      userMessage: 'Transaction ID has already been used.',
     });
   }
 
   // 3. BRAND ISOLATION: Payment already claimed by another brand cannot be verified
   if (brandId && payment.brand && payment.brand.toString() !== brandId.toString()) {
-    throw new ApiError(400, 'This transaction does not belong to this payment account.', [], '', {
+    throw new ApiError(400, 'Transaction does not belong to this merchant', [], '', {
       code: 'TRANSACTION_OWNER_MISMATCH',
-      userMessage: 'This transaction does not belong to this payment account.',
+      userMessage: 'Transaction does not belong to this merchant.',
     });
   }
 
   // 4. Correct Provider Check
   if (targetProvider) {
     const payProvider = (payment.provider || payment.gateway || '').toLowerCase().trim();
-    if (payProvider !== targetProvider) {
-      throw new ApiError(400, 'Payment provider mismatch for this transaction.', [], '', {
+    if (payProvider !== targetProvider && !payProvider.includes(targetProvider) && !targetProvider.includes(payProvider)) {
+      throw new ApiError(400, 'Transaction gateway mismatch', [], '', {
         code: 'PAYMENT_PROVIDER_MISMATCH',
-        userMessage: 'Payment provider mismatch. Please ensure you selected the correct payment method.',
+        userMessage: 'Transaction gateway mismatch. Please select the correct payment method.',
+      });
+    }
+  }
+
+  // 4.5. Receiving Account Verification
+  if (expectedAccountNumber && payment.accountNumber) {
+    const cleanExpected = expectedAccountNumber.toString().replace(/[^0-9]/g, '');
+    const cleanActual = payment.accountNumber.toString().replace(/[^0-9]/g, '');
+    if (cleanExpected && cleanActual && !cleanExpected.includes(cleanActual) && !cleanActual.includes(cleanExpected)) {
+      throw new ApiError(400, 'Transaction receiving account mismatch', [], '', {
+        code: 'TRANSACTION_ACCOUNT_MISMATCH',
+        userMessage: 'Transaction receiving account mismatch. Payment was sent to an incorrect receiving account.',
       });
     }
   }
@@ -835,9 +874,9 @@ const verifyCustomerCheckoutPayment = async ({
     payment.status === 'REJECTED' ||
     payment.isSuspicious
   ) {
-    throw new ApiError(400, 'Transaction ID flagged as suspicious evidence and cannot be verified.', [], '', {
+    throw new ApiError(400, 'Transaction ID mismatch', [], '', {
       code: 'TRANSACTION_INVALID',
-      userMessage: 'This transaction has been flagged and cannot be verified.',
+      userMessage: 'Transaction ID mismatch. This transaction has been flagged.',
     });
   }
 
@@ -853,18 +892,18 @@ const verifyCustomerCheckoutPayment = async ({
   // 7. Correct amount matching (authoritative)
   if (amount && Number(amount) > 0) {
     if (payment.amount < Number(amount)) {
-      throw new ApiError(400, 'The payment amount does not match the required amount.', [], '', {
+      throw new ApiError(400, 'Transaction amount mismatch', [], '', {
         code: 'TRANSACTION_AMOUNT_MISMATCH',
-        userMessage: 'The payment amount does not match the required amount.',
+        userMessage: 'Transaction amount mismatch. Amount paid is less than required.',
       });
     }
   }
 
   // 8. Transaction Replay Protection (Payment not already consumed/used)
   if (payment.isUsed || payment.status === 'USED' || payment.status === 'CLAIMED') {
-    throw new ApiError(400, 'This transaction has already been used for another order.', [], '', {
+    throw new ApiError(400, 'Transaction already used', [], '', {
       code: 'TRANSACTION_ALREADY_USED',
-      userMessage: 'This transaction has already been used for another order.',
+      userMessage: 'Transaction already used for another purchase.',
     });
   }
 

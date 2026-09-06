@@ -187,13 +187,14 @@ const getFormBySlug = async (slugOrId) => {
     const MerchantGateway = require('../models/MerchantGateway');
     const bId = form.brand._id || form.brand;
     const mId = form.merchant._id || form.merchant;
+    const { sortGatewaysByCanonicalOrder } = require('../utils/gatewayOrdering');
     const brandGateways = await MerchantGateway.find({
       merchant: mId,
       brand: bId,
       isActive: true,
-    }).sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
+    });
 
-    formObj.gateways = brandGateways;
+    formObj.gateways = sortGatewaysByCanonicalOrder(brandGateways);
   }
 
   return formObj;

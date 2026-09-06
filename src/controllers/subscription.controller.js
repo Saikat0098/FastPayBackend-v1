@@ -88,21 +88,22 @@ const getAllSubscriptions = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, subscriptions, 'All subscriptions list');
 });
 
+const platformIdentityService = require('../services/platformIdentity.service');
+
 const getPublicSettings = asyncHandler(async (req, res) => {
-  let settings = await Settings.findOne();
-  if (!settings) {
-    settings = {
-      siteName: 'FastPay Auto Payment Gateway',
-      supportEmail: 'support@autopaymentgateway.com',
-      supportPhone: '+8801700000000',
-      whatsappNumber: '+8801700000000',
-    };
-  }
+  const platformIdentity = await platformIdentityService.getPlatformIdentity();
   return ApiResponse.success(res, {
-    siteName: settings.siteName || 'FastPay Auto Payment Gateway',
-    supportEmail: settings.supportEmail || 'support@autopaymentgateway.com',
-    supportPhone: settings.supportPhone || '+8801700000000',
-    whatsappNumber: settings.whatsappNumber || '+8801700000000',
+    name: platformIdentity.name || 'FastPay Official',
+    siteName: platformIdentity.name || 'FastPay Official',
+    brandName: platformIdentity.name || 'FastPay Official',
+    logo: platformIdentity.logo || '',
+    brandLogo: platformIdentity.logo || '',
+    tagline: platformIdentity.tagline || 'Fast, Secure & Automated Payment Gateway for Bangladesh',
+    supportEmail: platformIdentity.supportEmail || 'gateway@fastpay.com',
+    supportPhone: platformIdentity.supportPhone || '',
+    whatsappNumber: platformIdentity.whatsappNumber || '',
+    websiteUrl: platformIdentity.websiteUrl || 'https://fastpay.com',
+    isActive: platformIdentity.isActive,
   }, 'Public settings retrieved');
 });
 
@@ -145,10 +146,48 @@ const getSubscriptionCheckoutSession = asyncHandler(async (req, res) => {
       ? (plan.priceMonthly ?? plan.priceBDT ?? 5)
       : (isYearly ? plan.priceYearly : (plan.priceMonthly || plan.priceBDT)));
 
-  const paymentMethods = await PaymentMethod.find({ isActive: true }).sort({ displayOrder: 1 });
+  const { getCanonicalPlatformPaymentMethods } = require('./paymentMethod.controller');
+  const CheckoutSession = require('../models/CheckoutSession');
+  const crypto = require('crypto');
+
+  const paymentMethods = await getCanonicalPlatformPaymentMethods();
+  const platformIdentity = await platformIdentityService.getPlatformIdentity();
+
+  const liveGateways = paymentMethods
+    .filter((m) => m.isActive && (m.isLivePaymentEnabled || m.paymentMode === 'live'))
+    .map((m) => (m.code || m.livePaymentProvider || m.name || '').toUpperCase().trim());
+
+  const livePayment = {
+    enabled: liveGateways.length > 0,
+    gateways: liveGateways,
+  };
+
+  const orderId = `SUB-${plan.name.toUpperCase()}-${Date.now().toString().slice(-6)}`;
+  const sessionId = `cs_sub_${crypto.randomBytes(12).toString('hex')}`;
+
+  if (!isFree) {
+    await CheckoutSession.create({
+      sessionId,
+      orderId,
+      ownerType: 'ADMIN',
+      merchant: null,
+      admin: null,
+      user: req.user?._id || req.merchant?.user || null,
+      amount,
+      currency: 'BDT',
+      plan: plan.name,
+      planTitle: plan.title,
+      billingCycle: isTest ? 'test' : (isYearly ? 'yearly' : 'monthly'),
+      returnUrl: '/merchant',
+      cancelUrl: '/pricing',
+      status: 'PENDING',
+      expiresAt: new Date(Date.now() + 30 * 60 * 1000), // 30 mins
+    });
+  }
 
   return ApiResponse.success(res, {
-    orderId: `SUB-${plan.name.toUpperCase()}-${Date.now().toString().slice(-6)}`,
+    sessionId,
+    orderId,
     amount,
     currency: 'BDT',
     plan: plan.name,
@@ -163,9 +202,26 @@ const getSubscriptionCheckoutSession = asyncHandler(async (req, res) => {
     webhookEnabled: plan.webhookEnabled,
     features: plan.features,
     gateways: isFree ? [] : paymentMethods,
+    livePayment,
     merchant: {
-      name: 'FastPay Official',
-      brandName: 'FastPay Platform Subscription',
+      name: platformIdentity?.name || 'FastPay Official',
+      brandName: platformIdentity?.name || 'FastPay Official',
+      logo: platformIdentity?.logo || '',
+      brandLogo: platformIdentity?.logo || '',
+      tagline: platformIdentity?.tagline || 'FastPay Platform Subscription',
+      supportEmail: platformIdentity?.supportEmail || 'gateway@fastpay.com',
+      supportPhone: platformIdentity?.supportPhone || '',
+      whatsappNumber: platformIdentity?.whatsappNumber || '',
+      websiteUrl: platformIdentity?.websiteUrl || 'https://fastpay.com',
+    },
+    platformIdentity: {
+      name: platformIdentity?.name || 'FastPay Official',
+      logo: platformIdentity?.logo || '',
+      tagline: platformIdentity?.tagline || '',
+      supportEmail: platformIdentity?.supportEmail || '',
+      supportPhone: platformIdentity?.supportPhone || '',
+      whatsappNumber: platformIdentity?.whatsappNumber || '',
+      websiteUrl: platformIdentity?.websiteUrl || '',
     },
   }, 'Subscription checkout session retrieved');
 });
@@ -205,7 +261,9 @@ const upgradeSubscription = asyncHandler(async (req, res) => {
 
 const getUpgradeCheckoutSession = asyncHandler(async (req, res) => {
   const entitlementService = require('../services/entitlement.service');
-  const PaymentMethod = require('../models/PaymentMethod');
+  const { getCanonicalPlatformPaymentMethods } = require('./paymentMethod.controller');
+  const CheckoutSession = require('../models/CheckoutSession');
+  const crypto = require('crypto');
   const merchantId = req.merchantId || req.merchant?._id || req.user?.merchant;
 
   const targetPlan = req.params.targetPlan || req.query.targetPlan;
@@ -220,10 +278,43 @@ const getUpgradeCheckoutSession = asyncHandler(async (req, res) => {
     targetPlan,
     billingCycle
   );
-  const paymentMethods = await PaymentMethod.find({ isActive: true }).sort({ displayOrder: 1 });
+  const paymentMethods = await getCanonicalPlatformPaymentMethods();
+  const platformIdentity = await platformIdentityService.getPlatformIdentity();
+
+  const liveGateways = paymentMethods
+    .filter((m) => m.isActive && (m.isLivePaymentEnabled || m.paymentMode === 'live'))
+    .map((m) => (m.code || m.livePaymentProvider || m.name || '').toUpperCase().trim());
+
+  const livePayment = {
+    enabled: liveGateways.length > 0,
+    gateways: liveGateways,
+  };
+
+  const orderId = `UPG-${quote.targetPlan.toUpperCase()}-${Date.now().toString().slice(-6)}`;
+  const sessionId = `cs_upg_${crypto.randomBytes(12).toString('hex')}`;
+
+  await CheckoutSession.create({
+    sessionId,
+    orderId,
+    ownerType: 'ADMIN',
+    merchant: merchantId || null,
+    admin: null,
+    user: req.user?._id || req.merchant?.user || null,
+    amount: quote.priceDifference,
+    currency: 'BDT',
+    targetPlan: quote.targetPlan,
+    targetPlanName: quote.targetPlanName,
+    targetBillingCycle: quote.targetBillingCycle,
+    billingCycle: quote.targetBillingCycle,
+    returnUrl: '/merchant',
+    cancelUrl: '/merchant/upgrade',
+    status: 'PENDING',
+    expiresAt: new Date(Date.now() + 30 * 60 * 1000), // 30 mins
+  });
 
   return ApiResponse.success(res, {
-    orderId: `UPG-${quote.targetPlan.toUpperCase()}-${Date.now().toString().slice(-6)}`,
+    sessionId,
+    orderId,
     amount: quote.priceDifference,
     currency: 'BDT',
     upgradeType: quote.upgradeType,
@@ -245,9 +336,23 @@ const getUpgradeCheckoutSession = asyncHandler(async (req, res) => {
     daysRemaining: quote.daysRemaining,
     newLimits: quote.newLimits,
     gateways: paymentMethods,
+    livePayment,
     merchant: {
-      name: 'FastPay Official',
-      brandName: `FastPay Plan Upgrade: ${quote.currentPlanName} → ${quote.targetPlanName} (${quote.targetBillingCycle === 'yearly' ? 'Yearly' : 'Monthly'})`,
+      name: platformIdentity?.name || 'FastPay Official',
+      brandName: `${platformIdentity?.name || 'FastPay'} Plan Upgrade: ${quote.currentPlanName} → ${quote.targetPlanName} (${quote.targetBillingCycle === 'yearly' ? 'Yearly' : 'Monthly'})`,
+      logo: platformIdentity?.logo || '',
+      brandLogo: platformIdentity?.logo || '',
+      supportEmail: platformIdentity?.supportEmail || 'gateway@fastpay.com',
+      websiteUrl: platformIdentity?.websiteUrl || 'https://fastpay.com',
+    },
+    platformIdentity: {
+      name: platformIdentity?.name || 'FastPay Official',
+      logo: platformIdentity?.logo || '',
+      tagline: platformIdentity?.tagline || '',
+      supportEmail: platformIdentity?.supportEmail || '',
+      supportPhone: platformIdentity?.supportPhone || '',
+      whatsappNumber: platformIdentity?.whatsappNumber || '',
+      websiteUrl: platformIdentity?.websiteUrl || '',
     },
   }, 'Upgrade checkout session created');
 });

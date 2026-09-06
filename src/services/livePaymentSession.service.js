@@ -63,8 +63,152 @@ const createLivePaymentSession = async ({
 
   const resolvedMerchantId = checkoutSession.merchant?._id || checkoutSession.merchant;
   const resolvedBrandId = checkoutSession.brand ? (checkoutSession.brand._id || checkoutSession.brand) : (brandId || null);
+  const isPlatformCheckout = checkoutSession.ownerType === 'ADMIN';
 
-  // Tenant / Brand isolation verification
+  const canonicalProvider = (provider || 'bkash').toString().trim().toUpperCase();
+
+  // ============================================================
+  // PLATFORM / ADMIN CHECKOUT SESSION BRANCH — START
+  // ============================================================
+  if (isPlatformCheckout) {
+    const PaymentMethod = require('../models/PaymentMethod');
+    const providerCode = canonicalProvider.toLowerCase();
+
+    // 1. Locate trusted Platform Payment Method
+    const pm = await PaymentMethod.findOne({
+      $or: [
+        { code: providerCode },
+        { name: { $regex: new RegExp(`^${providerCode}$`, 'i') } },
+      ],
+      isActive: true,
+    });
+
+    if (!pm) {
+      throw new ApiError(
+        400,
+        `No active ${canonicalProvider} payment method is configured on FastPay platform.`,
+        [],
+        '',
+        { code: 'GATEWAY_NOT_CONFIGURED' }
+      );
+    }
+
+    if (!pm.isLivePaymentEnabled && pm.paymentMode !== 'live') {
+      throw new ApiError(
+        400,
+        `Live payment is not enabled for ${pm.name} on the FastPay platform. Please use manual payment.`,
+        [],
+        '',
+        { code: 'GATEWAY_NOT_LIVE_ENABLED' }
+      );
+    }
+
+    if (!pm.accountNumber) {
+      throw new ApiError(
+        400,
+        `No receiving account number configured for platform ${pm.name}.`,
+        [],
+        '',
+        { code: 'GATEWAY_NOT_CONFIGURED' }
+      );
+    }
+
+    const platformReceivingNumber = pm.accountNumber.trim();
+    const expectedAmount = Number(checkoutSession.amount);
+
+    // 2. Check for existing PENDING LivePaymentSession for this Platform CheckoutSession
+    const existingSession = await LivePaymentSession.findOne({
+      checkoutSession: checkoutSession._id,
+      provider: canonicalProvider,
+      status: 'PENDING',
+    });
+
+    if (existingSession) {
+      const isExpired = new Date() > new Date(existingSession.expiresAt);
+      if (!isExpired) {
+        if (existingSession.customerPhone !== normalizedPhone) {
+          existingSession.customerPhone = normalizedPhone;
+          await existingSession.save();
+        }
+        return {
+          session: existingSession,
+          liveSessionId: existingSession.liveSessionId,
+          sessionId: checkoutSession.sessionId,
+          orderId: checkoutSession.orderId,
+          provider: existingSession.provider,
+          merchantBkashNumber: existingSession.merchantBkashNumber,
+          merchantGatewayNumber: existingSession.merchantGatewayNumber || existingSession.merchantBkashNumber,
+          customerPhone: maskPhoneNumber(existingSession.customerPhone),
+          rawCustomerPhone: existingSession.customerPhone,
+          expectedAmount: existingSession.expectedAmount,
+          currency: existingSession.currency,
+          status: existingSession.status,
+          expiresAt: existingSession.expiresAt,
+          expiresInSeconds: Math.max(0, Math.floor((new Date(existingSession.expiresAt) - Date.now()) / 1000)),
+        };
+      } else {
+        existingSession.status = 'EXPIRED';
+        await existingSession.save();
+      }
+    }
+
+    // 3. Create new Platform LivePaymentSession (15-Minute Expiry)
+    const randomHex = crypto.randomBytes(24).toString('hex');
+    const liveSessionId = `lps_adm_${randomHex}`;
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+    const liveSession = await LivePaymentSession.create({
+      liveSessionId,
+      checkoutSession: checkoutSession._id,
+      sessionId: checkoutSession.sessionId,
+      orderId: checkoutSession.orderId,
+      ownerType: 'ADMIN',
+      merchant: null,
+      admin: checkoutSession.admin || null,
+      user: checkoutSession.user || null,
+      plan: checkoutSession.plan || '',
+      billingCycle: checkoutSession.billingCycle || '',
+      provider: canonicalProvider,
+      customerPhone: normalizedPhone,
+      merchantBkashNumber: platformReceivingNumber,
+      merchantGatewayNumber: platformReceivingNumber,
+      expectedAmount,
+      currency: checkoutSession.currency || 'BDT',
+      status: 'PENDING',
+      expiresAt,
+      auditLogs: [
+        {
+          event: 'PLATFORM_LIVE_SESSION_CREATED',
+          timestamp: new Date(),
+          details: `Platform Live payment session initiated for ${pm.name} (${platformReceivingNumber}), amount ৳${expectedAmount}`,
+        },
+      ],
+    });
+
+    logger.info(`[PLATFORM_LIVE_SESSION_CREATED] Created ${liveSession.liveSessionId} | Order: ${checkoutSession.orderId} | Provider: ${canonicalProvider} | Expected: ৳${expectedAmount}`);
+
+    return {
+      session: liveSession,
+      liveSessionId: liveSession.liveSessionId,
+      sessionId: checkoutSession.sessionId,
+      orderId: checkoutSession.orderId,
+      provider: canonicalProvider,
+      merchantBkashNumber: liveSession.merchantBkashNumber,
+      merchantGatewayNumber: liveSession.merchantGatewayNumber,
+      customerPhone: maskPhoneNumber(liveSession.customerPhone),
+      rawCustomerPhone: liveSession.customerPhone,
+      expectedAmount: liveSession.expectedAmount,
+      currency: liveSession.currency,
+      status: liveSession.status,
+      expiresAt: liveSession.expiresAt,
+      expiresInSeconds: 900,
+    };
+  }
+  // ============================================================
+  // PLATFORM / ADMIN CHECKOUT SESSION BRANCH — END
+  // ============================================================
+
+  // Tenant / Brand isolation verification for Merchant Checkouts
   if (merchantId && resolvedMerchantId.toString() !== merchantId.toString()) {
     throw new ApiError(403, 'Access denied to this checkout session', [], '', { code: 'UNAUTHORIZED' });
   }
@@ -88,6 +232,35 @@ const createLivePaymentSession = async ({
     err.code = 'SUBSCRIPTION_EXPIRED';
     throw err;
   }
+
+  // ============================================================
+  // GLOBAL LIVE PAYMENT ENFORCEMENT FOR MERCHANTS — START
+  // ============================================================
+  const globalLivePaymentService = require('./globalLivePayment.service');
+  const globalSettings = await globalLivePaymentService.getGlobalLivePaymentSettings();
+  if (!globalSettings.isEnabled) {
+    throw new ApiError(
+      400,
+      globalSettings.notice || 'Global Live Payment is currently disabled by FastPay administration.',
+      [],
+      '',
+      { code: 'LIVE_PAYMENT_DISABLED' }
+    );
+  }
+
+  const globallyAllowedList = (globalSettings.gateways || []).map((g) => g.toUpperCase());
+  if (!globallyAllowedList.includes(canonicalProvider)) {
+    throw new ApiError(
+      400,
+      `Live payment for ${canonicalProvider} is currently not permitted by FastPay administration. ${globalSettings.notice || ''}`.trim(),
+      [],
+      '',
+      { code: 'GATEWAY_NOT_LIVE_ENABLED' }
+    );
+  }
+  // ============================================================
+  // GLOBAL LIVE PAYMENT ENFORCEMENT FOR MERCHANTS — END
+  // ============================================================
 
   // ============================================================
   // BRAND / MERCHANT LIVE PAYMENT CONFIGURATION ENFORCEMENT — START
@@ -114,7 +287,6 @@ const createLivePaymentSession = async ({
     );
   }
 
-  const canonicalProvider = (provider || 'bkash').toString().trim().toUpperCase();
   const enabledLiveGateways = Array.isArray(liveConfig.gateways)
     ? liveConfig.gateways.map((g) => (g || '').toUpperCase())
     : [];
@@ -336,8 +508,10 @@ const getLivePaymentSessionStatus = async (liveSessionId) => {
     liveSessionId: session.liveSessionId,
     sessionId: session.sessionId,
     orderId: session.orderId,
+    ownerType: session.ownerType || 'MERCHANT',
     status: session.status,
     merchantBkashNumber: session.merchantBkashNumber,
+    merchantGatewayNumber: session.merchantGatewayNumber || session.merchantBkashNumber,
     customerPhone: maskPhoneNumber(session.customerPhone),
     expectedAmount: session.expectedAmount,
     currency: session.currency,
@@ -345,10 +519,12 @@ const getLivePaymentSessionStatus = async (liveSessionId) => {
     expiresInSeconds,
     isVerified,
     transactionId: session.matchedTransactionId || session.matchedTransaction?.transactionId || (session.matchedPayment ? session.matchedPayment.transactionId : ''),
-    returnUrl: isVerified && checkoutSession ? checkoutSession.returnUrl : '',
+    returnUrl: isVerified ? (checkoutSession?.returnUrl || '/merchant') : '',
     verifiedAt: session.verifiedAt,
     brand: session.brand ? { name: session.brand.name, logo: session.brand.logo } : null,
-    merchant: session.merchant ? { name: session.merchant.companyName || session.merchant.name, logo: session.merchant.logo } : null,
+    merchant: session.merchant
+      ? { name: session.merchant.companyName || session.merchant.name, logo: session.merchant.logo }
+      : (session.ownerType === 'ADMIN' ? { name: 'FastPay Official', logo: '' } : null),
   };
 };
 
@@ -421,11 +597,7 @@ const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
   }
 
   const rawProvider = (payment.provider || payment.gateway || '').toString().toLowerCase().trim();
-  
-  // MATCHING RULE #0 — ISOLATION GUARD (Admin transactions cannot match merchant live payment sessions)
-  if (payment.ownerType === 'ADMIN') {
-    return { matched: false, reason: 'ADMIN_TRANSACTION_CANNOT_MATCH_MERCHANT_LIVE_SESSION' };
-  }
+  const isAdminPayment = payment.ownerType === 'ADMIN';
 
   // MATCHING RULE #1 — PROVIDER
   const cleanProvider = rawProvider.includes('bkash')
@@ -461,8 +633,15 @@ const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
     return { matched: false, reason: 'CUSTOMER_NUMBER_MISMATCH' };
   }
 
-  const resolvedMerchantId = merchantId || payment.merchant;
-  if (!resolvedMerchantId) {
+  // CROSS-MERCHANT ISOLATION GUARD:
+  // If payment is owned by a merchant, and a specific merchantId is passed, they MUST match.
+  if (!isAdminPayment && payment.merchant && merchantId && payment.merchant.toString() !== merchantId.toString()) {
+    logger.warn(`[LivePayment Reject] Cross-merchant payment match attempt: payment merchant ${payment.merchant} !== requested merchant ${merchantId}`);
+    return { matched: false, reason: 'CROSS_MERCHANT_MATCH_FORBIDDEN' };
+  }
+
+  const resolvedMerchantId = payment.merchant || merchantId;
+  if (!isAdminPayment && !resolvedMerchantId) {
     return { matched: false, reason: 'MERCHANT_UNRESOLVED' };
   }
 
@@ -473,25 +652,51 @@ const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
 
   const now = new Date();
 
-  // Query candidate active Live Payment sessions matching merchant, provider, customer phone, amount, validity
-  // Prioritize closest expected amount first (e.g. exact match before overpayment) then oldest created
-  const candidateSessions = await LivePaymentSession.find({
-    merchant: resolvedMerchantId,
+  // Query candidate active Live Payment sessions
+  // MATCHING RULE #0 — ISOLATION GUARD:
+  // Admin transactions match ADMIN sessions ONLY; Merchant transactions match MERCHANT sessions ONLY.
+  const sessionQuery = {
     status: 'PENDING',
     customerPhone: normalizedSender,
     expectedAmount: { $lte: parsedAmount }, // MATCHING RULE #3 — AMOUNT (transactionAmount >= expectedOrderAmount)
     expiresAt: { $gt: now },                // MATCHING RULE #4 — SESSION VALIDITY
     provider: { $regex: new RegExp(`^${cleanProvider}$`, 'i') },
-  }).sort({ expectedAmount: -1, createdAt: 1 });
+  };
+
+  if (isAdminPayment) {
+    sessionQuery.ownerType = 'ADMIN';
+  } else {
+    sessionQuery.ownerType = { $ne: 'ADMIN' };
+    sessionQuery.merchant = resolvedMerchantId;
+  }
+
+  const candidateSessions = await LivePaymentSession.find(sessionQuery).sort({ expectedAmount: -1, createdAt: 1 });
 
   if (candidateSessions.length === 0) {
     return { matched: false, reason: 'NO_MATCHING_PENDING_SESSION' };
   }
 
   for (const session of candidateSessions) {
-    // MATCHING RULE #7 — BRAND ISOLATION
-    if (payment.brand && session.brand && payment.brand.toString() !== session.brand.toString()) {
+    // MATCHING RULE #0.5 — MERCHANT TENANT ISOLATION
+    if (!isAdminPayment && payment.merchant && session.merchant && payment.merchant.toString() !== session.merchant.toString()) {
+      logger.warn(`[LivePayment Reject] Session merchant ${session.merchant} does not match payment merchant ${payment.merchant}`);
       continue;
+    }
+
+    // MATCHING RULE #7 — BRAND ISOLATION (For Merchant Checkouts)
+    if (!isAdminPayment && payment.brand && session.brand && payment.brand.toString() !== session.brand.toString()) {
+      continue;
+    }
+
+    // MATCHING RULE #7.5 — RECEIVING ACCOUNT VALIDATION
+    const receivingAccount = session.merchantGatewayNumber || session.merchantBkashNumber;
+    if (receivingAccount && payment.accountNumber) {
+      const cleanSessionRec = receivingAccount.toString().replace(/[^0-9]/g, '');
+      const cleanPayRec = payment.accountNumber.toString().replace(/[^0-9]/g, '');
+      if (cleanSessionRec && cleanPayRec && !cleanSessionRec.includes(cleanPayRec) && !cleanPayRec.includes(cleanSessionRec)) {
+        logger.warn(`[LivePayment Reject] Receiving account mismatch: Expected ${cleanSessionRec}, Got ${cleanPayRec}`);
+        continue;
+      }
     }
 
     // MATCHING RULE #5 — OLD TRANSACTIONS PROTECTION
@@ -504,14 +709,14 @@ const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
     }
 
     // MATCHING RULE #8 — ORDER STATE VALIDATION
-    const checkoutSession = await CheckoutSession.findById(session.checkoutSession);
-    if (!checkoutSession || checkoutSession.status !== 'PENDING' || new Date() > new Date(checkoutSession.expiresAt)) {
-      if (checkoutSession && new Date() > new Date(checkoutSession.expiresAt)) {
+    const checkoutSession = session.checkoutSession ? await CheckoutSession.findById(session.checkoutSession) : null;
+    if (checkoutSession && (checkoutSession.status !== 'PENDING' || new Date() > new Date(checkoutSession.expiresAt))) {
+      if (new Date() > new Date(checkoutSession.expiresAt)) {
         checkoutSession.status = 'EXPIRED';
         await checkoutSession.save().catch(() => {});
       }
-      session.status = checkoutSession?.status === 'VERIFIED' ? 'FAILED' : 'EXPIRED';
-      session.rejectionReason = checkoutSession?.status === 'VERIFIED' ? 'ORDER_ALREADY_PAID' : 'SESSION_EXPIRED';
+      session.status = checkoutSession.status === 'VERIFIED' ? 'FAILED' : 'EXPIRED';
+      session.rejectionReason = checkoutSession.status === 'VERIFIED' ? 'ORDER_ALREADY_PAID' : 'SESSION_EXPIRED';
       await session.save().catch(() => {});
       continue;
     }
@@ -531,6 +736,7 @@ const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
           paymentStatus: 'VERIFIED',
           verificationState: 'VERIFIED',
           isUsed: true,
+          isUsedForSubscription: isAdminPayment,
           usedAt: new Date(),
           ...(session.brand ? { brand: session.brand } : {}),
         },
@@ -570,7 +776,7 @@ const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
           auditLogs: {
             event: 'TRANSACTION_MATCHED',
             timestamp: new Date(),
-            details: `Matched with trusted bKash transaction ${claimedPayment.transactionId} for ৳${claimedPayment.amount} (Expected ৳${session.expectedAmount})`,
+            details: `Matched with trusted ${cleanProvider} transaction ${claimedPayment.transactionId} for ৳${claimedPayment.amount} (Expected ৳${session.expectedAmount})`,
           },
         },
       },
@@ -586,45 +792,83 @@ const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
       continue;
     }
 
-    // 3. Mark Associated CheckoutSession as VERIFIED
-    checkoutSession.status = 'VERIFIED';
-    checkoutSession.payment = claimedPayment._id;
-    checkoutSession.transactionId = claimedPayment.transactionId;
-    await checkoutSession.save();
+    // 3. Mark Associated CheckoutSession as VERIFIED (if attached)
+    if (checkoutSession) {
+      checkoutSession.status = 'VERIFIED';
+      checkoutSession.payment = claimedPayment._id;
+      checkoutSession.transactionId = claimedPayment.transactionId;
+      await checkoutSession.save();
+    }
 
-    // 4. Trigger Centralized Post-Verification Handler (Order Confirmation, Email & Instant Digital Delivery)
-    const { handleSuccessfulPaymentVerification } = require('./checkoutSession.service');
-    await handleSuccessfulPaymentVerification({
-      session: checkoutSession,
-      payment: claimedPayment,
-      brand: checkoutSession.brand,
-      merchant: checkoutSession.merchant,
-      triggerSource: 'LIVE_PAYMENT_SYNC',
-    });
+    // 4. Automatic Fulfillment for Platform / Admin Subscription / Upgrade
+    if (session.ownerType === 'ADMIN' || checkoutSession?.ownerType === 'ADMIN') {
+      try {
+        if (checkoutSession?.plan || session.plan) {
+          const subscriptionService = require('./subscription.service');
+          const User = require('../models/User');
+          const targetUserId = session.user || checkoutSession?.user;
+          const userDoc = targetUserId ? await User.findById(targetUserId) : null;
+          await subscriptionService.submitApplication({
+            userId: targetUserId,
+            plan: checkoutSession?.plan || session.plan,
+            billingCycle: checkoutSession?.billingCycle || session.billingCycle || 'monthly',
+            paymentMethod: cleanProvider,
+            transactionId: claimedPayment.transactionId,
+            amount: claimedPayment.amount,
+            companyName: userDoc?.companyName || userDoc?.name || 'FastPay Merchant',
+          }).catch((err) => logger.warn(`[Platform Live Auto-Activation Notice] ${err.message}`));
+          logger.info(`[Platform Live Auto-Activation] Activated subscription plan '${checkoutSession?.plan || session.plan}' with TxID ${claimedPayment.transactionId}`);
+        } else if (checkoutSession?.targetPlan) {
+          const entitlementService = require('./entitlement.service');
+          await entitlementService.upgradeMerchantSubscription({
+            merchantId: checkoutSession.merchant,
+            targetPlanIdOrName: checkoutSession.targetPlan,
+            targetBillingCycle: checkoutSession.targetBillingCycle || checkoutSession.billingCycle || 'monthly',
+            transactionId: claimedPayment.transactionId,
+            paymentMethod: cleanProvider,
+          }).catch((err) => logger.warn(`[Platform Live Auto-Upgrade Notice] ${err.message}`));
+          logger.info(`[Platform Live Auto-Upgrade] Upgraded to plan '${checkoutSession.targetPlan}' with TxID ${claimedPayment.transactionId}`);
+        }
+      } catch (activationErr) {
+        logger.error(`[Platform Live Auto-Activation Error] ${activationErr.message}`);
+      }
+    } else if (checkoutSession) {
+      // 4b. Trigger Centralized Post-Verification Handler for Merchant Store Checkout
+      const { handleSuccessfulPaymentVerification } = require('./checkoutSession.service');
+      await handleSuccessfulPaymentVerification({
+        session: checkoutSession,
+        payment: claimedPayment,
+        brand: checkoutSession.brand,
+        merchant: checkoutSession.merchant,
+        triggerSource: 'LIVE_PAYMENT_SYNC',
+      });
 
-    // 5. Dispatch Webhook Asynchronously
-    const { sendWebhook } = require('./webhook.service');
-    sendWebhook({
-      merchantId: claimedSession.merchant,
-      brandId: claimedSession.brand,
-      payment: claimedPayment,
-      session: checkoutSession,
-      liveSession: claimedSession,
-      event: 'payment.verified',
-    }).catch((err) => logger.warn(`[LivePayment Webhook Error] ${err.message}`));
+      // 5. Dispatch Webhook Asynchronously for Merchant
+      const { sendWebhook } = require('./webhook.service');
+      sendWebhook({
+        merchantId: claimedSession.merchant,
+        brandId: claimedSession.brand,
+        payment: claimedPayment,
+        session: checkoutSession,
+        liveSession: claimedSession,
+        event: 'payment.verified',
+      }).catch((err) => logger.warn(`[LivePayment Webhook Error] ${err.message}`));
+    }
 
     // 6. Emit Socket.io Event for Live Realtime Dashboard & Polling Listeners
-    const { emitLivePaymentUpdated, emitPaymentUpdated } = require('../socket/socketManager');
-    emitLivePaymentUpdated(claimedSession.merchant, claimedSession);
-    emitPaymentUpdated(claimedSession.merchant, {
-      _id: claimedPayment._id,
-      transactionId: claimedPayment.transactionId,
-      status: claimedPayment.status,
-      verificationState: claimedPayment.verificationState,
-      amount: claimedPayment.amount,
-    });
+    if (claimedSession.merchant) {
+      const { emitLivePaymentUpdated, emitPaymentUpdated } = require('../socket/socketManager');
+      emitLivePaymentUpdated(claimedSession.merchant, claimedSession);
+      emitPaymentUpdated(claimedSession.merchant, {
+        _id: claimedPayment._id,
+        transactionId: claimedPayment.transactionId,
+        status: claimedPayment.status,
+        verificationState: claimedPayment.verificationState,
+        amount: claimedPayment.amount,
+      });
+    }
 
-    logger.info(`[LIVE_PAYMENT_VERIFIED] Session ${claimedSession.liveSessionId} successfully VERIFIED with TxID ${claimedPayment.transactionId} for Order ${claimedSession.orderId}`);
+    logger.info(`[LIVE_PAYMENT_VERIFIED] Session ${claimedSession.liveSessionId} successfully VERIFIED with TxID ${claimedPayment.transactionId} for Order ${claimedSession.orderId} (Owner: ${claimedSession.ownerType})`);
 
     return {
       matched: true,
@@ -648,18 +892,25 @@ const performLivePaymentReconciliation = async ({ liveSession }) => {
   if (!liveSession || liveSession.status !== 'PENDING') return;
 
   const minTime = new Date(new Date(liveSession.createdAt).getTime() - 60000);
+  const isAdminSession = liveSession.ownerType === 'ADMIN';
 
-  const candidatePayments = await Payment.find({
-    merchant: liveSession.merchant,
-    ownerType: { $ne: 'ADMIN' },
-    provider: { $regex: /^bkash$/i },
+  const paymentQuery = {
     isUsed: { $ne: true },
     status: { $in: ['COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'PENDING_VERIFICATION', 'SMS', 'VERIFIED'] },
     verificationState: { $nin: ['MISMATCH_SUSPICIOUS'] },
     isSuspicious: false,
     amount: { $gte: liveSession.expectedAmount },
     createdAt: { $gte: minTime },
-  }).sort({ createdAt: 1 });
+  };
+
+  if (isAdminSession) {
+    paymentQuery.ownerType = 'ADMIN';
+  } else {
+    paymentQuery.merchant = liveSession.merchant;
+    paymentQuery.ownerType = { $ne: 'ADMIN' };
+  }
+
+  const candidatePayments = await Payment.find(paymentQuery).sort({ createdAt: 1 });
 
   for (const payment of candidatePayments) {
     const normalizedSender = normalizeBdPhoneNumber(payment.sender);

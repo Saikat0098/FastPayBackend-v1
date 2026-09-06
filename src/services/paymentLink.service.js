@@ -94,13 +94,14 @@ const getPublicLink = async (code) => {
     const MerchantGateway = require('../models/MerchantGateway');
     const bId = link.brand._id || link.brand;
     const mId = link.merchant._id || link.merchant;
+    const { sortGatewaysByCanonicalOrder } = require('../utils/gatewayOrdering');
     const brandGateways = await MerchantGateway.find({
       merchant: mId,
       brand: bId,
       isActive: true,
-    }).sort({ isDefault: -1, displayOrder: 1, createdAt: -1 });
+    });
 
-    linkObj.gateways = brandGateways;
+    linkObj.gateways = sortGatewaysByCanonicalOrder(brandGateways);
   }
 
   return linkObj;

@@ -978,6 +978,9 @@ const getBrandLivePaymentConfig = async (merchantId, brandId) => {
   const brand = await Brand.findOne({ _id: brandId, merchant: merchantId });
   if (!brand) throw new ApiError(404, 'Brand not found');
 
+  const globalLivePaymentService = require('./globalLivePayment.service');
+  const globalSettings = await globalLivePaymentService.getGlobalLivePaymentSettings();
+
   const MerchantGateway = require('../models/MerchantGateway');
   // Query active configured gateways specifically for this Brand
   const activeBrandGateways = await MerchantGateway.find({
@@ -986,20 +989,33 @@ const getBrandLivePaymentConfig = async (merchantId, brandId) => {
     isActive: true,
   });
 
-  const availableGateways = Array.from(
+  const allBrandGateways = Array.from(
     new Set(activeBrandGateways.map((g) => (g.provider || '').toString().trim().toUpperCase()))
   ).filter(Boolean);
 
+  const isPlatformBrand = brand.ownerType === 'ADMIN';
+  const globallyAllowedList = (globalSettings.gateways || []).map((g) => g.toUpperCase());
+
+  // For merchants, available live gateways are restricted by Super Admin's global list
+  const availableGateways = isPlatformBrand
+    ? allBrandGateways
+    : allBrandGateways.filter((g) => globallyAllowedList.includes(g));
+
   const liveConfig = brand.livePayment || { enabled: false, gateways: [] };
+  const effectiveEnabled = globalSettings.isEnabled ? Boolean(liveConfig.enabled) : false;
+  const effectiveGateways = (liveConfig.gateways || [])
+    .map((g) => (g || '').toUpperCase())
+    .filter((g) => isPlatformBrand || globallyAllowedList.includes(g));
 
   return {
     brandId: brand._id,
     brandName: brand.name,
-    enabled: Boolean(liveConfig.enabled),
-    gateways: Array.isArray(liveConfig.gateways)
-      ? liveConfig.gateways.map((g) => (g || '').toUpperCase())
-      : [],
+    enabled: effectiveEnabled,
+    gateways: effectiveGateways,
     availableGateways,
+    globalLiveEnabled: Boolean(globalSettings.isEnabled),
+    globalAllowedGateways: globallyAllowedList,
+    adminNotice: globalSettings.notice || '',
   };
 };
 
@@ -1011,6 +1027,10 @@ const updateBrandLivePaymentConfig = async (merchantId, brandId, { enabled, gate
 
   const brand = await Brand.findOne({ _id: brandId, merchant: merchantId });
   if (!brand) throw new ApiError(404, 'Brand not found');
+
+  const globalLivePaymentService = require('./globalLivePayment.service');
+  const globalSettings = await globalLivePaymentService.getGlobalLivePaymentSettings();
+  const isPlatformBrand = brand.ownerType === 'ADMIN';
 
   const isEnabled = Boolean(enabled);
   let canonicalGateways = [];
@@ -1028,6 +1048,17 @@ const updateBrandLivePaymentConfig = async (merchantId, brandId, { enabled, gate
   ).filter(Boolean);
 
   if (isEnabled) {
+    // 1. Check Global Live Payment status for merchants
+    if (!isPlatformBrand && !globalSettings.isEnabled) {
+      throw new ApiError(
+        400,
+        globalSettings.notice || 'Global Live Payment is currently disabled by FastPay administration.',
+        [],
+        '',
+        { code: 'GLOBAL_LIVE_PAYMENT_DISABLED' }
+      );
+    }
+
     if (!Array.isArray(gateways) || gateways.length === 0) {
       throw new ApiError(
         400,
@@ -1043,7 +1074,22 @@ const updateBrandLivePaymentConfig = async (merchantId, brandId, { enabled, gate
       new Set(gateways.map((g) => (g || '').toString().trim().toUpperCase()))
     ).filter(Boolean);
 
-    // Validate that each gateway is configured and active for THIS Brand
+    // 2. Enforce Merchant restriction against Super Admin's permitted list
+    const globallyAllowedList = (globalSettings.gateways || []).map((g) => g.toUpperCase());
+    if (!isPlatformBrand) {
+      const disallowed = canonicalGateways.filter((gw) => !globallyAllowedList.includes(gw));
+      if (disallowed.length > 0) {
+        throw new ApiError(
+          400,
+          `Live payment for ${disallowed.join(', ')} is not currently enabled by FastPay administration. ${globalSettings.notice || ''}`.trim(),
+          [],
+          '',
+          { code: 'GATEWAY_NOT_GLOBALLY_ENABLED' }
+        );
+      }
+    }
+
+    // 3. Validate that each gateway is configured and active for THIS Brand
     for (const gw of canonicalGateways) {
       if (!activeProviders.includes(gw)) {
         throw new ApiError(

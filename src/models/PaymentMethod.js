@@ -40,6 +40,27 @@ const paymentMethodSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    paymentMode: {
+      type: String,
+      enum: ['manual', 'live', 'both'],
+      default: 'manual',
+    },
+    isLivePaymentEnabled: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    livePaymentProvider: {
+      type: String,
+      enum: ['BKASH', 'NAGAD', 'ROCKET', 'UPAY', ''],
+      default: '',
+      uppercase: true,
+      trim: true,
+    },
+    livePaymentConfig: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+    },
   },
   {
     timestamps: true,

@@ -8,16 +8,60 @@ const checkoutSessionSchema = new mongoose.Schema(
       unique: true,
       index: true,
     },
+    ownerType: {
+      type: String,
+      enum: ['MERCHANT', 'ADMIN'],
+      default: 'MERCHANT',
+      index: true,
+    },
     merchant: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Merchant',
-      required: true,
+      required: false,
+      default: null,
+      index: true,
+    },
+    admin: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+      index: true,
+    },
+    user: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
       index: true,
     },
     brand: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Brand',
       default: null,
+    },
+    plan: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    planTitle: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    billingCycle: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    targetPlan: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    targetBillingCycle: {
+      type: String,
+      default: '',
+      trim: true,
     },
     orderId: {
       type: String,
@@ -82,6 +126,17 @@ const checkoutSessionSchema = new mongoose.Schema(
     transactionId: {
       type: String,
       default: '',
+    },
+    paymentMode: {
+      type: String,
+      enum: ['LIVE', 'MANUAL', 'UNSPECIFIED'],
+      default: 'UNSPECIFIED',
+      index: true,
+    },
+    selectedGateway: {
+      type: String,
+      default: '',
+      trim: true,
     },
     expiresAt: {
       type: Date,
