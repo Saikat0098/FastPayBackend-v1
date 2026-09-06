@@ -21,6 +21,13 @@ const logger = winston.createLogger({
         winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
         logFormat
       )
+    }),
+    new winston.transports.File({
+      filename: path.join(__dirname, '../logs/app.log'),
+      format: winston.format.combine(
+        winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+        logFormat
+      )
     })
   ]
 });

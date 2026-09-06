@@ -7,6 +7,15 @@ const logger = require('./config/logger');
 const { initSocket } = require('./socket/socketManager');
 const { startCronJobs } = require('./cron/syncEngine.cron');
 const Admin = require('./models/Admin');
+// Pre-register core models so Mongoose .populate() never fails with MissingSchemaError
+require('./models/User');
+require('./models/Merchant');
+require('./models/Brand');
+require('./models/Device');
+require('./models/Payment');
+require('./models/CheckoutSession');
+require('./models/LivePaymentSession');
+require('./models/WebhookLog');
 
 const PORT = process.env.PORT || 5000;
 

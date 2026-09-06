@@ -78,9 +78,12 @@ const sanitizeResponseBody = (data, defaultMessage = '') => {
 };
 
 const dispatchHttpRequest = async (targetUrl, rawBody, headers, timeout = 25000) => {
-  const urlsToTry = [targetUrl];
+  const urlsToTry = [];
   if (targetUrl.includes('://localhost')) {
     urlsToTry.push(targetUrl.replace('://localhost', '://127.0.0.1'));
+    urlsToTry.push(targetUrl);
+  } else {
+    urlsToTry.push(targetUrl);
   }
 
   let lastError = null;

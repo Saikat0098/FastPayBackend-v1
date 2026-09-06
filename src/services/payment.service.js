@@ -109,6 +109,7 @@ const processTransactionSync = async ({
   isCorrelated,
 }) => {
   const cleanTxId = (transactionId || trxId || '').toString().trim();
+  logger.info(`[TRANSACTION_RECEIVED] TxID: ${cleanTxId} | Provider: ${gateway || provider} | Amount: ${amount} | Sender: ${sender} | Device: ${deviceId || 'N/A'}`);
 
   // 1. Validate Activation Key (if provided)
   let keyDoc = null;
@@ -214,7 +215,7 @@ const processTransactionSync = async ({
       verificationState: { $in: ['SMS_ONLY', 'SMS', 'PENDING_VERIFICATION'] },
       createdAt: { $gte: new Date(Date.now() - 15 * 60 * 1000) },
     };
-    if (resolvedMerchantId) query.merchant = resolvedMerchantId;
+    if (finalMerchantId) query.merchant = finalMerchantId;
     existing = await Payment.findOne(query).sort({ createdAt: -1 });
   }
 
@@ -486,6 +487,8 @@ const processTransactionSync = async ({
     timestamp: dateVal,
   });
 
+  logger.info(`[PAYMENT_PERSISTED] Payment ID: ${payment._id} | TxID: ${payment.transactionId} | Status: ${payment.status} | Merchant: ${finalMerchantId} | Brand: ${finalBrandId || 'PRIMARY'}`);
+
   if (devDoc) {
     await SyncLog.create({
       payment: payment._id,
@@ -541,11 +544,13 @@ const processTransactionSync = async ({
 
   // 7. Live Payment Session Matching Hook (Additive, non-blocking)
   try {
+    logger.info(`[LIVE_MATCH_STARTED] TxID: ${payment.transactionId} | Merchant: ${finalMerchantId} | Amount: ${payment.amount} | Sender: ${payment.sender}`);
     const { matchAndVerifyLivePayment } = require('./livePaymentSession.service');
     const liveMatchResult = await matchAndVerifyLivePayment({
       payment,
       merchantId: finalMerchantId,
     });
+    logger.info(`[LIVE_MATCH_RESULT] TxID: ${payment.transactionId} | Matched: ${liveMatchResult?.matched} | Reason: ${liveMatchResult?.reason || 'NONE'}`);
     if (liveMatchResult && liveMatchResult.matched) {
       payment.status = 'VERIFIED';
       payment.paymentStatus = 'VERIFIED';
@@ -553,7 +558,7 @@ const processTransactionSync = async ({
       payment.isUsed = true;
     }
   } catch (liveMatchErr) {
-    logger.warn(`[LivePayment Hook Error] ${liveMatchErr.message}`);
+    logger.warn(`[LivePayment Hook Error] ${liveMatchErr.message} | Stack: ${liveMatchErr.stack}`);
   }
 
   // 8. Return success response

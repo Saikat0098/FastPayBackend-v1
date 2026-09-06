@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const crypto = require('crypto');
 const LivePaymentSession = require('../models/LivePaymentSession');
 const CheckoutSession = require('../models/CheckoutSession');
+const Brand = require('../models/Brand');
 const Merchant = require('../models/Merchant');
 const MerchantGateway = require('../models/MerchantGateway');
 const Payment = require('../models/Payment');
@@ -589,9 +590,16 @@ const cancelLivePaymentSession = async (liveSessionId) => {
  * @param {Object} params
  * @param {Object} params.payment - The newly synced or upgraded Payment document
  * @param {string|ObjectId} params.merchantId - Merchant ID
+ * @param {Object} [params.targetLiveSession] - Specific live payment session to prioritize (e.g. from active polling)
+ * @param {string} [params.preferredLiveSessionId] - Specific session ID to prioritize
  * @returns {Promise<Object>} Matching outcome
  */
-const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
+const matchAndVerifyLivePayment = async ({
+  payment,
+  merchantId,
+  targetLiveSession = null,
+  preferredLiveSessionId = null,
+}) => {
   if (!payment) {
     return { matched: false, reason: 'PAYMENT_NULL' };
   }
@@ -670,13 +678,46 @@ const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
     sessionQuery.merchant = resolvedMerchantId;
   }
 
-  const candidateSessions = await LivePaymentSession.find(sessionQuery).sort({ expectedAmount: -1, createdAt: 1 });
+  // Prioritize NEWEST sessions first ({ createdAt: -1 }) so active checkout sessions take precedence over older abandoned sessions
+  let candidateSessions = await LivePaymentSession.find(sessionQuery).sort({ createdAt: -1 });
+
+  // If a specific target session is provided (e.g. from active customer polling), place it at the front of candidate evaluation
+  if (targetLiveSession && targetLiveSession._id) {
+    const targetIdStr = targetLiveSession._id.toString();
+    const existingIdx = candidateSessions.findIndex((s) => s._id.toString() === targetIdStr);
+    if (existingIdx !== -1) {
+      const [matchedTarget] = candidateSessions.splice(existingIdx, 1);
+      candidateSessions.unshift(matchedTarget);
+    } else if (targetLiveSession.status === 'PENDING' && new Date(targetLiveSession.expiresAt) > now) {
+      candidateSessions.unshift(targetLiveSession);
+    }
+  } else if (preferredLiveSessionId) {
+    const prefIdx = candidateSessions.findIndex(
+      (s) => s.liveSessionId === preferredLiveSessionId || s._id.toString() === preferredLiveSessionId.toString()
+    );
+    if (prefIdx !== -1) {
+      const [prefTarget] = candidateSessions.splice(prefIdx, 1);
+      candidateSessions.unshift(prefTarget);
+    }
+  }
+
+  logger.info(`[LIVE_SESSION_FOUND] Query found ${candidateSessions.length} pending candidate session(s) for sender: ${normalizedSender} | cleanProvider: ${cleanProvider} | amount >= ${parsedAmount}`);
 
   if (candidateSessions.length === 0) {
+    logger.info(`[LIVE_MATCH_STATUS] Rejection reason: NO_MATCHING_PENDING_SESSION for sender: ${normalizedSender} | amount: ${parsedAmount} | merchant: ${resolvedMerchantId}`);
     return { matched: false, reason: 'NO_MATCHING_PENDING_SESSION' };
   }
 
   for (const session of candidateSessions) {
+    const merchantMatch = isAdminPayment ? true : (!payment.merchant || !session.merchant || payment.merchant.toString() === session.merchant.toString());
+    const brandMatch = isAdminPayment ? true : (!payment.brand || !session.brand || payment.brand.toString() === session.brand.toString());
+    const txTimeVal = payment.timestamp || payment.receivedAt || payment.createdAt || now;
+    const sessionCreatedTimeVal = new Date(session.createdAt).getTime();
+    const MAX_LOOKBACK_MS_VAL = 30 * 60 * 1000;
+    const timeWindowMatch = new Date(txTimeVal).getTime() >= (sessionCreatedTimeVal - MAX_LOOKBACK_MS_VAL);
+
+    logger.info(`[MATCH_CONDITION_RESULTS] Session: ${session.liveSessionId} | Order: ${session.orderId} | merchantMatch: ${merchantMatch} | brandMatch: ${brandMatch} | timeWindowMatch: ${timeWindowMatch} (Diff: ${Math.round((new Date(txTimeVal).getTime() - sessionCreatedTimeVal) / 1000)}s)`);
+
     // MATCHING RULE #0.5 — MERCHANT TENANT ISOLATION
     if (!isAdminPayment && payment.merchant && session.merchant && payment.merchant.toString() !== session.merchant.toString()) {
       logger.warn(`[LivePayment Reject] Session merchant ${session.merchant} does not match payment merchant ${payment.merchant}`);
@@ -702,8 +743,9 @@ const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
     // MATCHING RULE #5 — OLD TRANSACTIONS PROTECTION
     const txTime = payment.timestamp || payment.receivedAt || payment.createdAt || now;
     const sessionCreatedTime = new Date(session.createdAt).getTime();
-    // Allow up to 60s clock skew / sync latency tolerance
-    if (new Date(txTime).getTime() < sessionCreatedTime - 60000) {
+    // Allow realistic tolerance for customer payments initiated during the checkout flow (up to 30 minutes prior to session creation)
+    const MAX_LOOKBACK_MS = 30 * 60 * 1000;
+    if (new Date(txTime).getTime() < sessionCreatedTime - MAX_LOOKBACK_MS) {
       logger.warn(`[LivePayment Reject] Old transaction detected: TxID ${payment.transactionId} created at ${new Date(txTime).toISOString()} before session ${session.liveSessionId} created at ${session.createdAt.toISOString()}`);
       continue;
     }
@@ -711,7 +753,14 @@ const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
     // MATCHING RULE #8 — ORDER STATE VALIDATION
     let checkoutSession = null;
     if (session.checkoutSession) {
-      checkoutSession = await CheckoutSession.findById(session.checkoutSession).populate('merchant brand');
+      try {
+        checkoutSession = await CheckoutSession.findById(session.checkoutSession).populate('merchant brand');
+      } catch (popErr) {
+        logger.warn(`[LivePayment CheckoutSession populate error] ${popErr.message}`);
+        try {
+          checkoutSession = await CheckoutSession.findById(session.checkoutSession);
+        } catch (_) {}
+      }
     }
     if (checkoutSession && (checkoutSession.status !== 'PENDING' || new Date() > new Date(checkoutSession.expiresAt))) {
       if (new Date() > new Date(checkoutSession.expiresAt)) {
@@ -768,7 +817,8 @@ const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
 const performLivePaymentReconciliation = async ({ liveSession }) => {
   if (!liveSession || liveSession.status !== 'PENDING') return;
 
-  const minTime = new Date(new Date(liveSession.createdAt).getTime() - 60000);
+  const MAX_LOOKBACK_MS = 30 * 60 * 1000;
+  const minTime = new Date(new Date(liveSession.createdAt).getTime() - MAX_LOOKBACK_MS);
   const isAdminSession = liveSession.ownerType === 'ADMIN';
 
   const paymentQuery = {
@@ -777,7 +827,11 @@ const performLivePaymentReconciliation = async ({ liveSession }) => {
     verificationState: { $nin: ['MISMATCH_SUSPICIOUS'] },
     isSuspicious: false,
     amount: { $gte: liveSession.expectedAmount },
-    createdAt: { $gte: minTime },
+    $or: [
+      { createdAt: { $gte: minTime } },
+      { timestamp: { $gte: minTime } },
+      { receivedAt: { $gte: minTime } },
+    ],
   };
 
   if (isAdminSession) {
@@ -787,7 +841,8 @@ const performLivePaymentReconciliation = async ({ liveSession }) => {
     paymentQuery.ownerType = { $ne: 'ADMIN' };
   }
 
-  const candidatePayments = await Payment.find(paymentQuery).sort({ createdAt: 1 });
+  // Sort candidate payments newest first to match the customer's most recent transaction immediately
+  const candidatePayments = await Payment.find(paymentQuery).sort({ createdAt: -1 });
 
   for (const payment of candidatePayments) {
     const normalizedSender = normalizeBdPhoneNumber(payment.sender);
@@ -795,13 +850,15 @@ const performLivePaymentReconciliation = async ({ liveSession }) => {
       const matchResult = await matchAndVerifyLivePayment({
         payment,
         merchantId: liveSession.merchant,
+        targetLiveSession: liveSession,
       });
-      if (matchResult.matched) {
+      if (matchResult && matchResult.matched) {
         liveSession.status = matchResult.liveSession.status;
         liveSession.matchedPayment = matchResult.liveSession.matchedPayment;
         liveSession.matchedTransactionId = matchResult.liveSession.matchedTransactionId;
+        liveSession.matchedTransaction = matchResult.liveSession.matchedTransaction;
         liveSession.verifiedAt = matchResult.liveSession.verifiedAt;
-        return;
+        return matchResult;
       }
     }
   }

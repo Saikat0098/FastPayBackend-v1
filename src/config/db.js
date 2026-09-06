@@ -77,8 +77,8 @@ const connectDB = async () => {
       serverSelectionTimeoutMS: 5000,
     });
     logger.info(`MongoDB Connected: ${conn.connection.host}`);
-    await fixLegacyPaymentLinks();
-    await syncCustomersFromPayments();
+    fixLegacyPaymentLinks().catch((err) => logger.warn(`Migration notice for PaymentLink: ${err.message}`));
+    syncCustomersFromPayments().catch((err) => logger.warn(`Migration notice for Customers: ${err.message}`));
   } catch (error) {
     logger.warn(`Primary MongoDB Connection Failed (${error.message}). Attempting local fallback: ${localUri}`);
     try {
@@ -87,8 +87,8 @@ const connectDB = async () => {
         serverSelectionTimeoutMS: 5000,
       });
       logger.info(`Local Fallback MongoDB Connected: ${conn.connection.host}`);
-      await fixLegacyPaymentLinks();
-      await syncCustomersFromPayments();
+      fixLegacyPaymentLinks().catch((err) => logger.warn(`Migration notice for PaymentLink: ${err.message}`));
+      syncCustomersFromPayments().catch((err) => logger.warn(`Migration notice for Customers: ${err.message}`));
     } catch (localError) {
       logger.error(`Error connecting to MongoDB: ${error.message} / Local: ${localError.message}`);
       process.exit(1);

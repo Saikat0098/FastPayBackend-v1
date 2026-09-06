@@ -9,6 +9,7 @@ const cookieParser = require('cookie-parser');
 const routes = require('./routes');
 const errorHandler = require('./middlewares/error.middleware');
 const { apiLimiter } = require('./middlewares/rateLimiter.middleware');
+const logger = require('./config/logger');
 
 const app = express();
 
@@ -46,7 +47,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 app.use(compression());
 if (process.env.NODE_ENV !== 'test') {
-  app.use(morgan('combined'));
+  app.use(morgan('combined', { stream: { write: (message) => logger.info(message.trim()) } }));
 }
 
 // Mount both root (for legacy Android Retrofit calls) and /api/v1 for SaaS API versioning
