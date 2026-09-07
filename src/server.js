@@ -16,6 +16,10 @@ require('./models/Payment');
 require('./models/CheckoutSession');
 require('./models/LivePaymentSession');
 require('./models/WebhookLog');
+require('./models/LandingPageOrder');
+require('./models/LandingPage');
+require('./models/PaymentMethod');
+require('./models/MerchantGateway');
 
 const PORT = process.env.PORT || 5000;
 

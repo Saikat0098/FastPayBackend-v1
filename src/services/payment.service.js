@@ -13,6 +13,16 @@ const ApiError = require('../utils/apiError');
 const logger = require('../config/logger');
 const mongoose = require('mongoose');
 
+const normalizeId = (val) => {
+  if (!val) return null;
+  if (typeof val === 'object') {
+    if (val._id) return val._id.toString();
+    if (val.id) return val.id.toString();
+  }
+  const str = val.toString().trim();
+  return str === '[object Object]' ? null : str;
+};
+
 const validateProviderPackage = (provider, packageName) => {
   if (!provider || !packageName) return false;
   const provClean = provider.toString().toUpperCase().replace(/[\s_-]+/g, '');
@@ -145,7 +155,7 @@ const processTransactionSync = async ({
     finalBrandId = devDoc?.brand || null;
   } else {
     finalOwnerType = 'MERCHANT';
-    finalMerchantId = devDoc?.merchant || keyDoc?.merchant || merchantId || null;
+    finalMerchantId = normalizeId(devDoc?.merchant || keyDoc?.merchant || merchantId) || null;
     finalBrandId = null; // Unassigned initially. The merchant owns the transaction; brand attribution happens at checkout/verification.
     finalAdminId = null;
 
@@ -556,6 +566,10 @@ const processTransactionSync = async ({
       payment.paymentStatus = 'VERIFIED';
       payment.verificationState = 'VERIFIED';
       payment.isUsed = true;
+      if (liveMatchResult.payment?.brand) {
+        payment.brand = liveMatchResult.payment.brand;
+        payment.isPrimary = false;
+      }
     }
   } catch (liveMatchErr) {
     logger.warn(`[LivePayment Hook Error] ${liveMatchErr.message} | Stack: ${liveMatchErr.stack}`);

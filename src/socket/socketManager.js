@@ -96,25 +96,6 @@ const initSocket = (server) => {
       logger.info(`Socket ${socket.id} joined rooms ${roomColon} and ${roomUnderscore}`);
     }
 
-    // Allow public customer checkout clients to join session-specific rooms for real-time payment updates
-    socket.on('join_session', (sessionId) => {
-      if (sessionId && typeof sessionId === 'string') {
-        const cleanSessionId = sessionId.trim();
-        socket.join(`session:${cleanSessionId}`);
-        socket.join(`session_${cleanSessionId}`);
-        logger.info(`Socket ${socket.id} joined session room: ${cleanSessionId}`);
-      }
-    });
-
-    socket.on('join_live_session', (liveSessionId) => {
-      if (liveSessionId && typeof liveSessionId === 'string') {
-        const cleanLiveId = liveSessionId.trim();
-        socket.join(`live:${cleanLiveId}`);
-        socket.join(`live_${cleanLiveId}`);
-        logger.info(`Socket ${socket.id} joined live session room: ${cleanLiveId}`);
-      }
-    });
-
     if (socket.isDevice && socket.deviceId) {
       socket.join(`device:${socket.deviceId}`);
       // Mark device online
@@ -134,6 +115,25 @@ const initSocket = (server) => {
         logger.error(`Error updating device online status: ${err.message}`);
       }
     }
+
+    // Customer Checkout Live Payment Session Room Join Handlers
+    socket.on('join_live_session', (liveSessionId) => {
+      if (liveSessionId && typeof liveSessionId === 'string') {
+        const cleanId = liveSessionId.trim();
+        socket.join(`live_session:${cleanId}`);
+        socket.join(cleanId);
+        logger.info(`Socket ${socket.id} joined live payment session room: ${cleanId}`);
+      }
+    });
+
+    socket.on('join_session', (sessionId) => {
+      if (sessionId && typeof sessionId === 'string') {
+        const cleanId = sessionId.trim();
+        socket.join(`session:${cleanId}`);
+        socket.join(cleanId);
+        logger.info(`Socket ${socket.id} joined checkout session room: ${cleanId}`);
+      }
+    });
 
     socket.on('disconnect', async () => {
       logger.info(`Socket Disconnected: ${socket.id}`);
@@ -228,48 +228,45 @@ const emitDeviceEvent = (merchantId, eventName, deviceData) => {
 };
 
 const emitLivePaymentUpdated = (merchantId, liveSessionData) => {
-  if (!io) return;
-  const payload = liveSessionData && liveSessionData.toObject ? liveSessionData.toObject() : { ...liveSessionData };
+  if (io) {
+    const payload = liveSessionData && liveSessionData.toObject ? liveSessionData.toObject() : { ...liveSessionData };
+    const mId = merchantId
+      ? (merchantId._id ? merchantId._id.toString() : merchantId.toString())
+      : (payload.merchant?._id ? payload.merchant._id.toString() : payload.merchant?.toString());
+    const liveSessionId = payload.liveSessionId;
+    const sessionId = payload.sessionId;
 
-  // 1. Emit to merchant rooms
-  if (merchantId) {
-    const mId = merchantId.toString();
-    io.to(`merchant:${mId}`).to(`merchant_${mId}`).emit('livePayment:updated', payload);
-    io.to(`merchant:${mId}`).to(`merchant_${mId}`).emit('live-payment:updated', payload);
-    if (payload.status === 'VERIFIED') {
-      io.to(`merchant:${mId}`).to(`merchant_${mId}`).emit('livePayment:verified', payload);
-      io.to(`merchant:${mId}`).to(`merchant_${mId}`).emit('live-payment:verified', payload);
+    // 1. Emit to merchant-specific rooms
+    if (mId) {
+      io.to(`merchant:${mId}`).to(`merchant_${mId}`).emit('livePayment:updated', payload);
+      io.to(`merchant:${mId}`).to(`merchant_${mId}`).emit('live-payment:updated', payload);
+      if (payload.status === 'VERIFIED') {
+        io.to(`merchant:${mId}`).to(`merchant_${mId}`).emit('livePayment:verified', payload);
+        io.to(`merchant:${mId}`).to(`merchant_${mId}`).emit('live-payment:verified', payload);
+      }
     }
-  }
 
-  // 2. Emit to public customer session-specific rooms
-  if (payload.liveSessionId) {
-    io.to(`live:${payload.liveSessionId}`).to(`live_${payload.liveSessionId}`).emit('livePayment:updated', payload);
-    io.to(`live:${payload.liveSessionId}`).to(`live_${payload.liveSessionId}`).emit('live-payment:updated', payload);
-    if (payload.status === 'VERIFIED') {
-      io.to(`live:${payload.liveSessionId}`).to(`live_${payload.liveSessionId}`).emit('livePayment:verified', payload);
-      io.to(`live:${payload.liveSessionId}`).to(`live_${payload.liveSessionId}`).emit('live-payment:verified', payload);
+    // 2. Emit to public customer live session rooms
+    if (liveSessionId) {
+      io.to(`live_session:${liveSessionId}`).to(liveSessionId).emit('livePayment:updated', payload);
+      io.to(`live_session:${liveSessionId}`).to(liveSessionId).emit('live-payment:updated', payload);
+      if (payload.status === 'VERIFIED') {
+        io.to(`live_session:${liveSessionId}`).to(liveSessionId).emit('livePayment:verified', payload);
+        io.to(`live_session:${liveSessionId}`).to(liveSessionId).emit('live-payment:verified', payload);
+      }
     }
-  }
 
-  if (payload.sessionId) {
-    io.to(`session:${payload.sessionId}`).to(`session_${payload.sessionId}`).emit('livePayment:updated', payload);
-    io.to(`session:${payload.sessionId}`).to(`session_${payload.sessionId}`).emit('live-payment:updated', payload);
-    if (payload.status === 'VERIFIED') {
-      io.to(`session:${payload.sessionId}`).to(`session_${payload.sessionId}`).emit('livePayment:verified', payload);
-      io.to(`session:${payload.sessionId}`).to(`session_${payload.sessionId}`).emit('live-payment:verified', payload);
+    // 3. Emit to public customer checkout session rooms
+    if (sessionId) {
+      io.to(`session:${sessionId}`).to(sessionId).emit('livePayment:updated', payload);
+      io.to(`session:${sessionId}`).to(sessionId).emit('live-payment:updated', payload);
+      if (payload.status === 'VERIFIED') {
+        io.to(`session:${sessionId}`).to(sessionId).emit('livePayment:verified', payload);
+        io.to(`session:${sessionId}`).to(sessionId).emit('live-payment:verified', payload);
+      }
     }
-  }
 
-  // 3. Emit to admin room
-  io.to('admin').emit('livePayment:updated', payload);
-
-  // 4. Also broadcast general live payment events for checkout views
-  io.emit('livePayment:updated', payload);
-  io.emit('live-payment:updated', payload);
-  if (payload.status === 'VERIFIED') {
-    io.emit('livePayment:verified', payload);
-    io.emit('live-payment:verified', payload);
+    io.to('admin').emit('livePayment:updated', payload);
   }
 };
 

@@ -2,13 +2,29 @@ const mongoose = require('mongoose');
 const crypto = require('crypto');
 const LivePaymentSession = require('../models/LivePaymentSession');
 const CheckoutSession = require('../models/CheckoutSession');
-const Brand = require('../models/Brand');
 const Merchant = require('../models/Merchant');
 const MerchantGateway = require('../models/MerchantGateway');
 const Payment = require('../models/Payment');
 const { normalizeBdPhoneNumber, maskPhoneNumber } = require('../utils/phoneUtils');
 const ApiError = require('../utils/apiError');
 const logger = require('../config/logger');
+
+/**
+ * Safely extracts string representation of an ID from an ObjectId, string, or populated Mongoose Document.
+ * Ensures that populated objects ({ _id: ... }) never evaluate to "[object Object]".
+ * 
+ * @param {any} val
+ * @returns {string|null}
+ */
+const normalizeId = (val) => {
+  if (!val) return null;
+  if (typeof val === 'object') {
+    if (val._id) return val._id.toString();
+    if (val.id) return val.id.toString();
+  }
+  const str = val.toString().trim();
+  return str === '[object Object]' ? null : str;
+};
 
 /**
  * Create or reuse an active Live Payment Session
@@ -590,16 +606,9 @@ const cancelLivePaymentSession = async (liveSessionId) => {
  * @param {Object} params
  * @param {Object} params.payment - The newly synced or upgraded Payment document
  * @param {string|ObjectId} params.merchantId - Merchant ID
- * @param {Object} [params.targetLiveSession] - Specific live payment session to prioritize (e.g. from active polling)
- * @param {string} [params.preferredLiveSessionId] - Specific session ID to prioritize
  * @returns {Promise<Object>} Matching outcome
  */
-const matchAndVerifyLivePayment = async ({
-  payment,
-  merchantId,
-  targetLiveSession = null,
-  preferredLiveSessionId = null,
-}) => {
+const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
   if (!payment) {
     return { matched: false, reason: 'PAYMENT_NULL' };
   }
@@ -611,12 +620,12 @@ const matchAndVerifyLivePayment = async ({
   const cleanProvider = rawProvider.includes('bkash')
     ? 'BKASH'
     : rawProvider.includes('rocket')
-      ? 'ROCKET'
-      : rawProvider.includes('nagad')
-        ? 'NAGAD'
-        : rawProvider.includes('upay')
-          ? 'UPAY'
-          : rawProvider.toUpperCase();
+    ? 'ROCKET'
+    : rawProvider.includes('nagad')
+    ? 'NAGAD'
+    : rawProvider.includes('upay')
+    ? 'UPAY'
+    : rawProvider.toUpperCase();
 
   if (!cleanProvider) {
     return { matched: false, reason: 'INVALID_PROVIDER' };
@@ -643,12 +652,15 @@ const matchAndVerifyLivePayment = async ({
 
   // CROSS-MERCHANT ISOLATION GUARD:
   // If payment is owned by a merchant, and a specific merchantId is passed, they MUST match.
-  if (!isAdminPayment && payment.merchant && merchantId && payment.merchant.toString() !== merchantId.toString()) {
-    logger.warn(`[LivePayment Reject] Cross-merchant payment match attempt: payment merchant ${payment.merchant} !== requested merchant ${merchantId}`);
+  const paymentMerchantId = normalizeId(payment.merchant);
+  const requestedMerchantId = normalizeId(merchantId);
+
+  if (!isAdminPayment && paymentMerchantId && requestedMerchantId && paymentMerchantId !== requestedMerchantId) {
+    logger.warn(`[LivePayment Reject] Cross-merchant payment match attempt: payment merchant ${paymentMerchantId} !== requested merchant ${requestedMerchantId}`);
     return { matched: false, reason: 'CROSS_MERCHANT_MATCH_FORBIDDEN' };
   }
 
-  const resolvedMerchantId = payment.merchant || merchantId;
+  const resolvedMerchantId = paymentMerchantId || requestedMerchantId;
   if (!isAdminPayment && !resolvedMerchantId) {
     return { matched: false, reason: 'MERCHANT_UNRESOLVED' };
   }
@@ -675,57 +687,27 @@ const matchAndVerifyLivePayment = async ({
     sessionQuery.ownerType = 'ADMIN';
   } else {
     sessionQuery.ownerType = { $ne: 'ADMIN' };
-    sessionQuery.merchant = resolvedMerchantId;
+    sessionQuery.merchant = new mongoose.Types.ObjectId(resolvedMerchantId);
   }
 
-  // Prioritize NEWEST sessions first ({ createdAt: -1 }) so active checkout sessions take precedence over older abandoned sessions
-  let candidateSessions = await LivePaymentSession.find(sessionQuery).sort({ createdAt: -1 });
-
-  // If a specific target session is provided (e.g. from active customer polling), place it at the front of candidate evaluation
-  if (targetLiveSession && targetLiveSession._id) {
-    const targetIdStr = targetLiveSession._id.toString();
-    const existingIdx = candidateSessions.findIndex((s) => s._id.toString() === targetIdStr);
-    if (existingIdx !== -1) {
-      const [matchedTarget] = candidateSessions.splice(existingIdx, 1);
-      candidateSessions.unshift(matchedTarget);
-    } else if (targetLiveSession.status === 'PENDING' && new Date(targetLiveSession.expiresAt) > now) {
-      candidateSessions.unshift(targetLiveSession);
-    }
-  } else if (preferredLiveSessionId) {
-    const prefIdx = candidateSessions.findIndex(
-      (s) => s.liveSessionId === preferredLiveSessionId || s._id.toString() === preferredLiveSessionId.toString()
-    );
-    if (prefIdx !== -1) {
-      const [prefTarget] = candidateSessions.splice(prefIdx, 1);
-      candidateSessions.unshift(prefTarget);
-    }
-  }
-
-  logger.info(`[LIVE_SESSION_FOUND] Query found ${candidateSessions.length} pending candidate session(s) for sender: ${normalizedSender} | cleanProvider: ${cleanProvider} | amount >= ${parsedAmount}`);
+  const candidateSessions = await LivePaymentSession.find(sessionQuery).sort({ expectedAmount: -1, createdAt: 1 });
 
   if (candidateSessions.length === 0) {
-    logger.info(`[LIVE_MATCH_STATUS] Rejection reason: NO_MATCHING_PENDING_SESSION for sender: ${normalizedSender} | amount: ${parsedAmount} | merchant: ${resolvedMerchantId}`);
     return { matched: false, reason: 'NO_MATCHING_PENDING_SESSION' };
   }
 
   for (const session of candidateSessions) {
-    const merchantMatch = isAdminPayment ? true : (!payment.merchant || !session.merchant || payment.merchant.toString() === session.merchant.toString());
-    const brandMatch = isAdminPayment ? true : (!payment.brand || !session.brand || payment.brand.toString() === session.brand.toString());
-    const txTimeVal = payment.timestamp || payment.receivedAt || payment.createdAt || now;
-    const sessionCreatedTimeVal = new Date(session.createdAt).getTime();
-    const MAX_LOOKBACK_MS_VAL = 30 * 60 * 1000;
-    const timeWindowMatch = new Date(txTimeVal).getTime() >= (sessionCreatedTimeVal - MAX_LOOKBACK_MS_VAL);
-
-    logger.info(`[MATCH_CONDITION_RESULTS] Session: ${session.liveSessionId} | Order: ${session.orderId} | merchantMatch: ${merchantMatch} | brandMatch: ${brandMatch} | timeWindowMatch: ${timeWindowMatch} (Diff: ${Math.round((new Date(txTimeVal).getTime() - sessionCreatedTimeVal) / 1000)}s)`);
-
     // MATCHING RULE #0.5 — MERCHANT TENANT ISOLATION
-    if (!isAdminPayment && payment.merchant && session.merchant && payment.merchant.toString() !== session.merchant.toString()) {
-      logger.warn(`[LivePayment Reject] Session merchant ${session.merchant} does not match payment merchant ${payment.merchant}`);
+    const sessionMerchantId = normalizeId(session.merchant);
+    if (!isAdminPayment && paymentMerchantId && sessionMerchantId && paymentMerchantId !== sessionMerchantId) {
+      logger.warn(`[LivePayment Reject] Session merchant ${sessionMerchantId} does not match payment merchant ${paymentMerchantId}`);
       continue;
     }
 
     // MATCHING RULE #7 — BRAND ISOLATION (For Merchant Checkouts)
-    if (!isAdminPayment && payment.brand && session.brand && payment.brand.toString() !== session.brand.toString()) {
+    const paymentBrandId = normalizeId(payment.brand);
+    const sessionBrandId = normalizeId(session.brand);
+    if (!isAdminPayment && paymentBrandId && sessionBrandId && paymentBrandId !== sessionBrandId) {
       continue;
     }
 
@@ -743,65 +725,181 @@ const matchAndVerifyLivePayment = async ({
     // MATCHING RULE #5 — OLD TRANSACTIONS PROTECTION
     const txTime = payment.timestamp || payment.receivedAt || payment.createdAt || now;
     const sessionCreatedTime = new Date(session.createdAt).getTime();
-    // Allow realistic tolerance for customer payments initiated during the checkout flow (up to 30 minutes prior to session creation)
-    const MAX_LOOKBACK_MS = 30 * 60 * 1000;
-    if (new Date(txTime).getTime() < sessionCreatedTime - MAX_LOOKBACK_MS) {
+    // Allow up to 120s clock skew / sync latency tolerance
+    if (new Date(txTime).getTime() < sessionCreatedTime - 120000) {
       logger.warn(`[LivePayment Reject] Old transaction detected: TxID ${payment.transactionId} created at ${new Date(txTime).toISOString()} before session ${session.liveSessionId} created at ${session.createdAt.toISOString()}`);
       continue;
     }
 
     // MATCHING RULE #8 — ORDER STATE VALIDATION
-    let checkoutSession = null;
-    if (session.checkoutSession) {
-      try {
-        checkoutSession = await CheckoutSession.findById(session.checkoutSession).populate('merchant brand');
-      } catch (popErr) {
-        logger.warn(`[LivePayment CheckoutSession populate error] ${popErr.message}`);
-        try {
-          checkoutSession = await CheckoutSession.findById(session.checkoutSession);
-        } catch (_) {}
-      }
-    }
+    const checkoutSessionRef = session.checkoutSession?._id || session.checkoutSession;
+    const checkoutSession = checkoutSessionRef ? await CheckoutSession.findById(checkoutSessionRef) : null;
     if (checkoutSession && (checkoutSession.status !== 'PENDING' || new Date() > new Date(checkoutSession.expiresAt))) {
       if (new Date() > new Date(checkoutSession.expiresAt)) {
         checkoutSession.status = 'EXPIRED';
-        await checkoutSession.save().catch(() => { });
+        await checkoutSession.save().catch(() => {});
       }
       session.status = checkoutSession.status === 'VERIFIED' ? 'FAILED' : 'EXPIRED';
       session.rejectionReason = checkoutSession.status === 'VERIFIED' ? 'ORDER_ALREADY_PAID' : 'SESSION_EXPIRED';
-      await session.save().catch(() => { });
+      await session.save().catch(() => {});
       continue;
     }
 
-    // Delegate to Canonical Post-Payment Processing Pipeline
-    const { processVerifiedPayment } = require('./paymentPipeline.service');
-    try {
-      const pipelineResult = await processVerifiedPayment({
-        payment,
+    // ATOMIC CONCURRENCY LOCK & CLAIM
+    // 1. Claim Payment atomically
+    const claimedPayment = await Payment.findOneAndUpdate(
+      {
+        _id: payment._id,
+        isUsed: { $ne: true },
+        status: { $nin: ['USED', 'CLAIMED', 'REJECTED'] },
+        verificationState: { $nin: ['MISMATCH_SUSPICIOUS'] },
+      },
+      {
+        $set: {
+          status: 'VERIFIED',
+          paymentStatus: 'VERIFIED',
+          verificationState: 'VERIFIED',
+          isUsed: true,
+          isUsedForSubscription: isAdminPayment,
+          usedAt: new Date(),
+          ...(sessionBrandId ? { brand: new mongoose.Types.ObjectId(sessionBrandId) } : {}),
+        },
+      },
+      { new: true }
+    );
+
+    if (!claimedPayment) {
+      logger.warn(`[LivePayment Concurrency] Payment ${payment.transactionId} was already claimed by another concurrent process`);
+      return { matched: false, reason: 'TXID_ALREADY_CLAIMED' };
+    }
+
+    // 2. Claim LivePaymentSession atomically
+    const claimedSession = await LivePaymentSession.findOneAndUpdate(
+      {
+        _id: session._id,
+        status: 'PENDING',
+        expiresAt: { $gt: new Date() },
+      },
+      {
+        $set: {
+          status: 'VERIFIED',
+          matchedPayment: claimedPayment._id,
+          matchedTransactionId: claimedPayment.transactionId,
+          matchedTransaction: {
+            transactionId: claimedPayment.transactionId,
+            amount: claimedPayment.amount,
+            sender: claimedPayment.sender,
+            provider: claimedPayment.provider,
+            source: claimedPayment.source,
+            receivedAt: claimedPayment.receivedAt,
+            timestamp: claimedPayment.timestamp,
+          },
+          verifiedAt: new Date(),
+        },
+        $push: {
+          auditLogs: {
+            event: 'TRANSACTION_MATCHED',
+            timestamp: new Date(),
+            details: `Matched with trusted ${cleanProvider} transaction ${claimedPayment.transactionId} for ৳${claimedPayment.amount} (Expected ৳${session.expectedAmount})`,
+          },
+        },
+      },
+      { new: true }
+    );
+
+    if (!claimedSession) {
+      // Rollback payment claim if session was claimed or expired concurrently
+      await Payment.updateOne(
+        { _id: claimedPayment._id },
+        { $set: { isUsed: false, status: 'COMPLETED', paymentStatus: 'COMPLETED' } }
+      ).catch(() => {});
+      continue;
+    }
+
+    // 3. Mark Associated CheckoutSession as VERIFIED (if attached)
+    if (checkoutSession) {
+      checkoutSession.status = 'VERIFIED';
+      checkoutSession.payment = claimedPayment._id;
+      checkoutSession.transactionId = claimedPayment.transactionId;
+      await checkoutSession.save();
+    }
+
+    // 4. Automatic Fulfillment for Platform / Admin Subscription / Upgrade
+    if (session.ownerType === 'ADMIN' || checkoutSession?.ownerType === 'ADMIN') {
+      try {
+        if (checkoutSession?.plan || session.plan) {
+          const subscriptionService = require('./subscription.service');
+          const User = require('../models/User');
+          const targetUserId = session.user || checkoutSession?.user;
+          const userDoc = targetUserId ? await User.findById(targetUserId) : null;
+          await subscriptionService.submitApplication({
+            userId: targetUserId,
+            plan: checkoutSession?.plan || session.plan,
+            billingCycle: checkoutSession?.billingCycle || session.billingCycle || 'monthly',
+            paymentMethod: cleanProvider,
+            transactionId: claimedPayment.transactionId,
+            amount: claimedPayment.amount,
+            companyName: userDoc?.companyName || userDoc?.name || 'FastPay Merchant',
+          }).catch((err) => logger.warn(`[Platform Live Auto-Activation Notice] ${err.message}`));
+          logger.info(`[Platform Live Auto-Activation] Activated subscription plan '${checkoutSession?.plan || session.plan}' with TxID ${claimedPayment.transactionId}`);
+        } else if (checkoutSession?.targetPlan) {
+          const entitlementService = require('./entitlement.service');
+          await entitlementService.upgradeMerchantSubscription({
+            merchantId: checkoutSession.merchant,
+            targetPlanIdOrName: checkoutSession.targetPlan,
+            targetBillingCycle: checkoutSession.targetBillingCycle || checkoutSession.billingCycle || 'monthly',
+            transactionId: claimedPayment.transactionId,
+            paymentMethod: cleanProvider,
+          }).catch((err) => logger.warn(`[Platform Live Auto-Upgrade Notice] ${err.message}`));
+          logger.info(`[Platform Live Auto-Upgrade] Upgraded to plan '${checkoutSession.targetPlan}' with TxID ${claimedPayment.transactionId}`);
+        }
+      } catch (activationErr) {
+        logger.error(`[Platform Live Auto-Activation Error] ${activationErr.message}`);
+      }
+    } else if (checkoutSession) {
+      // 4b. Trigger Centralized Post-Verification Handler for Merchant Store Checkout
+      const { handleSuccessfulPaymentVerification } = require('./checkoutSession.service');
+      await handleSuccessfulPaymentVerification({
         session: checkoutSession,
-        liveSession: session,
-        merchantId: resolvedMerchantId,
-        brandId: session.brand,
+        payment: claimedPayment,
+        brand: checkoutSession.brand,
+        merchant: checkoutSession.merchant,
         triggerSource: 'LIVE_PAYMENT_SYNC',
-        customerName: checkoutSession?.customerName || null,
-        customerPhone: session.customerPhone || checkoutSession?.customerPhone || null,
       });
 
-      logger.info(`[LIVE_PAYMENT_VERIFIED] Session ${session.liveSessionId} successfully VERIFIED with TxID ${pipelineResult.payment.transactionId} for Order ${session.orderId} (Owner: ${session.ownerType})`);
-
-      return {
-        matched: true,
-        liveSession: pipelineResult.liveSession || session,
-        payment: pipelineResult.payment,
-        checkoutSession: pipelineResult.session,
-      };
-    } catch (pipelineErr) {
-      logger.warn(`[LivePayment Pipeline Reject] ${pipelineErr.message}`);
-      if (pipelineErr.code === 'TXID_ALREADY_CLAIMED' || pipelineErr.code === 'TRANSACTION_ALREADY_USED') {
-        return { matched: false, reason: 'TXID_ALREADY_CLAIMED' };
-      }
-      continue;
+      // 5. Dispatch Webhook Asynchronously for Merchant
+      const { sendWebhook } = require('./webhook.service');
+      sendWebhook({
+        merchantId: claimedSession.merchant,
+        brandId: claimedSession.brand,
+        payment: claimedPayment,
+        session: checkoutSession,
+        liveSession: claimedSession,
+        event: 'payment.verified',
+      }).catch((err) => logger.warn(`[LivePayment Webhook Error] ${err.message}`));
     }
+
+    // 6. Emit Socket.io Event for Live Realtime Dashboard & Polling Listeners
+    const { emitLivePaymentUpdated, emitPaymentUpdated } = require('../socket/socketManager');
+    if (claimedSession.merchant) {
+      emitPaymentUpdated(claimedSession.merchant, {
+        _id: claimedPayment._id,
+        transactionId: claimedPayment.transactionId,
+        status: claimedPayment.status,
+        verificationState: claimedPayment.verificationState,
+        amount: claimedPayment.amount,
+      });
+    }
+    emitLivePaymentUpdated(claimedSession.merchant, claimedSession);
+
+    logger.info(`[LIVE_PAYMENT_VERIFIED] Session ${claimedSession.liveSessionId} successfully VERIFIED with TxID ${claimedPayment.transactionId} for Order ${claimedSession.orderId} (Owner: ${claimedSession.ownerType})`);
+
+    return {
+      matched: true,
+      liveSession: claimedSession,
+      payment: claimedPayment,
+      checkoutSession,
+    };
   }
 
   return { matched: false, reason: 'NO_VALID_SESSION_MATCHED' };
@@ -817,48 +915,42 @@ const matchAndVerifyLivePayment = async ({
 const performLivePaymentReconciliation = async ({ liveSession }) => {
   if (!liveSession || liveSession.status !== 'PENDING') return;
 
-  const MAX_LOOKBACK_MS = 30 * 60 * 1000;
-  const minTime = new Date(new Date(liveSession.createdAt).getTime() - MAX_LOOKBACK_MS);
+  const minTime = new Date(new Date(liveSession.createdAt).getTime() - 120000);
   const isAdminSession = liveSession.ownerType === 'ADMIN';
+  const resolvedMerchantId = normalizeId(liveSession.merchant);
 
   const paymentQuery = {
     isUsed: { $ne: true },
     status: { $in: ['COMPLETED', 'SUCCESS', 'SUCCESSFUL', 'PENDING_VERIFICATION', 'SMS', 'VERIFIED'] },
     verificationState: { $nin: ['MISMATCH_SUSPICIOUS'] },
     isSuspicious: false,
-    amount: { $gte: liveSession.expectedAmount },
-    $or: [
-      { createdAt: { $gte: minTime } },
-      { timestamp: { $gte: minTime } },
-      { receivedAt: { $gte: minTime } },
-    ],
+    amount: { $gte: Number(liveSession.expectedAmount) },
+    createdAt: { $gte: minTime },
   };
 
   if (isAdminSession) {
     paymentQuery.ownerType = 'ADMIN';
   } else {
-    paymentQuery.merchant = liveSession.merchant;
+    if (!resolvedMerchantId) return;
+    paymentQuery.merchant = new mongoose.Types.ObjectId(resolvedMerchantId);
     paymentQuery.ownerType = { $ne: 'ADMIN' };
   }
 
-  // Sort candidate payments newest first to match the customer's most recent transaction immediately
-  const candidatePayments = await Payment.find(paymentQuery).sort({ createdAt: -1 });
+  const candidatePayments = await Payment.find(paymentQuery).sort({ createdAt: 1 });
 
   for (const payment of candidatePayments) {
     const normalizedSender = normalizeBdPhoneNumber(payment.sender);
     if (normalizedSender === liveSession.customerPhone) {
       const matchResult = await matchAndVerifyLivePayment({
         payment,
-        merchantId: liveSession.merchant,
-        targetLiveSession: liveSession,
+        merchantId: resolvedMerchantId,
       });
-      if (matchResult && matchResult.matched) {
+      if (matchResult.matched) {
         liveSession.status = matchResult.liveSession.status;
         liveSession.matchedPayment = matchResult.liveSession.matchedPayment;
         liveSession.matchedTransactionId = matchResult.liveSession.matchedTransactionId;
-        liveSession.matchedTransaction = matchResult.liveSession.matchedTransaction;
         liveSession.verifiedAt = matchResult.liveSession.verifiedAt;
-        return matchResult;
+        return;
       }
     }
   }
