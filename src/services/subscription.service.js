@@ -191,6 +191,7 @@ const submitApplication = async ({
   paymentReceiver,
   transactionId,
   note,
+  isLivePaymentClaimed = false,
 }) => {
   if (!companyName || !companyName.trim()) {
     throw new ApiError(400, 'Please enter your Company / Business name.');
@@ -264,10 +265,12 @@ const submitApplication = async ({
       transactionId: cleanTrxId,
       status: { $in: ['active', 'pending'] },
     });
-    const existingUsedPayment = await Payment.findOne({
-      transactionId: cleanTrxId,
-      isUsedForSubscription: true,
-    });
+    const existingUsedPayment = !isLivePaymentClaimed
+      ? await Payment.findOne({
+          transactionId: cleanTrxId,
+          isUsedForSubscription: true,
+        })
+      : null;
     const existingApp = await MerchantApplication.findOne({
       transactionId: cleanTrxId,
       status: { $in: ['APPROVED', 'PENDING'] },

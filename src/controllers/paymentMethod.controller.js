@@ -49,6 +49,7 @@ const getCanonicalPlatformPaymentMethods = async () => {
         id: m._id,
         name: cleanName,
         code: canonicalKey,
+        provider: canonicalKey,
         accountNumber: m.accountNumber,
         accountType: m.accountType || 'Personal (Send Money)',
         instruction: m.instruction,

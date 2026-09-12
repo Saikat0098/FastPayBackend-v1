@@ -655,6 +655,11 @@ const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
   const paymentMerchantId = normalizeId(payment.merchant);
   const requestedMerchantId = normalizeId(merchantId);
 
+  if (isAdminPayment && requestedMerchantId) {
+    logger.warn(`[LivePayment Reject] Admin payment match attempted against merchant context: ${requestedMerchantId}`);
+    return { matched: false, reason: 'ADMIN_PAYMENT_CANNOT_MATCH_MERCHANT_CONTEXT' };
+  }
+
   if (!isAdminPayment && paymentMerchantId && requestedMerchantId && paymentMerchantId !== requestedMerchantId) {
     logger.warn(`[LivePayment Reject] Cross-merchant payment match attempt: payment merchant ${paymentMerchantId} !== requested merchant ${requestedMerchantId}`);
     return { matched: false, reason: 'CROSS_MERCHANT_MATCH_FORBIDDEN' };
@@ -830,7 +835,7 @@ const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
         if (checkoutSession?.plan || session.plan) {
           const subscriptionService = require('./subscription.service');
           const User = require('../models/User');
-          const targetUserId = session.user || checkoutSession?.user;
+          const targetUserId = checkoutSession?.user || session.user;
           const userDoc = targetUserId ? await User.findById(targetUserId) : null;
           await subscriptionService.submitApplication({
             userId: targetUserId,
@@ -840,6 +845,7 @@ const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
             transactionId: claimedPayment.transactionId,
             amount: claimedPayment.amount,
             companyName: userDoc?.companyName || userDoc?.name || 'FastPay Merchant',
+            isLivePaymentClaimed: true,
           }).catch((err) => logger.warn(`[Platform Live Auto-Activation Notice] ${err.message}`));
           logger.info(`[Platform Live Auto-Activation] Activated subscription plan '${checkoutSession?.plan || session.plan}' with TxID ${claimedPayment.transactionId}`);
         } else if (checkoutSession?.targetPlan) {
