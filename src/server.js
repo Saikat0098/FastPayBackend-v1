@@ -57,3 +57,12 @@ connectDB().then(async () => {
 }).catch((err) => {
   logger.error(`Failed to start server: ${err.message}`);
 });
+
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('Unhandled Promise Rejection caught at process level:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  logger.error('Uncaught Exception caught at process level:', err);
+});
+

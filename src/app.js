@@ -1,4 +1,15 @@
 const path = require('path');
+const Module = require('module');
+
+// Linux/Render case-sensitivity safeguard for utils/apiError
+const _origResolveFilename = Module._resolveFilename;
+Module._resolveFilename = function (request, parent, isMain, options) {
+  if (typeof request === 'string' && (request.endsWith('/utils/ApiError') || request.endsWith('\\utils\\ApiError') || request === '../utils/ApiError' || request === './utils/ApiError')) {
+    request = request.replace(/ApiError$/, 'apiError');
+  }
+  return _origResolveFilename.call(this, request, parent, isMain, options);
+};
+
 require('dotenv').config({ path: path.join(__dirname, '../.env') });
 const express = require('express');
 const cors = require('cors');
