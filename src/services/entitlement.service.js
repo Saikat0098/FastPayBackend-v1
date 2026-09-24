@@ -425,6 +425,25 @@ const upgradeMerchantSubscription = async ({
   paymentMethod = 'bKash',
 }) => {
   const mId = resolveMerchantId(merchantId);
+
+  // Server-Side Guard: Unverified users cannot upgrade plans
+  const merchantDoc = await Merchant.findById(mId);
+  const User = require('../models/User');
+  let linkedUser = null;
+  if (merchantDoc?.user) {
+    linkedUser = await User.findById(merchantDoc.user);
+  } else if (merchantDoc?.email) {
+    linkedUser = await User.findOne({ email: merchantDoc.email });
+  }
+  if (linkedUser && linkedUser.emailVerified === false) {
+    const err = new ApiError(403, 'Please verify your email address before purchasing a plan.', [], '', {
+      code: 'EMAIL_NOT_VERIFIED',
+      userMessage: 'Please verify your email address before purchasing a plan.',
+    });
+    err.code = 'EMAIL_NOT_VERIFIED';
+    throw err;
+  }
+
   const quote = await calculateUpgradeQuote(mId, targetPlanIdOrName, targetBillingCycle);
 
   if (!transactionId || !transactionId.trim()) {

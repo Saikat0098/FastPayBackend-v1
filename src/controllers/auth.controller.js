@@ -58,6 +58,7 @@ const getProfile = asyncHandler(async (req, res) => {
       linkedUser = await User.findById(merchantObj.user).select('-password');
     }
     const userObj = linkedUser ? (linkedUser.toObject ? linkedUser.toObject() : linkedUser) : {};
+    const emailVerified = userObj.emailVerified !== undefined ? userObj.emailVerified : true;
     return ApiResponse.success(res, {
       ...userObj,
       ...merchantObj,
@@ -65,13 +66,15 @@ const getProfile = asyncHandler(async (req, res) => {
       role: 'MERCHANT',
       merchantId: merchantObj._id || merchantObj.id,
       user: userObj,
+      emailVerified,
       createdAt: userObj.createdAt || merchantObj.createdAt,
     }, 'Merchant profile retrieved');
   } else if (req.admin) {
     const adminObj = req.admin.toObject ? req.admin.toObject() : req.admin;
     return ApiResponse.success(res, {
       ...adminObj,
-      role: 'SUPER_ADMIN'
+      role: 'SUPER_ADMIN',
+      emailVerified: true,
     }, 'Admin profile retrieved');
   }
 
@@ -80,7 +83,11 @@ const getProfile = asyncHandler(async (req, res) => {
     if (user) {
       const userObj = user.toObject();
       const roleUpper = (user.role || 'USER').toUpperCase();
-      return ApiResponse.success(res, { ...userObj, role: roleUpper }, 'User profile retrieved');
+      return ApiResponse.success(res, {
+        ...userObj,
+        role: roleUpper,
+        emailVerified: userObj.emailVerified !== undefined ? userObj.emailVerified : true,
+      }, 'User profile retrieved');
     }
   }
 

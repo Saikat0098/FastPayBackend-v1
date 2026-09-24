@@ -24,19 +24,19 @@ const registerUser = async ({ name, email, password, phone }) => {
     throw new ApiError(400, 'Name, email, and password are required');
   }
 
-  const existingUser = await User.findOne({ email: loginEmail });
-  if (existingUser) {
+  let user = await User.findOne({ email: loginEmail });
+  if (user) {
     // If account already exists and is verified, reject duplicate registration
-    if (existingUser.emailVerified !== false) {
+    if (user.emailVerified !== false) {
       throw new ApiError(400, 'User email already registered');
     }
     // If account was created but not verified yet, update details
-    existingUser.name = name.trim();
-    existingUser.password = password;
-    if (phone) existingUser.phone = phone.trim();
-    await existingUser.save();
+    user.name = name.trim();
+    user.password = password;
+    if (phone) user.phone = phone.trim();
+    await user.save();
   } else {
-    await User.create({
+    user = await User.create({
       name: name.trim(),
       email: loginEmail,
       password,
@@ -66,7 +66,7 @@ const registerUser = async ({ name, email, password, phone }) => {
     verified: false,
   });
 
-  // Safely dispatch verification email asynchronously (Isolated & Non-blocking)
+  // Safely dispatch verification email asynchronously (Isolated & Non-blocking: SMTP failure must never roll back account creation)
   emailService.sendEmailVerificationOTP(loginEmail, rawOtp)
     .then((emailSent) => {
       if (emailSent && !emailSent.success && !emailSent.mocked) {
@@ -77,10 +77,25 @@ const registerUser = async ({ name, email, password, phone }) => {
       logger.warn(`[RegisterUser] Background email delivery error for ${maskEmail(loginEmail)}: ${err.message}`);
     });
 
+  // Generate safe session tokens so unverified user can immediately access their dashboard if skipped
+  const normRole = (user.role || 'USER').toUpperCase();
+  const roleForToken = normRole === 'SUPER_ADMIN' || normRole === 'ADMIN' ? 'superadmin' : normRole === 'MERCHANT' ? 'merchant' : 'user';
+  const accessToken = generateAccessToken({ id: user._id, email: user.email, role: roleForToken, merchant: user.merchant?._id || null });
+  const refreshToken = generateRefreshToken({ id: user._id, email: user.email, role: roleForToken, merchant: user.merchant?._id || null });
+
+  const safeUser = user.toObject ? user.toObject() : { ...user };
+  delete safeUser.password;
+
   return {
     success: true,
     requiresVerification: true,
     email: loginEmail,
+    otpSent: true,
+    accessToken,
+    refreshToken,
+    token: accessToken,
+    role: normRole,
+    user: safeUser,
     message: 'Registration successful. A 6-digit verification code has been sent to your email.',
   };
 };

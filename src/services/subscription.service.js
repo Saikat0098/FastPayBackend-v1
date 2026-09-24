@@ -197,6 +197,19 @@ const submitApplication = async ({
     throw new ApiError(400, 'Please enter your Company / Business name.');
   }
 
+  // 0. Server-Side Guard: Unverified users cannot purchase or activate plans
+  if (userId) {
+    const userDoc = await User.findById(userId);
+    if (userDoc && userDoc.emailVerified === false) {
+      const err = new ApiError(403, 'Please verify your email address before purchasing a plan.', [], '', {
+        code: 'EMAIL_NOT_VERIFIED',
+        userMessage: 'Please verify your email address before purchasing a plan.',
+      });
+      err.code = 'EMAIL_NOT_VERIFIED';
+      throw err;
+    }
+  }
+
   const selectedCycle = billingCycle === 'yearly' ? 'yearly' : 'monthly';
 
   // 1. Fetch Plan from MongoDB

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const subscriptionController = require('../controllers/subscription.controller');
-const { verifyToken, authorizeRoles } = require('../middlewares/auth.middleware');
+const { verifyToken, authorizeRoles, requireVerifiedEmail } = require('../middlewares/auth.middleware');
 
 // Public subscription endpoints
 router.get('/plans', subscriptionController.getPlans);
@@ -16,15 +16,15 @@ router.get('/my-subscription', subscriptionController.getMySubscription);
 router.get('/entitlements', subscriptionController.getEntitlements);
 router.get('/upgrade-quote', subscriptionController.getUpgradeQuote);
 router.get('/upgrade/quote', subscriptionController.getUpgradeQuote);
-router.get('/upgrade/checkout-session/:targetPlan', subscriptionController.getUpgradeCheckoutSession);
-router.get('/upgrade/checkout-session', subscriptionController.getUpgradeCheckoutSession);
+router.get('/upgrade/checkout-session/:targetPlan', requireVerifiedEmail, subscriptionController.getUpgradeCheckoutSession);
+router.get('/upgrade/checkout-session', requireVerifiedEmail, subscriptionController.getUpgradeCheckoutSession);
 router.get('/my-application', subscriptionController.getMyApplication);
 router.get('/my-applications', subscriptionController.getMyApplication);
 
-router.post('/apply', subscriptionController.applySubscription);
-router.post('/purchase', subscriptionController.applySubscription);
-router.post('/upgrade', subscriptionController.upgradeSubscription);
-router.post('/renew', subscriptionController.renewSubscription);
+router.post('/apply', requireVerifiedEmail, subscriptionController.applySubscription);
+router.post('/purchase', requireVerifiedEmail, subscriptionController.applySubscription);
+router.post('/upgrade', requireVerifiedEmail, subscriptionController.upgradeSubscription);
+router.post('/renew', requireVerifiedEmail, subscriptionController.renewSubscription);
 router.get('/all', authorizeRoles('admin', 'superadmin'), subscriptionController.getAllSubscriptions);
 
 module.exports = router;

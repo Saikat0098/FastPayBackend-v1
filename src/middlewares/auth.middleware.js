@@ -306,9 +306,47 @@ const verifyHeartbeatAuth = asyncHandler(async (req, res, next) => {
   next();
 });
 
+/**
+ * Require verified email middleware
+ * Authoritatively blocks unverified users (emailVerified === false) from purchasing plans
+ */
+const requireVerifiedEmail = asyncHandler(async (req, res, next) => {
+  const userId = req.user?.id || req.user?._id;
+  if (!userId) {
+    throw new ApiError(401, 'Authentication required');
+  }
+
+  const User = require('../models/User');
+  let user = await User.findById(userId);
+
+  if (!user && req.merchant) {
+    const merchantUser = req.merchant.user || req.merchant._id;
+    user = await User.findOne({
+      $or: [
+        { _id: merchantUser },
+        { email: req.merchant.email },
+        { merchant: req.merchant._id },
+      ],
+    });
+  }
+
+  // If user document has emailVerified strictly set to false, reject purchase
+  if (user && user.emailVerified === false) {
+    const err = new ApiError(403, 'Please verify your email address before purchasing a plan.', [], '', {
+      code: 'EMAIL_NOT_VERIFIED',
+      userMessage: 'Please verify your email address before purchasing a plan.',
+    });
+    err.code = 'EMAIL_NOT_VERIFIED';
+    throw err;
+  }
+
+  next();
+});
+
 module.exports = {
   verifyToken,
   verifyHeartbeatAuth,
   authorizeRoles,
   verifyApiKey,
+  requireVerifiedEmail,
 };
