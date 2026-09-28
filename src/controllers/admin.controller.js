@@ -350,6 +350,29 @@ const getAllTransactions = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, payments, 'Transactions list retrieved');
 });
 
+const getAdminUnverifiedPayments = asyncHandler(async (req, res) => {
+  const { search, ownerType, status, page, limit } = req.query;
+  const unverifiedPaymentService = require('../services/unverifiedPayment.service');
+  const data = await unverifiedPaymentService.getAdminUnverifiedPayments({
+    search,
+    ownerType,
+    status,
+    page,
+    limit,
+  });
+  return ApiResponse.success(res, data, 'Admin unverified payments retrieved');
+});
+
+const retryAdminUnverifiedPayment = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const unverifiedPaymentService = require('../services/unverifiedPayment.service');
+  const result = await unverifiedPaymentService.retryUnverifiedPayment({
+    id,
+    isSuperAdmin: true,
+  });
+  return ApiResponse.success(res, result, result.message || 'Verification retry processed');
+});
+
 const getAllDevices = asyncHandler(async (req, res) => {
   const { page, limit, status, search, merchantId, ownerType } = req.query;
 
@@ -1454,6 +1477,8 @@ module.exports = {
   updatePlan,
   deletePlan,
   getAllTransactions,
+  getAdminUnverifiedPayments,
+  retryAdminUnverifiedPayment,
   getAllDevices,
   getAdminDeviceById,
   resetDeviceActivation,

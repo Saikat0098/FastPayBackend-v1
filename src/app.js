@@ -24,6 +24,9 @@ const logger = require('./config/logger');
 
 const app = express();
 
+// Trust Nginx reverse proxy (1 hop) for accurate client IP identification in rate limiters
+app.set('trust proxy', 1);
+
 // Security Middlewares & Headers
 app.use(
   helmet({

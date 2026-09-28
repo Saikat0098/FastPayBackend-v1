@@ -207,6 +207,12 @@ paymentSchema.virtual('brandName').get(function () {
   return this.brand?.name || null;
 });
 
+paymentSchema.virtual('brandStatus').get(function () {
+  if (this.brand?.name) return this.brand.name;
+  if (this.ownerType === 'ADMIN') return 'PLATFORM';
+  return 'PRIMARY';
+});
+
 paymentSchema.set('toJSON', { virtuals: true });
 paymentSchema.set('toObject', { virtuals: true });
 

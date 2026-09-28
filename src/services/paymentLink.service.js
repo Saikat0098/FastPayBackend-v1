@@ -1,5 +1,7 @@
 const PaymentLink = require('../models/PaymentLink');
 const Brand = require('../models/Brand');
+const Merchant = require('../models/Merchant');
+const MerchantGateway = require('../models/MerchantGateway');
 const ApiError = require('../utils/apiError');
 const crypto = require('crypto');
 
@@ -68,7 +70,9 @@ const getPublicLink = async (code) => {
   if (!code) throw new ApiError(400, 'Payment link code required');
   const link = await PaymentLink.findOne({
     $or: [{ code: code }, { uniqueCode: code }],
-  }).populate('brand', 'name slug logo status suspension blockedReason');
+  })
+    .populate('brand', 'name slug logo status suspension blockedReason livePayment')
+    .populate('merchant', 'companyName name logo status livePayment');
 
   if (!link) throw new ApiError(404, 'Payment link not found');
 
@@ -90,26 +94,133 @@ const getPublicLink = async (code) => {
   }
 
   const linkObj = link.toObject ? link.toObject() : { ...link };
+
+  // Resolve Gateways for Brand / Merchant
+  const { sortGatewaysByCanonicalOrder } = require('../utils/gatewayOrdering');
   if (link.brand && link.merchant) {
-    const MerchantGateway = require('../models/MerchantGateway');
     const bId = link.brand._id || link.brand;
     const mId = link.merchant._id || link.merchant;
-    const { sortGatewaysByCanonicalOrder } = require('../utils/gatewayOrdering');
     const brandGateways = await MerchantGateway.find({
       merchant: mId,
       brand: bId,
       isActive: true,
     });
-
     linkObj.gateways = sortGatewaysByCanonicalOrder(brandGateways);
+  } else if (link.merchant) {
+    const mId = link.merchant._id || link.merchant;
+    const merchantGateways = await MerchantGateway.find({
+      merchant: mId,
+      isActive: true,
+    });
+    linkObj.gateways = sortGatewaysByCanonicalOrder(merchantGateways);
+  } else {
+    linkObj.gateways = [];
+  }
+
+  // Canonical Live Payment Resolution (Exact Same Logic as CheckoutSession)
+  let brandLivePayment = { enabled: false, gateways: [] };
+  if (link.brand && link.brand.livePayment) {
+    brandLivePayment = link.brand.livePayment;
+  } else if (!link.brand && link.merchant && link.merchant.livePayment) {
+    brandLivePayment = link.merchant.livePayment;
+  }
+
+  const globalLivePaymentService = require('./globalLivePayment.service');
+  const globalSettings = await globalLivePaymentService.getGlobalLivePaymentSettings();
+
+  if (!globalSettings.isEnabled) {
+    linkObj.livePayment = {
+      enabled: false,
+      gateways: [],
+      notice: globalSettings.notice || '',
+      adminNotice: globalSettings.notice || '',
+    };
+  } else {
+    const globallyAllowedList = (globalSettings.gateways || []).map((g) => g.toUpperCase());
+    linkObj.livePayment = {
+      enabled: Boolean(brandLivePayment?.enabled),
+      gateways: Array.isArray(brandLivePayment?.gateways)
+        ? brandLivePayment.gateways
+            .map((g) => (g || '').toUpperCase())
+            .filter((g) => globallyAllowedList.includes(g))
+        : [],
+      notice: globalSettings.notice || '',
+      adminNotice: globalSettings.notice || '',
+    };
   }
 
   return linkObj;
 };
 
+/**
+ * Establish a CheckoutSession for a Payment Link
+ * Enables full live payment and unified checkout pipeline
+ */
+const createPaymentLinkSession = async (
+  code,
+  { customerName, customerPhone, customerEmail, customerAddress, customFields = {}, returnUrl, cancelUrl } = {}
+) => {
+  if (!code) throw new ApiError(400, 'Payment link code is required');
+  const link = await PaymentLink.findOne({
+    $or: [{ code: code }, { uniqueCode: code }],
+  }).populate('brand merchant');
+
+  if (!link) throw new ApiError(404, 'Payment link not found');
+
+  if (link.brand) {
+    const { checkBrandOperationalStatus } = require('../middlewares/brandGuard.middleware');
+    await checkBrandOperationalStatus(link.brand);
+  }
+
+  if (link.expiresAt && new Date(link.expiresAt) < new Date()) {
+    link.status = 'EXPIRED';
+    await link.save();
+    throw new ApiError(410, 'Payment link has expired');
+  }
+
+  const orderId = `ORD-PL-${link.code.slice(-6).toUpperCase()}-${Date.now().toString(36).toUpperCase()}`;
+  const checkoutSessionService = require('./checkoutSession.service');
+
+  const frontendBase =
+    process.env.CHECKOUT_FRONTEND_URL ||
+    process.env.FRONTEND_URL ||
+    'https://fastpaygateway.pro';
+
+  const defaultReturnUrl =
+    returnUrl ||
+    `${frontendBase.replace(/\/+$/, '')}/links/public/${link.code}?order=${orderId}&status=success`;
+  const defaultCancelUrl =
+    cancelUrl ||
+    `${frontendBase.replace(/\/+$/, '')}/links/public/${link.code}?order=${orderId}&status=cancelled`;
+
+  const session = await checkoutSessionService.createCheckoutSession({
+    merchantId: link.merchant?._id || link.merchant,
+    brandId: link.brand?._id || link.brand || null,
+    orderId,
+    amount: link.amount,
+    currency: 'BDT',
+    returnUrl: defaultReturnUrl,
+    cancelUrl: defaultCancelUrl,
+    customerName: (customerName || link.customerName || '').trim(),
+    customerPhone: (customerPhone || link.customerPhone || '').trim(),
+    customerEmail: (customerEmail || link.customerEmail || '').trim(),
+    customerAddress: (customerAddress || '').trim(),
+    customFields: {
+      ...customFields,
+      source: 'payment_link',
+      paymentLinkId: link._id.toString(),
+      paymentLinkCode: link.code,
+      title: link.title,
+    },
+    expiresInMinutes: 60,
+  });
+
+  return session;
+};
 
 module.exports = {
   createLink,
   getLinks,
   getPublicLink,
+  createPaymentLinkSession,
 };

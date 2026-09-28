@@ -593,17 +593,89 @@ const verifySessionPayment = async ({
   }
 
   // Authoritative server-side verification with strict session amount matching
-  const payment = await verifyCustomerCheckoutPayment({
-    trxId: cleanTrx,
-    merchantId: mId,
-    brandId: resolvedBrandId,
-    gateway: targetProvider,
-    provider: targetProvider,
-    amount: session ? session.amount : undefined,
-    phone: phone || (session ? session.customerPhone : undefined),
-    customerName: customerName || (session ? session.customerName : undefined),
-    expectedAccountNumber: targetGatewayRecord?.accountNumber,
-  });
+  let payment = null;
+  try {
+    payment = await verifyCustomerCheckoutPayment({
+      trxId: cleanTrx,
+      merchantId: mId,
+      brandId: resolvedBrandId,
+      gateway: targetProvider,
+      provider: targetProvider,
+      amount: session ? session.amount : undefined,
+      phone: phone || (session ? session.customerPhone : undefined),
+      customerName: customerName || (session ? session.customerName : undefined),
+      expectedAccountNumber: targetGatewayRecord?.accountNumber,
+    });
+  } catch (verifyErr) {
+    // Only record temporary UnverifiedPayment when the transaction is genuinely NOT FOUND in system
+    const isGenuineNotFound = verifyErr.code === 'TRANSACTION_NOT_FOUND';
+
+    if (isGenuineNotFound && mId && cleanTrx) {
+      try {
+        const unverifiedPaymentService = require('./unverifiedPayment.service');
+        const unverifiedRecord = await unverifiedPaymentService.recordUnverifiedAttempt({
+          merchantId: mId,
+          brandId: resolvedBrandId,
+          sessionId: session?.sessionId || sessionId || '',
+          checkoutSession: session?._id || session || null,
+          orderId: session?.orderId || `ORD-${Date.now()}`,
+          invoiceId: session?.invoiceId || (session?.sessionId ? `INV-${session.sessionId.slice(-6).toUpperCase()}` : ''),
+          transactionId: cleanTrx,
+          amount: session?.amount || 0,
+          currency: session?.currency || 'BDT',
+          provider: targetProvider,
+          gateway: targetProvider,
+          customerName: customerName || (session ? session.customerName : ''),
+          customerPhone: phone || (session ? session.customerPhone : ''),
+          customerEmail: session ? session.customerEmail : '',
+          customerAddress: session ? session.customerAddress : '',
+          returnUrl: session ? session.returnUrl : '',
+          cancelUrl: session ? session.cancelUrl : '',
+          reason: verifyErr.userMessage || verifyErr.message || 'Transaction ID not found in system. Awaiting verification or merchant retry.',
+        });
+
+        if (unverifiedRecord) {
+          verifyErr.unverifiedId = unverifiedRecord._id;
+          verifyErr.unverified = {
+            id: unverifiedRecord._id,
+            unverifiedId: unverifiedRecord._id,
+            transactionId: unverifiedRecord.transactionId,
+            orderId: unverifiedRecord.orderId,
+            sessionId: unverifiedRecord.sessionId,
+            amount: unverifiedRecord.amount,
+            currency: unverifiedRecord.currency,
+            provider: unverifiedRecord.provider,
+            status: unverifiedRecord.status,
+            returnUrl: unverifiedRecord.returnUrl,
+          };
+        }
+      } catch (recordErr) {
+        logger.warn(`[UnverifiedPayment] Failed to record temporary unverified attempt: ${recordErr.message}`);
+      }
+    }
+    throw verifyErr;
+  }
+
+  // If there was an existing unverified attempt for this transaction, mark it verified
+  try {
+    const UnverifiedPayment = require('../models/UnverifiedPayment');
+    await UnverifiedPayment.updateMany(
+      {
+        merchant: mId,
+        transactionId: cleanTrx,
+        status: 'UNVERIFIED',
+      },
+      {
+        $set: {
+          status: 'VERIFIED',
+          verifiedPayment: payment._id,
+          verifiedAt: new Date(),
+        },
+      }
+    );
+  } catch (cleanErr) {
+    logger.warn(`[UnverifiedPayment] Notice updating unverified status on success: ${cleanErr.message}`);
+  }
 
   // Delegate post-verification processing (order sync, email delivery, webhook dispatch, socket emissions)
   // to canonical pipeline

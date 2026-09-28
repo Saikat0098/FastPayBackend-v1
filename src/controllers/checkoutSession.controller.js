@@ -47,7 +47,9 @@ const createSession = asyncHandler(async (req, res) => {
   });
 
   // Authoritative Checkout Frontend URL resolution
+  // Authoritative Checkout Frontend URL resolution
   const configuredCheckoutUrl =
+    process.env.PUBLIC_FRONTEND_URL ||
     process.env.CHECKOUT_FRONTEND_URL ||
     process.env.CHECKOUT_URL ||
     process.env.FRONTEND_URL ||
@@ -58,13 +60,13 @@ const createSession = asyncHandler(async (req, res) => {
   if (configuredCheckoutUrl && typeof configuredCheckoutUrl === 'string' && configuredCheckoutUrl.trim()) {
     frontendBase = configuredCheckoutUrl.trim().replace(/\/+$/, '');
   } else if (process.env.NODE_ENV === 'production') {
-    frontendBase = 'https://fast-pay-weld.vercel.app';
+    frontendBase = 'https://fastpaygateway.pro';
   } else {
     const reqOrigin = req.get('origin');
-    if (reqOrigin && (reqOrigin.includes('localhost') || reqOrigin.includes('127.0.0.1') || reqOrigin.includes('vercel.app'))) {
+    if (reqOrigin && (reqOrigin.includes('localhost') || reqOrigin.includes('127.0.0.1') || reqOrigin.includes('fastpaygateway.pro'))) {
       frontendBase = reqOrigin.replace(/\/+$/, '');
     } else {
-      frontendBase = 'https://fast-pay-weld.vercel.app';
+      frontendBase = 'https://fastpaygateway.pro';
     }
   }
 

@@ -188,9 +188,27 @@ const submitPublicOrder = async ({
 
   const orderId = `ORD-LP-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
-  // Default return / callback URL
-  const defaultReturnUrl = returnUrl || `${process.env.FRONTEND_URL || 'https://fast-pay-weld.vercel.app'}/p/${page.slug}?order=${orderId}&status=success`;
-  const defaultCancelUrl = cancelUrl || `${process.env.FRONTEND_URL || 'https://fast-pay-weld.vercel.app'}/p/${page.slug}?order=${orderId}&status=cancelled`;
+  // Authoritative Frontend Base URL for Hosted Checkout & Public Destinations
+  const configuredCheckoutUrl =
+    process.env.PUBLIC_FRONTEND_URL ||
+    process.env.CHECKOUT_FRONTEND_URL ||
+    process.env.CHECKOUT_URL ||
+    process.env.FRONTEND_URL ||
+    process.env.FASTPAY_CHECKOUT_URL ||
+    process.env.PUBLIC_CHECKOUT_URL;
+
+  let frontendBase = '';
+  if (configuredCheckoutUrl && typeof configuredCheckoutUrl === 'string' && configuredCheckoutUrl.trim()) {
+    frontendBase = configuredCheckoutUrl.trim().replace(/\/+$/, '');
+  } else if (process.env.NODE_ENV === 'production') {
+    frontendBase = 'https://fastpaygateway.pro';
+  } else {
+    frontendBase = 'http://localhost:5173';
+  }
+
+  // Default return / callback URL pointing directly to the merchant landing page order destination
+  const defaultReturnUrl = returnUrl || `${frontendBase}/p/${page.slug}?order=${orderId}&status=success`;
+  const defaultCancelUrl = cancelUrl || `${frontendBase}/p/${page.slug}?order=${orderId}&status=cancelled`;
 
   // Create FastPay checkout session directly in the Brand's isolated context
   const sessionResult = await checkoutSessionService.createCheckoutSession({
@@ -224,23 +242,6 @@ const submitPublicOrder = async ({
     },
     expiresInMinutes: 30,
   });
-
-  // Authoritative Frontend Base URL for Hosted Checkout
-  const configuredCheckoutUrl =
-    process.env.CHECKOUT_FRONTEND_URL ||
-    process.env.CHECKOUT_URL ||
-    process.env.FRONTEND_URL ||
-    process.env.FASTPAY_CHECKOUT_URL ||
-    process.env.PUBLIC_CHECKOUT_URL;
-
-  let frontendBase = '';
-  if (configuredCheckoutUrl && typeof configuredCheckoutUrl === 'string' && configuredCheckoutUrl.trim()) {
-    frontendBase = configuredCheckoutUrl.trim().replace(/\/+$/, '');
-  } else if (process.env.NODE_ENV === 'production') {
-    frontendBase = 'https://fast-pay-weld.vercel.app';
-  } else {
-    frontendBase = 'http://localhost:5173';
-  }
 
   const checkoutUrl = `${frontendBase}/checkout/session/${sessionResult.sessionId}`;
 

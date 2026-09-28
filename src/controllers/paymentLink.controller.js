@@ -1,4 +1,5 @@
 const asyncHandler = require('../utils/asyncHandler');
+const ApiResponse = require('../utils/apiResponse');
 const paymentLinkService = require('../services/paymentLink.service');
 
 const createLink = asyncHandler(async (req, res) => {
@@ -37,8 +38,29 @@ const getPublicLink = asyncHandler(async (req, res) => {
   });
 });
 
+const createPaymentLinkSession = asyncHandler(async (req, res) => {
+  const session = await paymentLinkService.createPaymentLinkSession(req.params.code, req.body || {});
+
+  return ApiResponse.success(
+    res,
+    {
+      sessionId: session.sessionId,
+      orderId: session.orderId,
+      amount: session.amount,
+      currency: session.currency,
+      status: session.status,
+      returnUrl: session.returnUrl,
+      cancelUrl: session.cancelUrl,
+      expiresAt: session.expiresAt,
+    },
+    'Payment link session established successfully',
+    201
+  );
+});
+
 module.exports = {
   createLink,
   getLinks,
   getPublicLink,
+  createPaymentLinkSession,
 };

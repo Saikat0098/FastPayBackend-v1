@@ -298,14 +298,46 @@ const submitApplication = async ({
     // 5. Verify against existing Payment Collection (Source of Truth)
     paymentRecord = await Payment.findOne({ transactionId: cleanTrxId });
     if (!paymentRecord) {
-      const err = new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment. Please check your Transaction ID and try again.');
-      err.code = 'INVALID_TRANSACTION';
+      let unverified = null;
+      try {
+        const unverifiedPaymentService = require('./unverifiedPayment.service');
+        const userDoc = userId ? await User.findById(userId) : null;
+        unverified = await unverifiedPaymentService.recordUnverifiedAttempt({
+          ownerType: 'ADMIN',
+          userId,
+          merchantId: userDoc?.merchant || null,
+          plan: targetPlan._id,
+          planName: targetPlan.name,
+          billingCycle: selectedCycle,
+          orderId: `SUB-${targetPlan.name.toUpperCase()}-${Date.now().toString().slice(-6)}`,
+          transactionId: cleanTrxId,
+          amount: expectedAmount,
+          currency: 'BDT',
+          provider: paymentMethod || 'bKash',
+          gateway: paymentMethod || 'bKash',
+          customerName: companyName || userDoc?.name || 'Customer',
+          customerEmail: userDoc?.email || '',
+          customerPhone: userDoc?.phone || '',
+          reason: 'Transaction ID not found in system. Awaiting verification or admin retry.',
+        });
+      } catch (recErr) {
+        logger.warn(`[Subscription Service] Failed to record unverified attempt: ${recErr.message}`);
+      }
+
       await auditService.logAction({
         userId,
         userType: 'user',
         action: 'ADMIN_PLAN_PAYMENT_REJECTED',
         details: { transactionId: cleanTrxId, reason: 'TRANSACTION_NOT_FOUND', plan: targetPlan.name },
       }).catch(() => {});
+
+      const err = new ApiError(400, 'Transaction ID is incorrect. We could not find a matching payment. Please check your Transaction ID and try again.', [], '', {
+        code: 'TRANSACTION_NOT_FOUND',
+        userMessage: 'Transaction ID is incorrect. We could not find a matching payment. Please check your Transaction ID and try again.',
+        unverifiedId: unverified?._id,
+      });
+      err.code = 'TRANSACTION_NOT_FOUND';
+      err.unverifiedId = unverified?._id;
       throw err;
     }
 

@@ -32,8 +32,10 @@ router.get('/subscriptions', subscriptionController.getAdminApplications);
 router.put('/subscriptions/:id/approve', subscriptionController.approveAdminSubscription);
 router.put('/subscriptions/:id/reject', subscriptionController.rejectAdminSubscription);
 
-// 6. All Transactions
+// 6. All Transactions & Unverified Payments
 router.get('/transactions', adminController.getAllTransactions);
+router.get('/unverified-payments', adminController.getAdminUnverifiedPayments);
+router.post('/unverified-payments/:id/retry', adminController.retryAdminUnverifiedPayment);
 
 // 7. Merchant Connected Devices & Activation Management
 router.get('/devices', adminController.getAllDevices);
