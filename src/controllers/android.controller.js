@@ -372,7 +372,7 @@ const checkVersion = asyncHandler(async (req, res) => {
     success: true,
     latestVersion: '1.2.0',
     minRequiredVersion: '1.0.0',
-    updateUrl: 'https://autopayment.com/download/app-latest.apk',
+    updateUrl: 'https://fastpaygateway.pro/downloads/FastPay.apk',
     forceUpdate: false,
     uptime: process.uptime(),
     database: 'connected',
