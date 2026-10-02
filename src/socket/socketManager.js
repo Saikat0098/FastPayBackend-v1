@@ -7,11 +7,39 @@ const Device = require('../models/Device');
 let io;
 let heartbeatInterval = null;
 
+const allowedOrigins = [
+  'https://fastpaygateway.pro',
+  'https://www.fastpaygateway.pro',
+  'https://api.fastpaygateway.pro',
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://localhost:5000',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:5000',
+];
+
 const initSocket = (server) => {
   io = new Server(server, {
     cors: {
-      origin: '*',
+      origin: (origin, callback) => {
+        // Allow requests with no origin (e.g., mobile apps, curl, server-to-server)
+        if (!origin) return callback(null, true);
+
+        if (
+          allowedOrigins.includes(origin) ||
+          /^https?:\/\/localhost(:\d+)?$/.test(origin) ||
+          /^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin) ||
+          origin.endsWith('.fastpaygateway.pro') ||
+          origin === 'https://fastpaygateway.pro'
+        ) {
+          return callback(null, true);
+        }
+
+        return callback(null, true);
+      },
       methods: ['GET', 'POST'],
+      credentials: true,
     },
   });
 
