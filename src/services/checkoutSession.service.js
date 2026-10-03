@@ -86,7 +86,7 @@ const createCheckoutSession = async ({
   customFields = {},
   returnUrl,
   cancelUrl = '',
-  expiresInMinutes = 30,
+  expiresInMinutes = 15,
 }) => {
   if (!merchantId) {
     throw new ApiError(400, 'Merchant ID is required');
@@ -337,6 +337,9 @@ const getPublicCheckoutSession = async (sessionId) => {
     sessionObj.delivery = null;
     sessionObj.deliveryItems = null;
   }
+
+  sessionObj.expiresAt = session.expiresAt;
+  sessionObj.expiresInSeconds = Math.max(0, Math.floor((new Date(session.expiresAt).getTime() - Date.now()) / 1000));
 
   return sessionObj;
 };

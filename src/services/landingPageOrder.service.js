@@ -240,7 +240,7 @@ const submitPublicOrder = async ({
         instantDelivery: i.instantDelivery,
       })),
     },
-    expiresInMinutes: 30,
+    expiresInMinutes: 15,
   });
 
   const checkoutUrl = `${frontendBase}/checkout/session/${sessionResult.sessionId}`;

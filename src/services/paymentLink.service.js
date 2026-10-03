@@ -329,7 +329,7 @@ const createPaymentLinkSession = async (
         },
       ],
     },
-    expiresInMinutes: 60,
+    expiresInMinutes: 15,
   });
 
   return session;

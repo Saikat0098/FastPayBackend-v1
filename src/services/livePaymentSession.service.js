@@ -491,6 +491,7 @@ const getLivePaymentSessionStatus = async (liveSessionId) => {
   const session = await LivePaymentSession.findOne({
     $or: [{ liveSessionId: cleanId }, { sessionId: cleanId }],
   })
+    .sort({ createdAt: -1 })
     .populate('checkoutSession')
     .populate('merchant', 'companyName name logo')
     .populate('brand', 'name logo')

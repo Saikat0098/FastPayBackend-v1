@@ -162,17 +162,31 @@ const getSubscriptionCheckoutSession = asyncHandler(async (req, res) => {
     gateways: liveGateways,
   };
 
-  const orderId = `SUB-${plan.name.toUpperCase()}-${Date.now().toString().slice(-6)}`;
-  const sessionId = `cs_sub_${crypto.randomBytes(12).toString('hex')}`;
+  const resolvedUserId = req.user?._id || req.user?.id || req.merchant?.user || null;
+  let session = null;
 
-  if (!isFree) {
-    await CheckoutSession.create({
+  if (!isFree && resolvedUserId) {
+    session = await CheckoutSession.findOne({
+      user: resolvedUserId,
+      plan: plan.name,
+      billingCycle: isTest ? 'test' : (isYearly ? 'yearly' : 'monthly'),
+      status: 'PENDING',
+      expiresAt: { $gt: new Date() },
+    }).sort({ createdAt: -1 });
+  }
+
+  if (!isFree && !session) {
+    const orderId = `SUB-${plan.name.toUpperCase()}-${Date.now().toString().slice(-6)}`;
+    const sessionId = `cs_sub_${crypto.randomBytes(12).toString('hex')}`;
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 mins authoritative
+
+    session = await CheckoutSession.create({
       sessionId,
       orderId,
       ownerType: 'ADMIN',
       merchant: null,
       admin: null,
-      user: req.user?._id || req.user?.id || req.merchant?.user || null,
+      user: resolvedUserId,
       amount,
       currency: 'BDT',
       plan: plan.name,
@@ -181,13 +195,18 @@ const getSubscriptionCheckoutSession = asyncHandler(async (req, res) => {
       returnUrl: '/merchant',
       cancelUrl: '/pricing',
       status: 'PENDING',
-      expiresAt: new Date(Date.now() + 30 * 60 * 1000), // 30 mins
+      expiresAt,
     });
   }
 
+  const resolvedSessionId = session?.sessionId || `cs_sub_free_${crypto.randomBytes(12).toString('hex')}`;
+  const resolvedOrderId = session?.orderId || `SUB-${plan.name.toUpperCase()}-${Date.now().toString().slice(-6)}`;
+  const expiresAt = session?.expiresAt || new Date(Date.now() + 15 * 60 * 1000);
+  const expiresInSeconds = Math.max(0, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000));
+
   return ApiResponse.success(res, {
-    sessionId,
-    orderId,
+    sessionId: resolvedSessionId,
+    orderId: resolvedOrderId,
     amount,
     currency: 'BDT',
     plan: plan.name,
@@ -205,6 +224,10 @@ const getSubscriptionCheckoutSession = asyncHandler(async (req, res) => {
     features: plan.features,
     gateways: isFree ? [] : paymentMethods,
     livePayment,
+    status: session?.status || 'PENDING',
+    transactionId: session?.transactionId || '',
+    expiresAt,
+    expiresInSeconds,
     merchant: {
       name: platformIdentity?.name || 'FastPay Official',
       brandName: platformIdentity?.name || 'FastPay Official',
@@ -292,31 +315,55 @@ const getUpgradeCheckoutSession = asyncHandler(async (req, res) => {
     gateways: liveGateways,
   };
 
-  const orderId = `UPG-${quote.targetPlan.toUpperCase()}-${Date.now().toString().slice(-6)}`;
-  const sessionId = `cs_upg_${crypto.randomBytes(12).toString('hex')}`;
+  const resolvedUserId = req.user?._id || req.user?.id || req.merchant?.user || null;
+  let session = null;
 
-  await CheckoutSession.create({
-    sessionId,
-    orderId,
-    ownerType: 'ADMIN',
-    merchant: merchantId || null,
-    admin: null,
-    user: req.user?._id || req.user?.id || req.merchant?.user || null,
-    amount: quote.priceDifference,
-    currency: 'BDT',
-    targetPlan: quote.targetPlan,
-    targetPlanName: quote.targetPlanName,
-    targetBillingCycle: quote.targetBillingCycle,
-    billingCycle: quote.targetBillingCycle,
-    returnUrl: '/merchant',
-    cancelUrl: '/merchant/upgrade',
-    status: 'PENDING',
-    expiresAt: new Date(Date.now() + 30 * 60 * 1000), // 30 mins
-  });
+  if (resolvedUserId || merchantId) {
+    session = await CheckoutSession.findOne({
+      $or: [
+        ...(resolvedUserId ? [{ user: resolvedUserId }] : []),
+        ...(merchantId ? [{ merchant: merchantId }] : []),
+      ],
+      targetPlan: quote.targetPlan,
+      targetBillingCycle: quote.targetBillingCycle,
+      status: 'PENDING',
+      expiresAt: { $gt: new Date() },
+    }).sort({ createdAt: -1 });
+  }
+
+  if (!session) {
+    const orderId = `UPG-${quote.targetPlan.toUpperCase()}-${Date.now().toString().slice(-6)}`;
+    const sessionId = `cs_upg_${crypto.randomBytes(12).toString('hex')}`;
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 mins authoritative
+
+    session = await CheckoutSession.create({
+      sessionId,
+      orderId,
+      ownerType: 'ADMIN',
+      merchant: merchantId || null,
+      admin: null,
+      user: resolvedUserId,
+      amount: quote.priceDifference,
+      currency: 'BDT',
+      targetPlan: quote.targetPlan,
+      targetPlanName: quote.targetPlanName,
+      targetBillingCycle: quote.targetBillingCycle,
+      billingCycle: quote.targetBillingCycle,
+      returnUrl: '/merchant',
+      cancelUrl: '/merchant/upgrade',
+      status: 'PENDING',
+      expiresAt,
+    });
+  }
+
+  const resolvedSessionId = session.sessionId;
+  const resolvedOrderId = session.orderId;
+  const expiresAt = session.expiresAt;
+  const expiresInSeconds = Math.max(0, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000));
 
   return ApiResponse.success(res, {
-    sessionId,
-    orderId,
+    sessionId: resolvedSessionId,
+    orderId: resolvedOrderId,
     amount: quote.priceDifference,
     currency: 'BDT',
     returnUrl: '/merchant',
@@ -341,6 +388,10 @@ const getUpgradeCheckoutSession = asyncHandler(async (req, res) => {
     newLimits: quote.newLimits,
     gateways: paymentMethods,
     livePayment,
+    status: session.status,
+    transactionId: session.transactionId || '',
+    expiresAt,
+    expiresInSeconds,
     merchant: {
       name: platformIdentity?.name || 'FastPay Official',
       brandName: `${platformIdentity?.name || 'FastPay'} Plan Upgrade: ${quote.currentPlanName} → ${quote.targetPlanName} (${quote.targetBillingCycle === 'yearly' ? 'Yearly' : 'Monthly'})`,
@@ -358,7 +409,7 @@ const getUpgradeCheckoutSession = asyncHandler(async (req, res) => {
       whatsappNumber: platformIdentity?.whatsappNumber || '',
       websiteUrl: platformIdentity?.websiteUrl || '',
     },
-  }, 'Upgrade checkout session created');
+  }, 'Upgrade checkout session retrieved');
 });
 
 module.exports = {
