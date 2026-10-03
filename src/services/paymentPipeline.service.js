@@ -149,6 +149,20 @@ const processVerifiedPayment = async ({
     || paymentDoc.brand;
 
   // 5. SECURITY & TENANT ISOLATION CHECKS
+  // 5.0 Cancelled / Inactive Session Guard
+  if (checkoutSession && checkoutSession.status === 'CANCELLED') {
+    throw new ApiError(400, 'Cannot process payment for a cancelled checkout session.', [], '', {
+      code: 'CANCELLED_SESSION',
+      userMessage: 'This checkout session was cancelled.',
+    });
+  }
+  if (liveSessionDoc && liveSessionDoc.status === 'CANCELLED') {
+    throw new ApiError(400, 'Cannot process payment for a cancelled live payment session.', [], '', {
+      code: 'CANCELLED_SESSION',
+      userMessage: 'This payment session was cancelled.',
+    });
+  }
+
   // 5.1 Admin vs Merchant Isolation
   if (!isAdminPayment && checkoutSession?.ownerType === 'ADMIN') {
     throw new ApiError(400, 'Transaction does not belong to this platform', [], '', {

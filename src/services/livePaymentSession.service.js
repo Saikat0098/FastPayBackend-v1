@@ -578,6 +578,21 @@ const cancelLivePaymentSession = async (liveSessionId) => {
       details: 'Live payment session cancelled by user/client',
     });
     await session.save();
+
+    // Cancel parent CheckoutSession if attached and still PENDING
+    const CheckoutSession = require('../models/CheckoutSession');
+    if (session.checkoutSession) {
+      await CheckoutSession.updateOne(
+        { _id: session.checkoutSession, status: 'PENDING' },
+        { $set: { status: 'CANCELLED' } }
+      ).catch(() => {});
+    }
+    if (session.sessionId) {
+      await CheckoutSession.updateOne(
+        { sessionId: session.sessionId, status: 'PENDING' },
+        { $set: { status: 'CANCELLED' } }
+      ).catch(() => {});
+    }
   }
 
   return {
@@ -745,8 +760,8 @@ const matchAndVerifyLivePayment = async ({ payment, merchantId }) => {
         checkoutSession.status = 'EXPIRED';
         await checkoutSession.save().catch(() => {});
       }
-      session.status = checkoutSession.status === 'VERIFIED' ? 'FAILED' : 'EXPIRED';
-      session.rejectionReason = checkoutSession.status === 'VERIFIED' ? 'ORDER_ALREADY_PAID' : 'SESSION_EXPIRED';
+      session.status = checkoutSession.status === 'VERIFIED' ? 'FAILED' : (checkoutSession.status === 'CANCELLED' ? 'CANCELLED' : 'EXPIRED');
+      session.rejectionReason = checkoutSession.status === 'VERIFIED' ? 'ORDER_ALREADY_PAID' : (checkoutSession.status === 'CANCELLED' ? 'CUSTOMER_CANCELLED' : 'SESSION_EXPIRED');
       await session.save().catch(() => {});
       continue;
     }
@@ -947,7 +962,7 @@ const performLivePaymentReconciliation = async ({ liveSession }) => {
 
   for (const payment of candidatePayments) {
     const normalizedSender = normalizeBdPhoneNumber(payment.sender);
-    if (normalizedSender === liveSession.customerPhone) {
+    if (normalizedSender && liveSession.customerPhone && normalizedSender === liveSession.customerPhone) {
       const matchResult = await matchAndVerifyLivePayment({
         payment,
         merchantId: resolvedMerchantId,

@@ -162,6 +162,13 @@ const verifyMerchantSessionPayment = asyncHandler(async (req, res) => {
   return ApiResponse.success(res, result, 'Payment verified successfully for merchant');
 });
 
+// POST /api/v1/checkout/sessions/public/:sessionId/cancel or POST /api/v1/checkout/sessions/:sessionId/cancel
+const cancelPublicSession = asyncHandler(async (req, res) => {
+  const { sessionId } = req.params;
+  const result = await checkoutSessionService.cancelCheckoutSession(sessionId);
+  return ApiResponse.success(res, result, 'Checkout session cancelled');
+});
+
 module.exports = {
   createSession,
   getPublicSession,
@@ -169,5 +176,7 @@ module.exports = {
   updatePublicSessionPaymentMode,
   getMerchantSessionStatus,
   verifyMerchantSessionPayment,
+  cancelPublicSession,
 };
+
 

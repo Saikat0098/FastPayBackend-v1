@@ -858,6 +858,63 @@ const getMerchantCheckoutSessionStatus = async (sessionId, merchantId, brandId =
   return session;
 };
 
+const cancelCheckoutSession = async (sessionId) => {
+  if (!sessionId) {
+    throw new ApiError(400, 'Session ID is required');
+  }
+
+  const session = await CheckoutSession.findOne({
+    $or: [{ sessionId: sessionId.trim() }, { orderId: sessionId.trim() }],
+  });
+
+  if (!session) {
+    throw new ApiError(404, 'Checkout session not found');
+  }
+
+  if (session.status === 'VERIFIED') {
+    throw new ApiError(400, 'Cannot cancel an already verified checkout session.', [], '', { code: 'CANNOT_CANCEL_VERIFIED' });
+  }
+
+  if (session.status === 'PENDING') {
+    session.status = 'CANCELLED';
+    await session.save();
+  }
+
+  // Cancel any attached LivePaymentSession
+  const LivePaymentSession = require('../models/LivePaymentSession');
+  await LivePaymentSession.updateMany(
+    {
+      $or: [
+        { checkoutSession: session._id },
+        { sessionId: session.sessionId },
+        { orderId: session.orderId },
+      ],
+      status: 'PENDING',
+    },
+    {
+      $set: {
+        status: 'CANCELLED',
+        rejectionReason: 'CUSTOMER_CANCELLED',
+      },
+      $push: {
+        auditLogs: {
+          event: 'SESSION_CANCELLED',
+          timestamp: new Date(),
+          details: 'Live payment session cancelled due to checkout cancellation',
+        },
+      },
+    }
+  ).catch(() => {});
+
+  return {
+    sessionId: session.sessionId,
+    orderId: session.orderId,
+    status: session.status,
+    cancelUrl: session.cancelUrl || '/pricing',
+    message: 'Checkout session cancelled successfully',
+  };
+};
+
 module.exports = {
   createCheckoutSession,
   getPublicCheckoutSession,
@@ -865,4 +922,6 @@ module.exports = {
   verifySessionPayment,
   getMerchantCheckoutSessionStatus,
   handleSuccessfulPaymentVerification,
+  cancelCheckoutSession,
 };
+
