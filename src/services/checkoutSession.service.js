@@ -569,6 +569,41 @@ const verifySessionPayment = async ({
     if (phone) session.customerPhone = phone;
     await session.save();
 
+    // Platform Subscription / Upgrade Fulfillment
+    try {
+      if (session.plan) {
+        const subscriptionService = require('./subscription.service');
+        const User = require('../models/User');
+        const targetUserId = session.user;
+        const userDoc = targetUserId ? await User.findById(targetUserId) : null;
+        await subscriptionService.submitApplication({
+          userId: targetUserId,
+          plan: session.plan,
+          billingCycle: session.billingCycle || 'monthly',
+          paymentMethod: claimedPayment.gateway || claimedPayment.provider || targetProvider || 'bKash',
+          transactionId: claimedPayment.transactionId,
+          amount: claimedPayment.amount,
+          companyName: userDoc?.companyName || userDoc?.name || customerName || 'FastPay Merchant',
+          isLivePaymentClaimed: true,
+        });
+        logger.info(`[Platform Manual-Activation] Activated subscription plan '${session.plan}' with TxID ${claimedPayment.transactionId}`);
+      } else if (session.targetPlan) {
+        const entitlementService = require('./entitlement.service');
+        await entitlementService.upgradeMerchantSubscription({
+          merchantId: session.merchant,
+          targetPlanIdOrName: session.targetPlan,
+          targetBillingCycle: session.targetBillingCycle || session.billingCycle || 'monthly',
+          transactionId: claimedPayment.transactionId,
+          paymentMethod: claimedPayment.gateway || claimedPayment.provider || targetProvider || 'bKash',
+          isLivePaymentClaimed: true,
+        });
+        logger.info(`[Platform Manual-Upgrade] Upgraded plan '${session.targetPlan}' with TxID ${claimedPayment.transactionId}`);
+      }
+    } catch (adminFulfillErr) {
+      logger.error(`[Platform Manual-Fulfillment Error] ${adminFulfillErr.message}`);
+      throw adminFulfillErr;
+    }
+
     return {
       session,
       payment: claimedPayment,

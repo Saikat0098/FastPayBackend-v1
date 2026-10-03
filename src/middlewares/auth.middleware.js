@@ -25,7 +25,7 @@ const verifyToken = asyncHandler(async (req, res, next) => {
 
   try {
     const decoded = verifyAccessToken(token);
-    req.user = decoded;
+    req.user = { ...decoded, _id: decoded._id || decoded.id, id: decoded.id || decoded._id };
     const roleNormalized = (decoded.role || '').toUpperCase().replace(/_/g, '');
 
     if (roleNormalized === 'ADMIN' || roleNormalized === 'SUPERADMIN') {
@@ -343,8 +343,71 @@ const requireVerifiedEmail = asyncHandler(async (req, res, next) => {
   next();
 });
 
+const verifyOptionalToken = asyncHandler(async (req, res, next) => {
+  const authHeader = req.headers.authorization || req.headers.Authorization;
+  let token = null;
+  if (authHeader) {
+    const rawFirst = authHeader.toString().split(',')[0].trim();
+    if (rawFirst.startsWith('Bearer ')) {
+      token = rawFirst.slice(7).trim();
+    } else {
+      token = rawFirst;
+    }
+  } else {
+    token = req.cookies?.accessToken;
+  }
+
+  if (!token) {
+    return next();
+  }
+
+  try {
+    const decoded = verifyAccessToken(token);
+    req.user = { ...decoded, _id: decoded._id || decoded.id, id: decoded.id || decoded._id };
+    const roleNormalized = (decoded.role || '').toUpperCase().replace(/_/g, '');
+
+    if (roleNormalized === 'ADMIN' || roleNormalized === 'SUPERADMIN') {
+      let admin = await Admin.findById(decoded.id);
+      if (!admin) {
+        const User = require('../models/User');
+        const u = await User.findById(decoded.id);
+        if (u && (u.role === 'SUPER_ADMIN' || u.role === 'superadmin' || u.role === 'admin')) {
+          admin = { _id: u._id, id: u._id, name: u.name, email: u.email, role: 'superadmin', status: u.status };
+        }
+      }
+      if (admin && admin.status === 'active') {
+        req.admin = admin;
+      }
+    } else {
+      let merchant = null;
+      if (decoded.id) {
+        merchant = await Merchant.findById(decoded.id);
+      }
+      if (!merchant && decoded.merchant) {
+        merchant = await Merchant.findById(decoded.merchant);
+      }
+      if (!merchant && decoded.id) {
+        const User = require('../models/User');
+        const u = await User.findById(decoded.id).populate('merchant');
+        if (u && u.merchant) {
+          merchant = typeof u.merchant === 'object' ? u.merchant : await Merchant.findById(u.merchant);
+        }
+      }
+      if (merchant && merchant.status === 'active') {
+        req.merchant = merchant;
+        req.merchantId = merchant._id;
+      }
+    }
+  } catch (ignoredErr) {
+    // Optional token error should not block public access
+  }
+
+  next();
+});
+
 module.exports = {
   verifyToken,
+  verifyOptionalToken,
   verifyHeartbeatAuth,
   authorizeRoles,
   verifyApiKey,

@@ -423,6 +423,7 @@ const upgradeMerchantSubscription = async ({
   targetBillingCycle,
   transactionId,
   paymentMethod = 'bKash',
+  isLivePaymentClaimed = false,
 }) => {
   const mId = resolveMerchantId(merchantId);
 
@@ -467,10 +468,12 @@ const upgradeMerchantSubscription = async ({
   }
 
   // 2. Prevent duplicate Transaction ID usage
-  const existingUsedPayment = await Payment.findOne({
-    transactionId: cleanTrxId,
-    isUsedForSubscription: true,
-  });
+  const existingUsedPayment = !isLivePaymentClaimed
+    ? await Payment.findOne({
+        transactionId: cleanTrxId,
+        isUsedForSubscription: true,
+      })
+    : null;
   if (existingUsedPayment) {
     const err = new ApiError(400, 'This Transaction ID has already been used for another payment or subscription.');
     err.code = 'TRANSACTION_ALREADY_USED';
@@ -492,70 +495,72 @@ const upgradeMerchantSubscription = async ({
   }
 
   // 3.1 Authoritative Admin Device Ownership Verification
-  let sourceDevice = null;
-  if (paymentRecord.device) {
-    sourceDevice = await Device.findById(paymentRecord.device).populate('activationKey');
-  } else if (paymentRecord.deviceId) {
-    const isMongoId = mongoose.Types.ObjectId.isValid(paymentRecord.deviceId);
-    sourceDevice = await Device.findOne({
-      $or: [
-        { androidId: paymentRecord.deviceId },
-        ...(isMongoId ? [{ _id: paymentRecord.deviceId }] : []),
-      ],
-    }).populate('activationKey');
-  }
+  if (!isLivePaymentClaimed) {
+    let sourceDevice = null;
+    if (paymentRecord.device) {
+      sourceDevice = await Device.findById(paymentRecord.device).populate('activationKey');
+    } else if (paymentRecord.deviceId) {
+      const isMongoId = mongoose.Types.ObjectId.isValid(paymentRecord.deviceId);
+      sourceDevice = await Device.findOne({
+        $or: [
+          { androidId: paymentRecord.deviceId },
+          ...(isMongoId ? [{ _id: paymentRecord.deviceId }] : []),
+        ],
+      }).populate('activationKey');
+    }
 
-  const isSourceAdmin = sourceDevice && sourceDevice.ownerType === 'ADMIN';
-  const hasActiveAdminActivation = isSourceAdmin && sourceDevice.status === 'ACTIVE' && sourceDevice.activationKey && sourceDevice.activationKey.ownerType === 'ADMIN' && sourceDevice.activationKey.status === 'ACTIVE';
+    const isSourceAdmin = sourceDevice && sourceDevice.ownerType === 'ADMIN';
+    const hasActiveAdminActivation = isSourceAdmin && sourceDevice.status === 'ACTIVE' && sourceDevice.activationKey && sourceDevice.activationKey.ownerType === 'ADMIN' && sourceDevice.activationKey.status === 'ACTIVE';
 
-  if (!sourceDevice) {
-    await auditService.logAction({
-      userId: mId,
-      userType: 'merchant',
-      action: 'ADMIN_PLAN_PAYMENT_REJECTED',
-      details: { transactionId: cleanTrxId, reason: 'DEVICE_NOT_FOUND', plan: targetPlan.name, isUpgrade: true },
-    }).catch(() => {});
-    const err = new ApiError(400, 'Payment source device not recognized or unauthorized for plan purchases.');
-    err.code = 'PAYMENT_SOURCE_NOT_AUTHORIZED_FOR_PLAN_PURCHASE';
-    throw err;
-  }
+    if (!sourceDevice) {
+      await auditService.logAction({
+        userId: mId,
+        userType: 'merchant',
+        action: 'ADMIN_PLAN_PAYMENT_REJECTED',
+        details: { transactionId: cleanTrxId, reason: 'DEVICE_NOT_FOUND', plan: targetPlan.name, isUpgrade: true },
+      }).catch(() => {});
+      const err = new ApiError(400, 'Payment source device not recognized or unauthorized for plan purchases.');
+      err.code = 'PAYMENT_SOURCE_NOT_AUTHORIZED_FOR_PLAN_PURCHASE';
+      throw err;
+    }
 
-  if (sourceDevice.ownerType === 'MERCHANT' || !isSourceAdmin) {
-    await auditService.logAction({
-      userId: mId,
-      userType: 'merchant',
-      action: 'ADMIN_PLAN_PAYMENT_REJECTED',
-      details: {
-        transactionId: cleanTrxId,
-        reason: 'MERCHANT_DEVICE_NOT_ALLOWED',
-        deviceId: sourceDevice._id,
-        androidId: sourceDevice.androidId,
-        plan: targetPlan.name,
-        isUpgrade: true,
-      },
-    }).catch(() => {});
-    const err = new ApiError(400, 'Payment source is not authorized for plan purchases. Transactions from merchant devices cannot be used to activate FastPay subscriptions.');
-    err.code = 'PAYMENT_SOURCE_NOT_AUTHORIZED_FOR_PLAN_PURCHASE';
-    throw err;
-  }
+    if (sourceDevice.ownerType === 'MERCHANT' || !isSourceAdmin) {
+      await auditService.logAction({
+        userId: mId,
+        userType: 'merchant',
+        action: 'ADMIN_PLAN_PAYMENT_REJECTED',
+        details: {
+          transactionId: cleanTrxId,
+          reason: 'MERCHANT_DEVICE_NOT_ALLOWED',
+          deviceId: sourceDevice._id,
+          androidId: sourceDevice.androidId,
+          plan: targetPlan.name,
+          isUpgrade: true,
+        },
+      }).catch(() => {});
+      const err = new ApiError(400, 'Payment source is not authorized for plan purchases. Transactions from merchant devices cannot be used to activate FastPay subscriptions.');
+      err.code = 'PAYMENT_SOURCE_NOT_AUTHORIZED_FOR_PLAN_PURCHASE';
+      throw err;
+    }
 
-  if (!hasActiveAdminActivation) {
-    await auditService.logAction({
-      userId: mId,
-      userType: 'merchant',
-      action: 'ADMIN_PLAN_PAYMENT_REJECTED',
-      details: {
-        transactionId: cleanTrxId,
-        reason: 'INVALID_ADMIN_ACTIVATION',
-        deviceId: sourceDevice._id,
-        androidId: sourceDevice.androidId,
-        plan: targetPlan.name,
-        isUpgrade: true,
-      },
-    }).catch(() => {});
-    const err = new ApiError(400, 'The Admin payment gateway device does not have an active activation.');
-    err.code = 'INVALID_ADMIN_ACTIVATION';
-    throw err;
+    if (!hasActiveAdminActivation) {
+      await auditService.logAction({
+        userId: mId,
+        userType: 'merchant',
+        action: 'ADMIN_PLAN_PAYMENT_REJECTED',
+        details: {
+          transactionId: cleanTrxId,
+          reason: 'INVALID_ADMIN_ACTIVATION',
+          deviceId: sourceDevice._id,
+          androidId: sourceDevice.androidId,
+          plan: targetPlan.name,
+          isUpgrade: true,
+        },
+      }).catch(() => {});
+      const err = new ApiError(400, 'The Admin payment gateway device does not have an active activation.');
+      err.code = 'INVALID_ADMIN_ACTIVATION';
+      throw err;
+    }
   }
 
   // 4. Verify Payment Amount matches difference

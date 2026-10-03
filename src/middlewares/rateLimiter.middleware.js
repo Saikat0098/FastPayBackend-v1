@@ -26,7 +26,7 @@ const authLimiter = rateLimit({
 
 const verifyLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // limit verification attempts to protect against brute-forcing transaction IDs
+  max: (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test') ? 500 : 10, // limit verification attempts to protect against brute-forcing transaction IDs
   standardHeaders: true,
   legacyHeaders: false,
   message: {

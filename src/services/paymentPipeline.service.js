@@ -298,31 +298,35 @@ const processVerifiedPayment = async ({
     // 8.1 Platform Subscription / Upgrade Fulfillment
     if (isAdminPayment || checkoutSession.ownerType === 'ADMIN') {
       try {
-        if (checkoutSession.plan || liveSessionDoc?.plan) {
+        const targetPlan = checkoutSession.plan || liveSessionDoc?.plan;
+        const targetUpgradePlan = checkoutSession.targetPlan || liveSessionDoc?.targetPlan;
+        if (targetPlan) {
           const subscriptionService = require('./subscription.service');
           const User = require('../models/User');
           const targetUserId = checkoutSession.user || liveSessionDoc?.user;
           const userDoc = targetUserId ? await User.findById(targetUserId) : null;
           await subscriptionService.submitApplication({
             userId: targetUserId,
-            plan: checkoutSession.plan || liveSessionDoc?.plan,
+            plan: targetPlan,
             billingCycle: checkoutSession.billingCycle || liveSessionDoc?.billingCycle || 'monthly',
             paymentMethod: claimedPayment.gateway || claimedPayment.provider || 'bKash',
             transactionId: claimedPayment.transactionId,
             amount: claimedPayment.amount,
-            companyName: userDoc?.companyName || userDoc?.name || 'FastPay Merchant',
+            companyName: userDoc?.companyName || userDoc?.name || checkoutSession.customerName || 'FastPay Merchant',
+            isLivePaymentClaimed: true,
           }).catch((err) => logger.warn(`[Platform Auto-Activation Notice] ${err.message}`));
-          logger.info(`[Platform Auto-Activation] Activated subscription plan '${checkoutSession.plan}' with TxID ${claimedPayment.transactionId}`);
-        } else if (checkoutSession.targetPlan) {
+          logger.info(`[Platform Auto-Activation] Activated subscription plan '${targetPlan}' with TxID ${claimedPayment.transactionId}`);
+        } else if (targetUpgradePlan) {
           const entitlementService = require('./entitlement.service');
           await entitlementService.upgradeMerchantSubscription({
-            merchantId: checkoutSession.merchant,
-            targetPlanIdOrName: checkoutSession.targetPlan,
-            targetBillingCycle: checkoutSession.targetBillingCycle || checkoutSession.billingCycle || 'monthly',
+            merchantId: checkoutSession.merchant || liveSessionDoc?.merchant,
+            targetPlanIdOrName: targetUpgradePlan,
+            targetBillingCycle: checkoutSession.targetBillingCycle || checkoutSession.billingCycle || liveSessionDoc?.billingCycle || 'monthly',
             transactionId: claimedPayment.transactionId,
             paymentMethod: claimedPayment.gateway || claimedPayment.provider || 'bKash',
+            isLivePaymentClaimed: true,
           }).catch((err) => logger.warn(`[Platform Auto-Upgrade Notice] ${err.message}`));
-          logger.info(`[Platform Auto-Upgrade] Upgraded plan '${checkoutSession.targetPlan}' with TxID ${claimedPayment.transactionId}`);
+          logger.info(`[Platform Auto-Upgrade] Upgraded plan '${targetUpgradePlan}' with TxID ${claimedPayment.transactionId}`);
         }
       } catch (adminFulfillErr) {
         logger.error(`[Platform Auto-Fulfillment Error] ${adminFulfillErr.message}`);

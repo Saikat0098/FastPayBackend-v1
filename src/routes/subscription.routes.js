@@ -1,12 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const subscriptionController = require('../controllers/subscription.controller');
-const { verifyToken, authorizeRoles, requireVerifiedEmail } = require('../middlewares/auth.middleware');
+const { verifyToken, verifyOptionalToken, authorizeRoles, requireVerifiedEmail } = require('../middlewares/auth.middleware');
 
 // Public subscription endpoints
 router.get('/plans', subscriptionController.getPlans);
 router.get('/public-settings', subscriptionController.getPublicSettings);
-router.get('/checkout-session/:planName', subscriptionController.getSubscriptionCheckoutSession);
+router.get('/checkout-session/:planName', verifyOptionalToken, subscriptionController.getSubscriptionCheckoutSession);
 
 // Protected endpoints
 router.use(verifyToken);

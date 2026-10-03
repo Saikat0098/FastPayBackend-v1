@@ -342,75 +342,77 @@ const submitApplication = async ({
     }
 
     // 5.1 Authoritative Admin Device Ownership & Active Activation Verification
-    let sourceDevice = null;
-    if (paymentRecord.device) {
-      sourceDevice = await Device.findById(paymentRecord.device).populate('activationKey');
-    } else if (paymentRecord.deviceId) {
-      const isMongoId = mongoose.Types.ObjectId.isValid(paymentRecord.deviceId);
-      sourceDevice = await Device.findOne({
-        $or: [
-          { androidId: paymentRecord.deviceId },
-          ...(isMongoId ? [{ _id: paymentRecord.deviceId }] : []),
-        ],
-      }).populate('activationKey');
-    }
+    if (!isLivePaymentClaimed) {
+      let sourceDevice = null;
+      if (paymentRecord.device) {
+        sourceDevice = await Device.findById(paymentRecord.device).populate('activationKey');
+      } else if (paymentRecord.deviceId) {
+        const isMongoId = mongoose.Types.ObjectId.isValid(paymentRecord.deviceId);
+        sourceDevice = await Device.findOne({
+          $or: [
+            { androidId: paymentRecord.deviceId },
+            ...(isMongoId ? [{ _id: paymentRecord.deviceId }] : []),
+          ],
+        }).populate('activationKey');
+      }
 
-    const isSourceAdmin = sourceDevice && sourceDevice.ownerType === 'ADMIN';
-    const hasActiveAdminActivation = isSourceAdmin && sourceDevice.status === 'ACTIVE' && sourceDevice.activationKey && sourceDevice.activationKey.ownerType === 'ADMIN' && sourceDevice.activationKey.status === 'ACTIVE';
+      const isSourceAdmin = sourceDevice && sourceDevice.ownerType === 'ADMIN';
+      const hasActiveAdminActivation = isSourceAdmin && sourceDevice.status === 'ACTIVE' && sourceDevice.activationKey && sourceDevice.activationKey.ownerType === 'ADMIN' && sourceDevice.activationKey.status === 'ACTIVE';
 
-    if (!sourceDevice) {
-      await auditService.logAction({
-        userId,
-        userType: 'user',
-        action: 'ADMIN_PLAN_PAYMENT_REJECTED',
-        details: { transactionId: cleanTrxId, reason: 'DEVICE_NOT_FOUND', plan: targetPlan.name },
-      }).catch(() => {});
-      const err = new ApiError(400, 'Payment source device not recognized or unauthorized for plan purchases.');
-      err.code = 'PAYMENT_SOURCE_NOT_AUTHORIZED_FOR_PLAN_PURCHASE';
-      throw err;
-    }
+      if (!sourceDevice) {
+        await auditService.logAction({
+          userId,
+          userType: 'user',
+          action: 'ADMIN_PLAN_PAYMENT_REJECTED',
+          details: { transactionId: cleanTrxId, reason: 'DEVICE_NOT_FOUND', plan: targetPlan.name },
+        }).catch(() => {});
+        const err = new ApiError(400, 'Payment source device not recognized or unauthorized for plan purchases.');
+        err.code = 'PAYMENT_SOURCE_NOT_AUTHORIZED_FOR_PLAN_PURCHASE';
+        throw err;
+      }
 
-    if (sourceDevice.ownerType === 'MERCHANT' || !isSourceAdmin || paymentRecord.merchant) {
-      await auditService.logAction({
-        userId,
-        userType: 'user',
-        action: 'ADMIN_PLAN_PAYMENT_REJECTED',
-        details: {
-          transactionId: cleanTrxId,
-          reason: 'MERCHANT_DEVICE_NOT_ALLOWED',
-          deviceId: sourceDevice?._id,
-          androidId: sourceDevice?.androidId,
-          plan: targetPlan.name,
-        },
-      }).catch(() => {});
-      const err = new ApiError(400, 'Payment source is not authorized for plan purchases. Transactions from merchant devices cannot be used to activate FastPay subscriptions.', [], '', {
-        code: 'PAYMENT_SOURCE_NOT_AUTHORIZED_FOR_PLAN_PURCHASE',
-        userMessage: 'This transaction is not valid for FastPay platform payment.',
-      });
-      err.code = 'PAYMENT_SOURCE_NOT_AUTHORIZED_FOR_PLAN_PURCHASE';
-      throw err;
-    }
+      if (sourceDevice.ownerType === 'MERCHANT' || !isSourceAdmin || paymentRecord.merchant) {
+        await auditService.logAction({
+          userId,
+          userType: 'user',
+          action: 'ADMIN_PLAN_PAYMENT_REJECTED',
+          details: {
+            transactionId: cleanTrxId,
+            reason: 'MERCHANT_DEVICE_NOT_ALLOWED',
+            deviceId: sourceDevice?._id,
+            androidId: sourceDevice?.androidId,
+            plan: targetPlan.name,
+          },
+        }).catch(() => {});
+        const err = new ApiError(400, 'Payment source is not authorized for plan purchases. Transactions from merchant devices cannot be used to activate FastPay subscriptions.', [], '', {
+          code: 'PAYMENT_SOURCE_NOT_AUTHORIZED_FOR_PLAN_PURCHASE',
+          userMessage: 'This transaction is not valid for FastPay platform payment.',
+        });
+        err.code = 'PAYMENT_SOURCE_NOT_AUTHORIZED_FOR_PLAN_PURCHASE';
+        throw err;
+      }
 
-    if (paymentRecord.ownerType !== 'ADMIN') {
-      paymentRecord.ownerType = 'ADMIN';
-    }
+      if (paymentRecord.ownerType !== 'ADMIN') {
+        paymentRecord.ownerType = 'ADMIN';
+      }
 
-    if (!hasActiveAdminActivation) {
-      await auditService.logAction({
-        userId,
-        userType: 'user',
-        action: 'ADMIN_PLAN_PAYMENT_REJECTED',
-        details: {
-          transactionId: cleanTrxId,
-          reason: 'INVALID_ADMIN_ACTIVATION',
-          deviceId: sourceDevice._id,
-          androidId: sourceDevice.androidId,
-          plan: targetPlan.name,
-        },
-      }).catch(() => {});
-      const err = new ApiError(400, 'The Admin payment gateway device does not have an active activation.');
-      err.code = 'INVALID_ADMIN_ACTIVATION';
-      throw err;
+      if (!hasActiveAdminActivation) {
+        await auditService.logAction({
+          userId,
+          userType: 'user',
+          action: 'ADMIN_PLAN_PAYMENT_REJECTED',
+          details: {
+            transactionId: cleanTrxId,
+            reason: 'INVALID_ADMIN_ACTIVATION',
+            deviceId: sourceDevice._id,
+            androidId: sourceDevice.androidId,
+            plan: targetPlan.name,
+          },
+        }).catch(() => {});
+        const err = new ApiError(400, 'The Admin payment gateway device does not have an active activation.');
+        err.code = 'INVALID_ADMIN_ACTIVATION';
+        throw err;
+      }
     }
 
     // 6. Check Payment Provider Match
@@ -474,9 +476,30 @@ const submitApplication = async ({
     await merchant.save();
   }
 
+  // Ensure default Brand exists for the merchant
+  const Brand = require('../models/Brand');
+  let defaultBrand = await Brand.findOne({ merchant: merchant._id });
+  if (!defaultBrand) {
+    const slug = (companyName.trim() || user?.name || 'brand')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '') + `-${Date.now().toString().slice(-4)}`;
+    defaultBrand = await Brand.create({
+      merchant: merchant._id,
+      name: companyName.trim() || user?.name || 'Primary Brand',
+      slug,
+      status: 'ACTIVE',
+      submissionStatus: 'NOT_SUBMITTED',
+      reviewStatus: 'NONE',
+    }).catch(() => null);
+  }
+
   if (user) {
     user.role = 'MERCHANT';
     user.merchant = merchant._id;
+    if (defaultBrand && !user.brand) {
+      user.brand = defaultBrand._id;
+    }
     await user.save();
   }
 
