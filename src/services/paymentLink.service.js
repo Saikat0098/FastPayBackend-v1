@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const PaymentLink = require('../models/PaymentLink');
 const Brand = require('../models/Brand');
 const Merchant = require('../models/Merchant');
@@ -5,12 +6,30 @@ const MerchantGateway = require('../models/MerchantGateway');
 const ApiError = require('../utils/apiError');
 const crypto = require('crypto');
 
-const createLink = async ({ merchantId, brandId, title, amount, customerName, customerPhone, customerEmail, expiresInHours = 24 }) => {
+const createLink = async ({
+  merchantId,
+  brandId,
+  title,
+  description = '',
+  amount,
+  currency = 'BDT',
+  customerName = '',
+  customerPhone = '',
+  customerEmail = '',
+  expiryType = 'DAYS',
+  expiresInDays = 30,
+  expiresInHours,
+  expiresAt: customExpiresAt,
+  isLifetime = false,
+  collectCustomerInfo = {},
+  delivery = {},
+}) => {
   if (!merchantId) throw new ApiError(403, 'Tenant context missing');
+  if (!title || !title.trim()) throw new ApiError(400, 'Payment link title is required');
+  if (!amount || Number(amount) <= 0) throw new ApiError(400, 'Amount must be greater than 0');
 
   let resolvedBrand = null;
   if (brandId) {
-    const mongoose = require('mongoose');
     if (!mongoose.Types.ObjectId.isValid(brandId)) {
       throw new ApiError(400, 'Invalid Brand ID format');
     }
@@ -30,9 +49,50 @@ const createLink = async ({ merchantId, brandId, title, amount, customerName, cu
     await checkBrandOperationalStatus(resolvedBrand);
   }
 
-  const expiresAt = new Date(Date.now() + Number(expiresInHours) * 60 * 60 * 1000);
-  const maxAttempts = 5;
+  // Calculate Expiration
+  let resolvedExpiryType = (expiryType || 'DAYS').toUpperCase();
+  let resolvedIsLifetime = false;
+  let resolvedExpiresAt = null;
+  let resolvedDays = 30;
 
+  if (resolvedExpiryType === 'LIFETIME' || isLifetime === true) {
+    resolvedIsLifetime = true;
+    resolvedExpiryType = 'LIFETIME';
+    resolvedExpiresAt = null;
+  } else if (resolvedExpiryType === 'DATE' && customExpiresAt) {
+    resolvedExpiresAt = new Date(customExpiresAt);
+    resolvedIsLifetime = false;
+    resolvedExpiryType = 'DATE';
+  } else {
+    resolvedDays = Number(expiresInDays) || (expiresInHours ? Math.max(Math.round(Number(expiresInHours) / 24), 1) : 30);
+    resolvedExpiresAt = new Date(Date.now() + resolvedDays * 24 * 60 * 60 * 1000);
+    resolvedIsLifetime = false;
+    resolvedExpiryType = 'DAYS';
+  }
+
+  // Sanitize Customer Info Configuration
+  const sanitizedCustomerInfo = {
+    name: Boolean(collectCustomerInfo?.name || collectCustomerInfo?.collectName),
+    email: Boolean(collectCustomerInfo?.email || collectCustomerInfo?.collectEmail),
+    phone: Boolean(collectCustomerInfo?.phone || collectCustomerInfo?.collectPhone),
+    address: Boolean(collectCustomerInfo?.address || collectCustomerInfo?.collectAddress),
+  };
+
+  // Sanitize Post-Payment Delivery Configuration (Stored separately from products)
+  const isDeliveryEnabled = Boolean(delivery?.enabled);
+  const sanitizedDelivery = {
+    enabled: isDeliveryEnabled,
+    type: delivery?.type || 'LINK',
+    link: (delivery?.link || '').trim(),
+    text: delivery?.text || '',
+    fileUrl: (delivery?.fileUrl || '').trim(),
+    fileName: (delivery?.fileName || '').trim(),
+    image: (delivery?.image || '').trim(),
+    buttonText: (delivery?.buttonText || 'Access / Download').trim(),
+    content: delivery?.content || '',
+  };
+
+  const maxAttempts = 5;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const generatedCode = `pl_${crypto.randomBytes(8).toString('hex')}`;
     try {
@@ -41,13 +101,21 @@ const createLink = async ({ merchantId, brandId, title, amount, customerName, cu
         brand: resolvedBrand ? resolvedBrand._id : null,
         code: generatedCode,
         uniqueCode: generatedCode,
-        title,
+        title: title.trim(),
+        description: (description || '').trim(),
         amount: Number(amount),
+        currency: currency.toUpperCase(),
         customerName: customerName || '',
         customerPhone: customerPhone || '',
         customerEmail: customerEmail || '',
-        status: 'PENDING',
-        expiresAt,
+        expiryType: resolvedExpiryType,
+        expiresInDays: resolvedDays,
+        isLifetime: resolvedIsLifetime,
+        expiresAt: resolvedExpiresAt,
+        collectCustomerInfo: sanitizedCustomerInfo,
+        delivery: sanitizedDelivery,
+        status: 'ACTIVE',
+        isActive: true,
       });
       return link;
     } catch (err) {
@@ -87,13 +155,31 @@ const getPublicLink = async (code) => {
     }
   }
 
-  if (link.expiresAt && new Date(link.expiresAt) < new Date()) {
+  // Check Expiration (Only if not Lifetime)
+  if (!link.isLifetime && link.expiresAt && new Date(link.expiresAt) < new Date()) {
     link.status = 'EXPIRED';
     await link.save();
-    throw new ApiError(410, 'Payment link has expired');
+    const expErr = new ApiError(410, 'Payment link has expired');
+    expErr.code = 'LINK_EXPIRED';
+    throw expErr;
   }
 
   const linkObj = link.toObject ? link.toObject() : { ...link };
+
+  // DELIVERY SECURITY:
+  // Redact sensitive delivery content (link, text, files) before payment.
+  // Unpaid public visitor should only see if delivery is configured, not the secret payload.
+  const hasDelivery = Boolean(link.delivery?.enabled);
+  linkObj.hasDelivery = hasDelivery;
+  if (hasDelivery) {
+    linkObj.delivery = {
+      enabled: true,
+      type: link.delivery.type || 'LINK',
+      buttonText: link.delivery.buttonText || 'Access / Download',
+    };
+  } else {
+    linkObj.delivery = { enabled: false };
+  }
 
   // Resolve Gateways for Brand / Merchant
   const { sortGatewaysByCanonicalOrder } = require('../utils/gatewayOrdering');
@@ -117,7 +203,7 @@ const getPublicLink = async (code) => {
     linkObj.gateways = [];
   }
 
-  // Canonical Live Payment Resolution (Exact Same Logic as CheckoutSession)
+  // Canonical Live Payment Resolution
   let brandLivePayment = { enabled: false, gateways: [] };
   if (link.brand && link.brand.livePayment) {
     brandLivePayment = link.brand.livePayment;
@@ -153,12 +239,13 @@ const getPublicLink = async (code) => {
 };
 
 /**
- * Establish a CheckoutSession for a Payment Link
- * Enables full live payment and unified checkout pipeline
+ * Establish a brand-new CheckoutSession for a Payment Link.
+ * The Payment Link remains active and reusable for multiple customers.
+ * Each invocation generates an independent CheckoutSession.
  */
 const createPaymentLinkSession = async (
   code,
-  { customerName, customerPhone, customerEmail, customerAddress, customFields = {}, returnUrl, cancelUrl } = {}
+  { customerName = '', customerPhone = '', customerEmail = '', customerAddress = '', customFields = {}, returnUrl, cancelUrl } = {}
 ) => {
   if (!code) throw new ApiError(400, 'Payment link code is required');
   const link = await PaymentLink.findOne({
@@ -172,13 +259,17 @@ const createPaymentLinkSession = async (
     await checkBrandOperationalStatus(link.brand);
   }
 
-  if (link.expiresAt && new Date(link.expiresAt) < new Date()) {
+  // Check Expiration
+  if (!link.isLifetime && link.expiresAt && new Date(link.expiresAt) < new Date()) {
     link.status = 'EXPIRED';
     await link.save();
-    throw new ApiError(410, 'Payment link has expired');
+    const expErr = new ApiError(410, 'Payment link has expired');
+    expErr.code = 'LINK_EXPIRED';
+    throw expErr;
   }
 
-  const orderId = `ORD-PL-${link.code.slice(-6).toUpperCase()}-${Date.now().toString(36).toUpperCase()}`;
+  // Unique Order ID per customer session
+  const orderId = `ORD-PL-${link.code.slice(-6).toUpperCase()}-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
   const checkoutSessionService = require('./checkoutSession.service');
 
   const frontendBase =
@@ -193,12 +284,27 @@ const createPaymentLinkSession = async (
     cancelUrl ||
     `${frontendBase.replace(/\/+$/, '')}/links/public/${link.code}?order=${orderId}&status=cancelled`;
 
+  // Construct Delivery payload for the session
+  const sessionDelivery = link.delivery && link.delivery.enabled
+    ? {
+        enabled: true,
+        type: link.delivery.type || 'LINK',
+        link: link.delivery.link || '',
+        text: link.delivery.text || '',
+        fileUrl: link.delivery.fileUrl || '',
+        fileName: link.delivery.fileName || '',
+        image: link.delivery.image || '',
+        buttonText: link.delivery.buttonText || 'Access / Download',
+        content: link.delivery.content || '',
+      }
+    : { enabled: false };
+
   const session = await checkoutSessionService.createCheckoutSession({
     merchantId: link.merchant?._id || link.merchant,
     brandId: link.brand?._id || link.brand || null,
     orderId,
     amount: link.amount,
-    currency: 'BDT',
+    currency: link.currency || 'BDT',
     returnUrl: defaultReturnUrl,
     cancelUrl: defaultCancelUrl,
     customerName: (customerName || link.customerName || '').trim(),
@@ -211,6 +317,17 @@ const createPaymentLinkSession = async (
       paymentLinkId: link._id.toString(),
       paymentLinkCode: link.code,
       title: link.title,
+      productName: link.title,
+      delivery: sessionDelivery,
+      items: [
+        {
+          name: link.title,
+          quantity: 1,
+          unitPrice: link.amount,
+          total: link.amount,
+          instantDelivery: sessionDelivery,
+        },
+      ],
     },
     expiresInMinutes: 60,
   });
@@ -218,9 +335,18 @@ const createPaymentLinkSession = async (
   return session;
 };
 
+const deleteLink = async (linkId, merchantId) => {
+  if (!merchantId) throw new ApiError(403, 'Tenant context missing');
+  const link = await PaymentLink.findOneAndDelete({ _id: linkId, merchant: merchantId });
+  if (!link) throw new ApiError(404, 'Payment link not found or access denied');
+  return link;
+};
+
 module.exports = {
   createLink,
   getLinks,
   getPublicLink,
   createPaymentLinkSession,
+  deleteLink,
 };
+

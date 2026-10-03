@@ -12,5 +12,6 @@ router.post('/public/:code/session', paymentLinkController.createPaymentLinkSess
 // Authenticated merchant routes
 router.post('/', verifyToken, enforceTenant, requireActiveSubscription, paymentLinkController.createLink);
 router.get('/', verifyToken, enforceTenant, paymentLinkController.getLinks);
+router.delete('/:id', verifyToken, enforceTenant, paymentLinkController.deleteLink);
 
 module.exports = router;

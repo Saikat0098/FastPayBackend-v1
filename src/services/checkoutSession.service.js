@@ -297,6 +297,47 @@ const getPublicCheckoutSession = async (sessionId) => {
   sessionObj.paymentMode = session.paymentMode || 'UNSPECIFIED';
   sessionObj.selectedGateway = session.selectedGateway || '';
 
+  const checkoutSource = session.customFields?.source || 'main_checkout';
+  sessionObj.source = checkoutSource;
+
+  // Delivery Security: Only verified sessions can view the delivery content
+  if (session.status === 'VERIFIED') {
+    if (checkoutSource === 'payment_link') {
+      sessionObj.delivery = session.customFields?.delivery || null;
+    } else if (checkoutSource === 'landing_page') {
+      const deliveryItems = (session.customFields?.items || []).filter((it) => it.instantDelivery?.enabled);
+      if (deliveryItems.length > 0) {
+        sessionObj.deliveryItems = deliveryItems;
+        sessionObj.delivery = deliveryItems[0]?.instantDelivery || null;
+      } else if (session.customFields?.delivery?.enabled) {
+        sessionObj.delivery = session.customFields.delivery;
+      }
+    } else {
+      sessionObj.delivery = null;
+      sessionObj.deliveryItems = null;
+    }
+  } else {
+    // Unverified/pending sessions do not expose secret links or text
+    if (sessionObj.customFields) {
+      if (sessionObj.customFields.delivery) {
+        sessionObj.customFields.delivery = { enabled: Boolean(sessionObj.customFields.delivery.enabled) };
+      }
+      if (Array.isArray(sessionObj.customFields.items)) {
+        sessionObj.customFields.items = sessionObj.customFields.items.map((it) => {
+          if (it.instantDelivery) {
+            return {
+              ...it,
+              instantDelivery: { enabled: Boolean(it.instantDelivery.enabled) },
+            };
+          }
+          return it;
+        });
+      }
+    }
+    sessionObj.delivery = null;
+    sessionObj.deliveryItems = null;
+  }
+
   return sessionObj;
 };
 

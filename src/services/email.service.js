@@ -1030,6 +1030,14 @@ const sendOrderConfirmationEmail = async ({
       items = order.items;
     } else if (Array.isArray(session?.customFields?.items) && session.customFields.items.length > 0) {
       items = session.customFields.items;
+    } else if (session?.customFields?.delivery?.enabled) {
+      items = [{
+        name: session.customFields.title || session.customFields.productName || 'Order Item',
+        quantity: 1,
+        unitPrice: session.amount || 0,
+        total: session.amount || 0,
+        instantDelivery: session.customFields.delivery,
+      }];
     } else if (order?.product) {
       items = [{
         name: order.product.name || '',

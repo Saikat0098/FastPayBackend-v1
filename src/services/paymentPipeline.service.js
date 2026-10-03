@@ -40,6 +40,7 @@ const { emitPaymentUpdated, emitLivePaymentUpdated } = require('../socket/socket
 const processVerifiedPayment = async ({
   payment: rawPayment,
   session: rawSession = null,
+  checkoutSession: rawCheckoutSession = null,
   liveSession: rawLiveSession = null,
   merchantId = null,
   brandId = null,
@@ -63,11 +64,66 @@ const processVerifiedPayment = async ({
   const isAdminPayment = paymentDoc.ownerType === 'ADMIN';
 
   // 2. Resolve & Hydrate CheckoutSession Document
-  let checkoutSession = rawSession;
-  if (typeof rawSession === 'string' || rawSession instanceof mongoose.Types.ObjectId) {
-    checkoutSession = await CheckoutSession.findById(rawSession);
-  } else if (!checkoutSession && rawLiveSession?.checkoutSession) {
-    checkoutSession = await CheckoutSession.findById(rawLiveSession.checkoutSession);
+  const targetSessionInput = rawSession || rawCheckoutSession;
+  let checkoutSession = null;
+  if (targetSessionInput instanceof mongoose.Document) {
+    checkoutSession = targetSessionInput;
+  } else if (typeof targetSessionInput === 'string' || targetSessionInput instanceof mongoose.Types.ObjectId) {
+    if (mongoose.Types.ObjectId.isValid(targetSessionInput)) {
+      checkoutSession = await CheckoutSession.findById(targetSessionInput);
+    }
+    if (!checkoutSession && typeof targetSessionInput === 'string') {
+      checkoutSession = await CheckoutSession.findOne({ sessionId: targetSessionInput });
+    }
+  } else if (targetSessionInput && typeof targetSessionInput === 'object') {
+    const sId = targetSessionInput.sessionId || targetSessionInput._id;
+    if (sId) {
+      if (mongoose.Types.ObjectId.isValid(sId)) {
+        checkoutSession = await CheckoutSession.findById(sId);
+      }
+      if (!checkoutSession && typeof sId === 'string') {
+        checkoutSession = await CheckoutSession.findOne({ sessionId: sId });
+      }
+    }
+  }
+
+  // 3. Resolve & Hydrate LivePaymentSession Document
+  let liveSessionDoc = null;
+  if (rawLiveSession instanceof mongoose.Document) {
+    liveSessionDoc = rawLiveSession;
+  } else if (typeof rawLiveSession === 'string' || rawLiveSession instanceof mongoose.Types.ObjectId) {
+    if (mongoose.Types.ObjectId.isValid(rawLiveSession)) {
+      liveSessionDoc = await LivePaymentSession.findById(rawLiveSession);
+    }
+    if (!liveSessionDoc && typeof rawLiveSession === 'string') {
+      liveSessionDoc = await LivePaymentSession.findOne({ liveSessionId: rawLiveSession });
+    }
+  } else if (rawLiveSession && typeof rawLiveSession === 'object') {
+    const targetId = rawLiveSession._id || rawLiveSession.liveSessionId || rawLiveSession.session?._id || rawLiveSession.session?.liveSessionId;
+    if (targetId) {
+      if (mongoose.Types.ObjectId.isValid(targetId)) {
+        liveSessionDoc = await LivePaymentSession.findById(targetId);
+      }
+      if (!liveSessionDoc && typeof targetId === 'string') {
+        liveSessionDoc = await LivePaymentSession.findOne({ liveSessionId: targetId });
+      }
+    }
+  }
+  
+  if (!liveSessionDoc && checkoutSession) {
+    liveSessionDoc = await LivePaymentSession.findOne({
+      checkoutSession: checkoutSession._id,
+      status: { $in: ['PENDING', 'VERIFIED'] },
+    }).sort({ createdAt: -1 });
+  }
+
+  // If checkoutSession was not passed directly, resolve from liveSessionDoc
+  if (!checkoutSession && liveSessionDoc?.checkoutSession) {
+    if (mongoose.Types.ObjectId.isValid(liveSessionDoc.checkoutSession)) {
+      checkoutSession = await CheckoutSession.findById(liveSessionDoc.checkoutSession);
+    } else if (typeof liveSessionDoc.checkoutSession === 'string') {
+      checkoutSession = await CheckoutSession.findOne({ sessionId: liveSessionDoc.checkoutSession });
+    }
   }
 
   // Ensure CheckoutSession is hydrated with brand and merchant
@@ -75,17 +131,6 @@ const processVerifiedPayment = async ({
     try {
       await checkoutSession.populate('merchant brand');
     } catch (_) {}
-  }
-
-  // 3. Resolve & Hydrate LivePaymentSession Document
-  let liveSessionDoc = rawLiveSession;
-  if (typeof rawLiveSession === 'string' || rawLiveSession instanceof mongoose.Types.ObjectId) {
-    liveSessionDoc = await LivePaymentSession.findById(rawLiveSession);
-  } else if (!liveSessionDoc && checkoutSession) {
-    liveSessionDoc = await LivePaymentSession.findOne({
-      checkoutSession: checkoutSession._id,
-      status: { $in: ['PENDING', 'VERIFIED'] },
-    }).sort({ createdAt: -1 });
   }
 
   // 4. Resolve Context IDs (Merchant & Brand)
@@ -310,6 +355,30 @@ const processVerifiedPayment = async ({
         }
       } catch (lpOrderErr) {
         logger.warn(`[LandingPageOrder Sync Error] ${lpOrderErr.message}`);
+      }
+
+      // 8.3 Synchronize PaymentLink Metrics (if source is payment_link)
+      if (checkoutSession?.customFields?.source === 'payment_link') {
+        try {
+          const PaymentLink = require('../models/PaymentLink');
+          const pLinkId = checkoutSession.customFields.paymentLinkId;
+          const pLinkCode = checkoutSession.customFields.paymentLinkCode;
+          if (pLinkId || pLinkCode) {
+            await PaymentLink.updateOne(
+              {
+                $or: [
+                  ...(pLinkId && mongoose.Types.ObjectId.isValid(pLinkId) ? [{ _id: pLinkId }] : []),
+                  ...(pLinkCode ? [{ code: pLinkCode }, { uniqueCode: pLinkCode }] : []),
+                ],
+              },
+              {
+                $inc: { totalPaymentsCount: 1, totalRevenue: claimedPayment.amount || 0 },
+              }
+            ).catch(() => {});
+          }
+        } catch (pLinkErr) {
+          logger.warn(`[PaymentLink Metrics Sync Error] ${pLinkErr.message}`);
+        }
       }
     }
   }

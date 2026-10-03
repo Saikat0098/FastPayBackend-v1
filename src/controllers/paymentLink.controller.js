@@ -58,9 +58,20 @@ const createPaymentLinkSession = asyncHandler(async (req, res) => {
   );
 });
 
+const deleteLink = asyncHandler(async (req, res) => {
+  const merchantId = req.merchantId || req.merchant?._id;
+  await paymentLinkService.deleteLink(req.params.id, merchantId);
+
+  return res.status(200).json({
+    success: true,
+    message: 'Payment link deleted successfully',
+  });
+});
+
 module.exports = {
   createLink,
   getLinks,
   getPublicLink,
   createPaymentLinkSession,
+  deleteLink,
 };
